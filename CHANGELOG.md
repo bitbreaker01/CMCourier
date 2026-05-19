@@ -52,6 +52,46 @@ Hitos operacionales fuera del documento de roadmap:
 
 ---
 
+## [0.95.0] — 2026-05-19 — **Métricas sub-stage en S4 (granularidad para diagnose)**
+
+Operador productivo con prep lento. `cmcourier diagnose` (spec 092)
+puede decir "S4 es el cuello", pero NO dónde dentro de S4 se va el
+tiempo. S4 hace 4 cosas distintas: source_stat, copy_native (o
+encode_pdf), discover_pages, dst_stat.
+
+### Added
+
+- **`AssemblyTimings`** dataclass en `pdf_assembler.py` con campos
+  opcionales por sub-stage + `path_kind`.
+- **`PdfAssembler.assemble_traced(doc)`**: retorna
+  `tuple[StagedFile, AssemblyTimings]`. Mide cada sub-paso con
+  `time.perf_counter()`.
+- **`_pool_assemble_traced`** en `pool.py`: análogo para el
+  ProcessPool, devuelve los timings vía pickle al proceso padre.
+- **`StagedPipeline._record_s4_substages`** (helper estático):
+  registra cada timing > 0 como `S4.<sub>` en el
+  `MetricsRecorder`. Campos en 0 (camino no tomado) se skipean.
+
+### Changed
+
+- **`StagedPipeline._stage_s4_one`** ahora usa el path traced.
+  Cero cambio funcional aparte del logging adicional de timings.
+
+### Notas
+
+- **Backward-compat total**: `assemble(doc)` sigue retornando solo
+  `StagedFile`. El método nuevo es `assemble_traced(doc)`.
+- **Output de `cmcourier diagnose --latest` post-093**: además de
+  S1-S5, muestra buckets `S4.copy_native`, `S4.source_stat`,
+  `S4.encode_pdf`, etc. con sus propios %, p50, p95. Permite
+  identificar EXACTAMENTE dónde dentro de S4 se va el tiempo
+  (disco source, CPU del PDF assembly, o disco temp).
+- **8 tests nuevos** entre
+  `tests/unit/adapters/assembly/test_pdf_assembler_traced.py` y
+  `tests/unit/orchestrators/test_s4_substage_metrics.py`.
+
+---
+
 ## [0.94.0] — 2026-05-19 — **Nuevo comando `cmcourier diagnose` (análisis de bottlenecks reproducible)**
 
 Operador productivo reportó prep lento (350s para 200 docs pesados,

@@ -24,11 +24,12 @@ contenido de imágenes ni valores de metadatos.
 
 from __future__ import annotations
 
-__all__ = ["AssemblerConfig", "PdfAssembler"]
+__all__ = ["AssemblerConfig", "AssemblyTimings", "PdfAssembler"]
 
 import logging
 import shutil
 import tempfile
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -72,6 +73,35 @@ class AssemblerConfig:
     image_type_map: Mapping[str, str] = field(default_factory=_default_image_type_map)
 
 
+@dataclass(frozen=True, slots=True)
+class AssemblyTimings:
+    """093: timings sub-stage de un assembly individual.
+
+    Devuelto por :meth:`PdfAssembler.assemble_traced`. Los campos no
+    relevantes para el camino tomado quedan en 0.0 (no None — facilita
+    el agregado por el orquestador sin manejo especial).
+
+    ``path_kind`` identifica el camino tomado:
+
+    * ``"native_pdf"`` — :meth:`_passthrough_native_pdf_traced`
+      (``shutil.copy2`` del PDF fuente)
+    * ``"paged_img2pdf"`` — :meth:`_assemble_paged_traced` con el
+      fast-path img2pdf
+    * ``"paged_fallback"`` — :meth:`_assemble_paged_traced` con el
+      fallback Pillow + PyPDF2
+    """
+
+    path_kind: str
+    # Camino native_pdf:
+    source_stat_ms: float = 0.0  # Path.is_file() del fuente
+    copy_native_ms: float = 0.0  # shutil.copy2 (usualmente el bulk)
+    # Camino paged_*:
+    discover_pages_ms: float = 0.0  # glob + sort de las páginas
+    encode_pdf_ms: float = 0.0  # img2pdf.convert o el fallback
+    # Común a ambos:
+    dst_stat_ms: float = 0.0  # stat del staged para size_bytes
+
+
 # ---------------------------------------------------------------------------
 # Assembler
 # ---------------------------------------------------------------------------
@@ -88,10 +118,28 @@ class PdfAssembler(IAssembler):
     # ----------------------------------------------------------- API pública
 
     def assemble(self, document: RVABREPDocument) -> StagedFile:
-        """Convierte *document* en un único PDF staged."""
+        """Convierte *document* en un único PDF staged.
+
+        Wrapper sin instrumentación. Para profiling, usar
+        :meth:`assemble_traced` (093) que devuelve además los timings
+        sub-stage.
+        """
+        staged, _ = self.assemble_traced(document)
+        return staged
+
+    def assemble_traced(self, document: RVABREPDocument) -> tuple[StagedFile, AssemblyTimings]:
+        """093: como :meth:`assemble` pero retorna además los timings
+        por sub-stage (source_stat, copy/discover, encode, dst_stat).
+
+        Cada sub-stage se mide con ``time.perf_counter()`` y se devuelve
+        en ms. Los timings se loguean en el orquestador via
+        ``MetricsRecorder.record_stage(stage="S4.<sub>")`` y aparecen
+        en el ``batch_summary`` con el resto de las etapas, lo que
+        permite que ``cmcourier diagnose`` los muestre.
+        """
         if document.is_pdf:
-            return self._passthrough_native_pdf(document)
-        return self._assemble_paged(document)
+            return self._passthrough_native_pdf_traced(document)
+        return self._assemble_paged_traced(document)
 
     # ----------------------------------------------------------- internos
 
@@ -101,21 +149,43 @@ class PdfAssembler(IAssembler):
             return Path(tempfile.gettempdir()) / _DIVERTED_DIR_NAME
         return configured
 
-    def _passthrough_native_pdf(self, doc: RVABREPDocument) -> StagedFile:
+    def _passthrough_native_pdf_traced(
+        self, doc: RVABREPDocument
+    ) -> tuple[StagedFile, AssemblyTimings]:
+        """093: PDF nativo con timings sub-stage."""
         src = self._cfg.source_root / doc.image_path / doc.file_name
+        t0 = time.perf_counter()
         if not src.is_file():
             raise SourceFileMissingError(file_path=str(src))
-        dst = self.temp_dir / f"{doc.txn_num}.pdf"
-        shutil.copy2(src, dst)
-        return StagedFile(
-            path=dst,
-            size_bytes=dst.stat().st_size,
-            page_count=doc.total_pages,
-        )
+        source_stat_ms = (time.perf_counter() - t0) * 1000.0
 
-    def _assemble_paged(self, doc: RVABREPDocument) -> StagedFile:
+        dst = self.temp_dir / f"{doc.txn_num}.pdf"
+        t1 = time.perf_counter()
+        shutil.copy2(src, dst)
+        copy_ms = (time.perf_counter() - t1) * 1000.0
+
+        t2 = time.perf_counter()
+        size_bytes = dst.stat().st_size
+        dst_stat_ms = (time.perf_counter() - t2) * 1000.0
+
+        staged = StagedFile(path=dst, size_bytes=size_bytes, page_count=doc.total_pages)
+        timings = AssemblyTimings(
+            path_kind="native_pdf",
+            source_stat_ms=source_stat_ms,
+            copy_native_ms=copy_ms,
+            dst_stat_ms=dst_stat_ms,
+        )
+        return staged, timings
+
+    def _assemble_paged_traced(self, doc: RVABREPDocument) -> tuple[StagedFile, AssemblyTimings]:
+        """093: TIFF/JPEG paginado con timings sub-stage."""
+        t0 = time.perf_counter()
         pages = self._discover_pages(doc)
+        discover_ms = (time.perf_counter() - t0) * 1000.0
+
         output = self.temp_dir / f"{doc.txn_num}.pdf"
+        used_fallback = False
+        t1 = time.perf_counter()
         try:
             self._try_img2pdf(pages, output)
         except Exception as primary:  # noqa: BLE001 — img2pdf levanta una superficie amplia
@@ -123,6 +193,7 @@ class PdfAssembler(IAssembler):
                 "assembler: img2pdf fast path failed, falling back",
                 extra={"txn_num": doc.txn_num, "reason": str(primary)},
             )
+            used_fallback = True
             try:
                 self._fallback_pillow_pypdf2(pages, output)
             except Exception as secondary:
@@ -130,11 +201,20 @@ class PdfAssembler(IAssembler):
                     txn_num=doc.txn_num,
                     reason=f"img2pdf and fallback both failed: {secondary!r}",
                 ) from secondary
-        return StagedFile(
-            path=output,
-            size_bytes=output.stat().st_size,
-            page_count=len(pages),
+        encode_ms = (time.perf_counter() - t1) * 1000.0
+
+        t2 = time.perf_counter()
+        size_bytes = output.stat().st_size
+        dst_stat_ms = (time.perf_counter() - t2) * 1000.0
+
+        staged = StagedFile(path=output, size_bytes=size_bytes, page_count=len(pages))
+        timings = AssemblyTimings(
+            path_kind="paged_fallback" if used_fallback else "paged_img2pdf",
+            discover_pages_ms=discover_ms,
+            encode_pdf_ms=encode_ms,
+            dst_stat_ms=dst_stat_ms,
         )
+        return staged, timings
 
     def _discover_pages(self, doc: RVABREPDocument) -> list[Path]:
         source_dir = self._cfg.source_root / doc.image_path
