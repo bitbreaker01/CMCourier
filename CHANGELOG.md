@@ -52,6 +52,49 @@ Hitos operacionales fuera del documento de roadmap:
 
 ---
 
+## [0.93.0] — 2026-05-18 — **Script de benchmark para S4 pool comparison (POC sin cambio de comportamiento)**
+
+Operador reportó que S4 era lento con archivos chicos y sospechó
+que el ProcessPool no daba paralelismo real. En vez de aceptar la
+intuición o rechazarla, **medimos**. Spec 091 agrega un script de
+benchmark al repo.
+
+### Added
+
+- **`scripts/bench-s4-pool-comparison.py`**: script standalone que
+  compara Serial vs ThreadPool vs ProcessPool sobre 4 workloads
+  sintéticos (PDFs chicos, PDFs grandes, TIFFs paginados, mix
+  realista). CLI: `--docs N --workers N --runs N --workload {small|large|tiff|mixed|all}`.
+
+### Resultados de referencia (Linux, 8 cores físicos)
+
+```
+Workload          | Serial      | ThreadPool  | ProcessPool | Mejor
+Small (PDF 100KB) | 1494 docs/s |  470 docs/s |  513 docs/s | Serial
+Large (PDF 5MB)   |   78 docs/s |  224 docs/s |  283 docs/s | ProcessPool 1.7×
+TIFF (3 pages)    |   77 docs/s |   69 docs/s |  283 docs/s | ProcessPool 4.1×
+Mixed (real)      |  295 docs/s |  289 docs/s |  425 docs/s | ProcessPool 1.5×
+```
+
+**Conclusión basada en datos**: el default actual
+(`processing.s4_use_processes: true`) gana en 3 de 4 workloads
+productivos. **NO se cambia comportamiento**. El operador puede
+opt-out con el toggle existente si su mix es mayormente Small.
+
+### Notas
+
+- **Cero cambios en código productivo**. Es una herramienta
+  manual en `scripts/`.
+- En Windows el `spawn` es más caro que `fork` de Linux; los
+  números pueden diferir. El operador debe medir en su ambiente
+  antes de tomar decisiones.
+- Si en Windows el ProcessPool pierde para Small Y el workload es
+  mayormente Small, una spec futura podría rutear por tipo/tamaño:
+  ThreadPool inline para PDF nativo chico, ProcessPool para
+  TIFF/grande. **NO se implementa speculativamente hoy.**
+
+---
+
 ## [0.92.0] — 2026-05-18 — **`cmis.upload_chunk_bytes` configurable (fix GIL contention en uploads paralelos)**
 
 Bug crítico de throughput. Operador reportó: 30 workers paralelos
