@@ -52,6 +52,46 @@ Hitos operacionales fuera del documento de roadmap:
 
 ---
 
+## [0.94.0] — 2026-05-19 — **Nuevo comando `cmcourier diagnose` (análisis de bottlenecks reproducible)**
+
+Operador productivo reportó prep lento (350s para 200 docs pesados,
+~1.75s/doc). Pedidos ad-hoc en PowerShell para extraer métricas de
+los `metrics-*.jsonl` fallaban silenciosamente. **Necesitamos
+diagnóstico versionado, no shell improvisado.**
+
+### Added
+
+- **`cmcourier diagnose --config <yaml> --latest`**: lee
+  `observability.log_dir/metrics-*.jsonl`, parsea los eventos
+  `batch_summary`, calcula tabla por stage (count / avg / p50 / p95
+  / sum / %) y detecta el cuello (stage con > 50% del wall).
+- **`--batch <id>`**: analiza un batch específico.
+- **`--list`**: lista todos los batches disponibles.
+- **Sugerencias contextuales por patrón**: S4 con alta latencia →
+  sospechas de disco. S5 con alta latencia → sospechas de CMIS
+  server. Cada sugerencia incluye comandos PowerShell concretos
+  para verificar.
+
+### Design notes
+
+- **Fail-loud**: si no hay logs o batch_id no existe, sale con
+  código != 0 + mensaje explicativo. Sin `-ErrorAction
+  SilentlyContinue`.
+- **No depende de SQLite**: solo lee los JSONL. Sirve aunque la
+  tracking DB se haya perdido.
+- **Read-only**: cero modificación de estado.
+
+### Notas
+
+- **Pareja con spec 093 (próxima)**: métricas sub-stage en S4.
+  Cuando shippee 093, el comando muestra el detalle interno
+  (s4_open_source, s4_read_source, s4_assemble_pdf,
+  s4_write_staged) sin requerir cambios adicionales.
+- **15 tests nuevos** en
+  `tests/unit/cli/commands/test_diagnose.py`.
+
+---
+
 ## [0.93.0] — 2026-05-18 — **Script de benchmark para S4 pool comparison (POC sin cambio de comportamiento)**
 
 Operador reportó que S4 era lento con archivos chicos y sospechó
