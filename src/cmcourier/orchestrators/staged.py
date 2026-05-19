@@ -166,6 +166,7 @@ class StagedPipeline:
         document_cache: DocumentCacheService | None = None,
         s4_process_pool: ProcessPoolExecutor | None = None,
         keep_staged_files: bool = False,
+        s4_smart_routing: bool = False,
     ) -> None:
         self._trigger_strategy = trigger_strategy
         self._indexing_service = indexing_service
@@ -224,6 +225,11 @@ class StagedPipeline:
         # default. Flag opt-out para debug (operador necesita
         # inspeccionar el archivo ensamblado después del upload).
         self._keep_staged_files = keep_staged_files
+        # 094: cuando True Y el process pool está activo, los PDF
+        # nativos van inline (thread del prep_workers) en lugar del
+        # process pool. Evita ~30s/doc de overhead en Windows para
+        # docs cuyo trabajo útil (shutil.copy2) NO es CPU bound.
+        self._s4_smart_routing = s4_smart_routing
         # 036: coordinador de `lane`s heavy/light. None cuando el modo
         # dual está apagado (el default) — S5 mantiene el path legacy
         # de pool único.
@@ -890,12 +896,23 @@ class StagedPipeline:
             txn_num=txn,
         ) as timer:
             try:
-                if self._s4_process_pool is not None:
+                # 094: smart routing — los PDF nativos corren inline aun
+                # cuando el process pool está activo. ``shutil.copy2``
+                # libera el GIL durante I/O; el thread del prep_workers
+                # da paralelismo real sin el overhead pickle/IPC/spawn
+                # del process pool (~30s/doc en Windows). Los paginados
+                # TIFF/JPEG siguen yendo al process pool porque
+                # ``img2pdf`` es CPU bound.
+                route_inline = self._s4_process_pool is None or (
+                    self._s4_smart_routing and item.document.is_pdf
+                )
+                if route_inline:
+                    staged, timings = self._assembler.assemble_traced(item.document)
+                else:
+                    assert self._s4_process_pool is not None
                     staged, timings = self._s4_process_pool.submit(
                         _pool_assemble_traced, item.document
                     ).result()
-                else:
-                    staged, timings = self._assembler.assemble_traced(item.document)
                 # 093: sub-stage metrics — aparecen en ``batch_summary``
                 # como buckets propios ("S4.copy_native", "S4.encode_pdf",
                 # etc.) que ``cmcourier diagnose`` muestra junto con S4.

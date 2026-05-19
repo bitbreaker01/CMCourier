@@ -189,6 +189,7 @@ def build_pipeline(
         document_cache=document_cache,
         s4_process_pool=s4_process_pool,
         keep_staged_files=config.assembly.keep_staged_files,
+        s4_smart_routing=config.processing.s4_smart_routing,
     )
 
 
