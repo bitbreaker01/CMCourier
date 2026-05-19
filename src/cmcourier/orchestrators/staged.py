@@ -45,7 +45,8 @@ if TYPE_CHECKING:
     from cmcourier.services.idempotency import IdempotencyCoordinator
 
 from cmcourier.adapters.assembly import PdfAssembler
-from cmcourier.adapters.assembly.pool import _pool_assemble
+from cmcourier.adapters.assembly.pdf_assembler import AssemblyTimings
+from cmcourier.adapters.assembly.pool import _pool_assemble_traced
 from cmcourier.adapters.upload.cmis_uploader import CmisUploader
 from cmcourier.config.schema import AutoTuneConfig, HeavyLightLanesConfig
 from cmcourier.domain.exceptions import (
@@ -890,9 +891,15 @@ class StagedPipeline:
         ) as timer:
             try:
                 if self._s4_process_pool is not None:
-                    staged = self._s4_process_pool.submit(_pool_assemble, item.document).result()
+                    staged, timings = self._s4_process_pool.submit(
+                        _pool_assemble_traced, item.document
+                    ).result()
                 else:
-                    staged = self._assembler.assemble(item.document)
+                    staged, timings = self._assembler.assemble_traced(item.document)
+                # 093: sub-stage metrics — aparecen en ``batch_summary``
+                # como buckets propios ("S4.copy_native", "S4.encode_pdf",
+                # etc.) que ``cmcourier diagnose`` muestra junto con S4.
+                self._record_s4_substages(rec, timings)
             except (SourceFileMissingError, PDFAssemblyFailedError) as exc:
                 timer.mark_failed()
                 if not self._tracking_store.is_stage_done(txn, batch_id, StageStatus.S4_DONE):
@@ -1194,6 +1201,30 @@ class StagedPipeline:
             else:
                 assert self._lane_controller is not None
                 self._lane_controller.release(lane)
+
+    @staticmethod
+    def _record_s4_substages(
+        rec: MetricsRecorder,
+        timings: AssemblyTimings,
+    ) -> None:
+        """093: emite cada sub-stage de S4 al ``MetricsRecorder``.
+
+        Cada substage > 0 se registra como ``S4.<name>``. Los valores
+        en 0 se skipean (camino no tomado: ``copy_native_ms == 0``
+        en el path paginado, ``encode_pdf_ms == 0`` en native_pdf).
+        Aparecen en ``batch_summary`` y ``cmcourier diagnose`` los
+        muestra junto con S4.
+        """
+        if timings.source_stat_ms > 0:
+            rec.record_stage(stage="S4.source_stat", duration_ms=timings.source_stat_ms)
+        if timings.copy_native_ms > 0:
+            rec.record_stage(stage="S4.copy_native", duration_ms=timings.copy_native_ms)
+        if timings.discover_pages_ms > 0:
+            rec.record_stage(stage="S4.discover_pages", duration_ms=timings.discover_pages_ms)
+        if timings.encode_pdf_ms > 0:
+            rec.record_stage(stage="S4.encode_pdf", duration_ms=timings.encode_pdf_ms)
+        if timings.dst_stat_ms > 0:
+            rec.record_stage(stage="S4.dst_stat", duration_ms=timings.dst_stat_ms)
 
     def _cleanup_staged_file(self, staged: StagedFile) -> None:
         """085: borra el archivo ensamblado de ``temp_dir`` post-S5_DONE.

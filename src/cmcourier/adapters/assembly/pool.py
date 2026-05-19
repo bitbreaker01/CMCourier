@@ -27,14 +27,18 @@ picklearlas por nombre.
 
 from __future__ import annotations
 
-__all__ = ["build_s4_process_pool", "_pool_assemble", "_pool_init"]
+__all__ = ["build_s4_process_pool", "_pool_assemble", "_pool_assemble_traced", "_pool_init"]
 
 import logging
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
 
-from cmcourier.adapters.assembly.pdf_assembler import AssemblerConfig, PdfAssembler
+from cmcourier.adapters.assembly.pdf_assembler import (
+    AssemblerConfig,
+    AssemblyTimings,
+    PdfAssembler,
+)
 from cmcourier.domain.models import RVABREPDocument, StagedFile
 
 _log = logging.getLogger(__name__)
@@ -66,6 +70,19 @@ def _pool_assemble(document: RVABREPDocument) -> StagedFile:
     if _worker_assembler is None:  # pragma: no cover — el initializer lo garantiza
         raise RuntimeError("066: _pool_assemble called before _pool_init configured the worker")
     return _worker_assembler.assemble(document)
+
+
+def _pool_assemble_traced(
+    document: RVABREPDocument,
+) -> tuple[StagedFile, AssemblyTimings]:
+    """093: igual que :func:`_pool_assemble` pero devuelve además los
+    timings sub-stage. El orquestador los loguea como ``S4.<sub>`` en
+    el ``MetricsRecorder`` para que aparezcan en el ``batch_summary``."""
+    if _worker_assembler is None:  # pragma: no cover — el initializer lo garantiza
+        raise RuntimeError(
+            "093: _pool_assemble_traced called before _pool_init configured the worker"
+        )
+    return _worker_assembler.assemble_traced(document)
 
 
 def build_s4_process_pool(
