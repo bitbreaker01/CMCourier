@@ -52,6 +52,57 @@ Hitos operacionales fuera del documento de roadmap:
 
 ---
 
+## [0.96.0] — 2026-05-19 — **Smart routing PDF/TIFF en S4 (evita overhead del ProcessPool en Windows)**
+
+Datos reales del operador productivo (Windows, 200 docs mixtos)
+mostraron un GAP de **5808s** entre el tiempo total de S4 y la suma
+de sus sub-stages. Análisis: ese gap es overhead del
+`ProcessPoolExecutor` con `spawn` (pickle + IPC + spawn cold-start
++ queue) — ~29s por doc.
+
+**Los PDF nativos** son `shutil.copy2` puro: libera el GIL durante
+I/O y NO necesita ProcessPool. **Los TIFF/JPEG** sí lo necesitan
+(`img2pdf` es CPU bound). Pre-094 todos iban al pool sin distinguir.
+
+### Added
+
+- **`ProcessingConfig.s4_smart_routing: bool = False`** (schema):
+  flag opt-in. Cuando `True` Y el process pool está activo, los
+  docs con `document.is_pdf == True` corren inline en el thread
+  del prep_workers; los paginados siguen yendo al process pool.
+- **`StagedPipeline.s4_smart_routing`** param: wired desde el
+  schema.
+
+### Uso
+
+```yaml
+processing:
+  prep_workers: 40             # threads para inline path
+  s4_use_processes: true       # process pool activo
+  s4_smart_routing: true       # ← 094 — evita pool para PDFs nativos
+```
+
+### Ganancia esperable
+
+Para el workload medido del operador (114 PDFs nativos × 29s
+overhead/doc) → **~3300s ahorrados** = **4-7× speedup** del wall
+time de prep. Combinado con la exclusión de AV del source/temp,
+el speedup compuesto puede llegar a 10-15×.
+
+### Notas
+
+- **Backward-compat total**: default `False` preserva pre-094
+  byte-idéntico.
+- El benchmark sintético en Linux (spec 091) mostraba ProcessPool
+  ganando para Small files. En Windows productivo con SMB + AV el
+  overhead del `spawn` invierte la conclusión para PDFs nativos.
+  **Datos empíricos del operador manda.**
+- **6 tests nuevos** en
+  `tests/unit/orchestrators/test_s4_smart_routing.py`.
+- Pareja con spec 093 (sub-stage metrics que confirmaron el GAP).
+
+---
+
 ## [0.95.0] — 2026-05-19 — **Métricas sub-stage en S4 (granularidad para diagnose)**
 
 Operador productivo con prep lento. `cmcourier diagnose` (spec 092)

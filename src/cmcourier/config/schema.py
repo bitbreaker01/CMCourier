@@ -710,6 +710,16 @@ class ProcessingConfig(BaseModel):
     s4_use_processes: bool = True
     # ``None`` => ``os.cpu_count()``; un int explícito lo sobreescribe.
     s4_max_processes: int | None = Field(default=None, ge=1)
+    # 094: ruteo por tipo de documento en S4. Cuando True Y el process
+    # pool está activo, los PDF nativos (``document.is_pdf``) corren
+    # inline en el thread del prep_workers (``shutil.copy2`` libera el
+    # GIL durante I/O), mientras que los paginados TIFF/JPEG van al
+    # process pool (``img2pdf`` es CPU bound). Evita el overhead de
+    # pickle/IPC/spawn del process pool para docs cuyo trabajo útil
+    # NO es CPU bound. Crítico en Windows donde ``spawn`` es caro.
+    # Default ``False`` preserva el comportamiento pre-094 (todo al
+    # process pool si está activo).
+    s4_smart_routing: bool = False
 
 
 class SystemMetricsConfig(BaseModel):
