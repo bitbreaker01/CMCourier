@@ -33,6 +33,7 @@ from cmcourier.cli.commands.background import background_command
 from cmcourier.cli.commands.batch import batch_group
 from cmcourier.cli.commands.cache import cache_group
 from cmcourier.cli.commands.completion import completion_command
+from cmcourier.cli.commands.diagnose import diagnose_command
 from cmcourier.cli.commands.inspect import inspect_group
 from cmcourier.cli.commands.mock import mock_group
 from cmcourier.cli.commands.sync import sync_group
@@ -75,6 +76,7 @@ main.add_command(completion_command)
 main.add_command(sync_group)
 main.add_command(mock_group)
 main.add_command(cache_group)
+main.add_command(diagnose_command)
 
 
 # ---------------------------------------------------------------------------
