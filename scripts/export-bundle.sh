@@ -22,7 +22,13 @@ if [[ ! -f "${IGNORE_FILE}" ]]; then
   exit 1
 fi
 
-OUT="cmcourier-export-$(date +%Y%m%d-%H%M%S).zip"
+# El ZIP va a releases/ con nombre versionado — ese directorio se commitea
+# y está en .exportignore (un export nuevo no anida exports viejos).
+VERSION="$(grep -E '^version[[:space:]]*=' pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+[[ -n "${VERSION}" ]] || VERSION="unknown"
+RELEASES_DIR="releases"
+mkdir -p "${RELEASES_DIR}"
+OUT="${RELEASES_DIR}/cmcourier-export-${VERSION}.zip"
 
 # Patrones de exclusión: líneas no vacías y no comentadas de .exportignore.
 mapfile -t patterns < <(grep -vE '^[[:space:]]*(#|$)' "${IGNORE_FILE}" || true)

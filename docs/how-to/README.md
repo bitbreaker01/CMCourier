@@ -22,6 +22,7 @@ Tareas comunes que ejecutás cuando corrés migraciones.
 | [`operator/configure-heavy-light-lanes.md`](operator/configure-heavy-light-lanes.md) | Activar lanes para corpus mixto |
 | [`operator/wipe-staging-state.md`](operator/wipe-staging-state.md) | Limpiar staging entre corridas |
 | [`operator/interpret-the-tui-tabs.md`](operator/interpret-the-tui-tabs.md) | Atlas visual de las 5 tabs |
+| [`build-offline-installer.md`](build-offline-installer.md) | Empaquetar CMCourier para un servidor air-gapped |
 
 Índice dedicado: [`operator/README.md`](operator/README.md).
 

@@ -20,3 +20,6 @@ scripts/
 
 # --- traza SDD: el "por qué" de cada cambio (interno) ---
 specs/
+
+# --- bundles de export ya generados (no anidar exports viejos) ---
+releases/

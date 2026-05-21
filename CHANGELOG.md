@@ -15,6 +15,33 @@ abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
+## [0.102.0] — 2026-05-21 — **Instalador offline para servidores air-gapped**
+
+El script que arma el bundle de instalación offline (para el servidor
+de migración del banco, sin internet) vivía solo en la máquina del
+operador — nunca estuvo en el repo. Este cambio lo incorpora y le da
+una contraparte Linux + documentación.
+
+### Added
+
+- **`installer/build-offline-bundle.ps1`** — arma un bundle offline
+  para Windows Server x86_64 air-gapped (wheels + wheel del proyecto +
+  config + `install.bat`).
+- **`installer/build-offline-bundle.sh`** — la versión Linux
+  (manylinux x86_64 + `install.sh`).
+- **`docs/how-to/build-offline-installer.md`** — how-to del flujo de
+  dos máquinas, con el gotcha de la versión de Python.
+
+### Changed
+
+- `scripts/export-bundle.sh` ahora deja el ZIP en `releases/` con
+  nombre versionado (`cmcourier-export-<version>.zip`).
+- `.exportignore`: agrega `releases/`; `installer/` NO se excluye —
+  el instalador es un entregable.
+- `.gitignore`: ignora `dist-offline/` (output del instalador offline).
+
+---
+
 ## [0.101.0] — 2026-05-21 — **Refresh de documentación: config + comandos al día**
 
 Auditoría previa al handoff: la documentación de referencia estaba
