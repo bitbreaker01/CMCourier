@@ -105,6 +105,11 @@ class ReconcileResult:
     synced_to_local: list[str] = field(default_factory=list)
     conflicts: list[ReconcileConflict] = field(default_factory=list)
     stale_cleaned: int = 0
+    # 098: ítems cuya reconciliación falló o quedó sin procesar (corte
+    # cooperativo). ``run_one`` los re-encola en el buffer — nunca se
+    # pierden en silencio.
+    failed: int = 0
+    requeued: list[PendingSyncItem] = field(default_factory=list)
 
 
 class As400Reconciler:
@@ -124,26 +129,56 @@ class As400Reconciler:
         items: list[PendingSyncItem],
         *,
         import_scope: set[str] | None = None,
+        stop_event: threading.Event | None = None,
     ) -> ReconcileResult:
         """Una pasada: propaga ``items`` a AS400 e importa filas ``O``
-        ajenas del ``import_scope`` a SQLite. Emite el log de la pasada."""
+        ajenas del ``import_scope`` a SQLite. Emite el log de la pasada.
+
+        098: resiliente — **nunca levanta excepción** y **nunca pierde un
+        ítem**. Una falla per-ítem se aísla (el ítem va a ``requeued``,
+        los demás siguen). Si ``stop_event`` se setea, corta entre ítems
+        y manda el resto a ``requeued`` para que ``run_one`` los
+        re-encole."""
         t0 = time.monotonic()
-        stale = self._as400.cleanup_stale_in_progress()
+        try:
+            stale = self._as400.cleanup_stale_in_progress()
+        except Exception:  # noqa: BLE001 — un cleanup fallido no aborta la pasada
+            _log.exception("reconcile: cleanup_stale_in_progress falló")
+            stale = 0
         synced_as400: list[str] = []
         conflicts: list[ReconcileConflict] = []
-        for item in items:
-            outcome = self._reconcile_item(item)
+        requeued: list[PendingSyncItem] = []
+        failed = 0
+        for idx, item in enumerate(items):
+            if stop_event is not None and stop_event.is_set():
+                # Corte cooperativo — el resto del batch vuelve al buffer.
+                requeued.extend(items[idx:])
+                break
+            try:
+                outcome = self._reconcile_item(item)
+            except Exception as exc:  # noqa: BLE001
+                # Una falla per-ítem NO arrastra al resto del batch.
+                failed += 1
+                requeued.append(item)
+                self._log_failure(item, exc)
+                continue
             if isinstance(outcome, ReconcileConflict):
                 conflicts.append(outcome)
             elif outcome == "synced":
                 synced_as400.append(item.document.txn_num)
             # "consistent" → AS400 ya estaba al día: ni sync ni conflicto.
-        synced_local = self._import_foreign_uploads(import_scope or set())
+        try:
+            synced_local = self._import_foreign_uploads(import_scope or set())
+        except Exception:  # noqa: BLE001
+            _log.exception("reconcile: import_foreign_uploads falló")
+            synced_local = []
         result = ReconcileResult(
             synced_to_as400=synced_as400,
             synced_to_local=synced_local,
             conflicts=conflicts,
             stale_cleaned=stale,
+            failed=failed,
+            requeued=requeued,
         )
         self._log_pass(result, duration_ms=round((time.monotonic() - t0) * 1000.0, 3))
         return result
@@ -242,6 +277,24 @@ class As400Reconciler:
             imported.append(txn)
         return imported
 
+    def _log_failure(self, item: PendingSyncItem, exc: BaseException) -> None:
+        """098: registra un ítem que falló su reconciliación. Va al app
+        log Y al ``reconcile-*.jsonl`` — el ítem se re-encola, no se
+        pierde, pero el operador necesita verlo."""
+        _log.warning(
+            "reconcile: ítem falló txn=%s — se re-encola para reintento (%s)",
+            item.document.txn_num,
+            exc,
+        )
+        _reconcile_log.info(
+            "reconcile_failure",
+            extra={
+                "event": "reconcile_failure",
+                "txn_num": item.document.txn_num,
+                "error": str(exc),
+            },
+        )
+
     def _log_pass(self, result: ReconcileResult, *, duration_ms: float) -> None:
         _reconcile_log.info(
             "reconcile_pass",
@@ -250,6 +303,8 @@ class As400Reconciler:
                 "synced_to_as400": len(result.synced_to_as400),
                 "synced_to_local": len(result.synced_to_local),
                 "conflicts": len(result.conflicts),
+                "failed": result.failed,
+                "requeued": len(result.requeued),
                 "stale_cleaned": result.stale_cleaned,
                 "duration_ms": duration_ms,
             },
@@ -299,27 +354,42 @@ class PeriodicReconciler:
 
     def _loop(self) -> None:
         # Event.wait devuelve True cuando se setea el stop → corta el loop.
+        # Las pasadas del daemon le pasan ``_stop`` a run_pass para poder
+        # cortar rápido entre ítems cuando se pide parar (098).
         while not self._stop.wait(self._interval_s):
-            self.run_one()
+            self.run_one(stop_event=self._stop)
 
-    def run_one(self) -> ReconcileResult:
-        """Una pasada: drena el buffer y reconcilia. No propaga excepciones
-        — un AS400 caído no debe tumbar el pipeline."""
+    def run_one(self, *, stop_event: threading.Event | None = None) -> ReconcileResult:
+        """Una pasada: drena el buffer, reconcilia, y **re-encola** los
+        ítems que fallaron o quedaron sin procesar (098 — nunca se pierde
+        un ítem drenado). No propaga excepciones."""
         items = self._buffer.drain()
         scope: set[str] = set()
         if self._import_scope_provider is not None:
             scope = self._import_scope_provider()
         try:
-            return self._reconciler.run_pass(items, import_scope=scope)
-        except Exception:  # noqa: BLE001
-            _log.exception("periodic reconcile pass failed")
+            result = self._reconciler.run_pass(items, import_scope=scope, stop_event=stop_event)
+        except Exception:  # noqa: BLE001 — defensa: run_pass ya no debería levantar
+            _log.exception("periodic reconcile pass failed — se re-encola el batch entero")
+            # Nada de lo drenado se pierde: vuelve completo al buffer.
+            for it in items:
+                self._buffer.append(it)
             return ReconcileResult()
+        # 098: los fallidos / no procesados vuelven al buffer para reintento.
+        for it in result.requeued:
+            self._buffer.append(it)
+        return result
 
-    def stop(self, *, join_timeout_s: float = 30.0) -> ReconcileResult:
-        """Para el daemon y corre una pasada FINAL — garantiza que nada
-        quede sin sincronizar al terminar la corrida."""
+    def stop(self, *, join_timeout_s: float = 120.0) -> ReconcileResult:
+        """Para el daemon y corre la pasada FINAL.
+
+        098: el daemon corta rápido (chequea ``_stop`` entre ítems) y
+        re-encola lo que no procesó. La pasada final corre **sin**
+        ``stop_event`` — procesa el buffer completo — y en el thread
+        no-daemon que la llama, así que el cierre del proceso no la
+        puede matar a mitad."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=join_timeout_s)
             self._thread = None
-        return self.run_one()
+        return self.run_one()  # sin stop_event → drena y procesa TODO
