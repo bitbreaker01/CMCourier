@@ -27,8 +27,8 @@ incompleto lo hace tropezar con perillas que existen pero no figuran.
 
 ## Qué
 
-Poner al día las dos referencias canónicas — sin reescribir todo
-`docs/`, foco en lo que el operador consulta:
+Poner al día la documentación de config y comandos — las referencias
+**y** los tutoriales que el operador consulta:
 
 ### `docs/reference/config-reference.yaml`
 
@@ -57,6 +57,26 @@ como YAML válido.
 * Sub-sección nueva **`sync recover`** (099) — flags `--config`,
   `--apply`, `--batch-id`; nota de dry-run-por-defecto.
 
+### `docs/reference/config-schema.md`
+
+Mismo set de campos que `config-reference.yaml`: `local_scan.recursive`
+(088), `keep_staged_files` (085), `cmis.http2` / `upload_chunk_bytes`
+(089/090), `as400_sync.mode` + nueva sección `PeriodicSyncConfig`
+(096), `s4_smart_routing` (094).
+
+### `docs/tutorials/01-the-yaml-config.md`
+
+Walkthrough del YAML al día: `cmis.http2` / `upload_chunk_bytes`,
+`as400_sync.mode` + bloque `periodic` (con el tradeoff del modo
+periódico), `processing.s4_smart_routing` + su fila en "Campos
+críticos".
+
+### `docs/tutorials/04-all-commands-tour.md`
+
+Sección nueva **`diagnose`**; sub-sección nueva **`sync recover`**;
+corregida la descripción equivocada de `sync resolve` (decía lo de
+`sync status`).
+
 ## Criterios de aceptación
 
 1. `config-reference.yaml` cubre **todas** las claves de
@@ -65,19 +85,17 @@ como YAML válido.
    `diagnose` y `sync recover`.
 3. Sin cambios de código — es un refresh de docs.
 
-## Notas — qué más quedó viejo (NO incluido acá)
+## Notas — qué quedó fuera (incompleto, NO incorrecto)
 
-El refresh se acotó a las dos referencias canónicas (Q2 del operador:
-"config + comandos a fondo"). Auditado pero **diferido** a un cambio
-futuro de docs:
+Auditado; lo que sigue **no está mal** — solo no cubre los conceptos
+nuevos. Queda para un cambio de docs futuro:
 
-* `docs/reference/config-schema.md` — representación secundaria del
-  schema; también desactualizada.
-* `docs/tutorials/01-the-yaml-config.md` y `04-all-commands-tour.md`
-  — walkthroughs; no mencionan streaming, el process pool de S4,
-  `diagnose` ni `sync recover`.
-* `docs/diagrams/` (`file-imports-map.md`, `hexagonal-layers.md`) —
-  no reflejan los módulos nuevos (`reconciler`, `recovery`,
-  `cancellation`).
-* `docs/explanation/` — barrido pendiente de menciones a
-  comportamiento viejo.
+* `docs/diagrams/hexagonal-layers.md` — conceptualmente correcto (la
+  arquitectura sigue siendo la misma); lista servicios representativos,
+  no un inventario.
+* `docs/diagrams/file-imports-map.md` — incompleto: no incluye el
+  subsistema de sync AS400 (`idempotency`, `reconciler`, `recovery`).
+* `docs/explanation/` — los archivos existentes describen
+  comportamiento real y vigente; faltan explicaciones nuevas para los
+  conceptos 095-099 (connection pool, modo periódico, cancelación
+  cooperativa).

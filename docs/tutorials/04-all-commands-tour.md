@@ -203,6 +203,18 @@ cmcourier analyze trends --config prod.yaml
 
 ---
 
+## `diagnose` (092)
+
+Analiza los logs JSONL de un batch y reporta el cuello de botella por stage, con sugerencias automáticas. No depende de SQLite — funciona aunque la tracking DB se haya perdido.
+
+```bash
+cmcourier diagnose --config prod.yaml --latest          # el batch más reciente
+cmcourier diagnose --config prod.yaml --batch marzo-2026
+cmcourier diagnose --config prod.yaml --list            # lista los batches disponibles
+```
+
+---
+
 ## `completion`
 
 Imprime el script de autocompletion para tu shell.
@@ -230,10 +242,19 @@ cmcourier sync status --config prod.yaml
 
 ### `sync resolve`
 
-Resuelve docs marcados in-progress que excedieron `stale_in_progress_minutes` (default 30).
+Resuelve una divergencia AS400/SQLite para un `TRNNUM` puntual — exactamente uno de `--prefer-as400` (AS400 es la fuente de verdad) o `--prefer-local` (SQLite manda; requiere `--cm-object-id`).
 
 ```bash
-cmcourier sync resolve --config prod.yaml
+cmcourier sync resolve 0001234 --config prod.yaml --prefer-as400
+```
+
+### `sync recover` (099)
+
+Recupera filas faltantes en NIARVILOG para documentos ya subidos a CM (`S5_DONE` en SQLite sin fila en AS400) — repara el daño del bug del modo `periodic`. **Dry-run por defecto**; `--apply` ejecuta los INSERT.
+
+```bash
+cmcourier sync recover --config prod.yaml             # dry-run: reporta el plan
+cmcourier sync recover --config prod.yaml --apply     # ejecuta los INSERT
 ```
 
 ---

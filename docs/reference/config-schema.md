@@ -60,6 +60,7 @@ Unión discriminada por `kind`. Pickeá EXACTAMENTE uno.
 |-------|------|---------|-------------|
 | `kind` | Literal `"local_scan"` (required) | — | — |
 | `scan_path` | `DirectoryPath` (required) | — | Carpeta a escanear. |
+| `recursive` | bool | `False` | `True` → desciende por todos los subdirectorios de `scan_path` (088). |
 
 ### `SingleDocTriggerConfig` — `kind: single_doc`
 
@@ -239,6 +240,7 @@ Exactamente uno de `table` / `query` (validator `_exactly_one_table_or_query`).
 | `source_root` | `DirectoryPath` (required) | — | Raíz del archivo de imágenes. Debe existir. |
 | `temp_dir` | `Path` (required) | — | Directorio temporal. Se crea en runtime. |
 | `image_type_map` | `dict[str, str]` | `{"B": "image/tiff", "O": "application/pdf", "C": "image/jpeg"}` | Códigos de tipo de imagen → MIME. |
+| `keep_staged_files` | bool | `False` | `True` preserva el PDF ensamblado en `temp_dir` tras un S5_DONE — debug/inspección (085). |
 
 ---
 
@@ -256,6 +258,8 @@ Exactamente uno de `table` / `query` (validator `_exactly_one_table_or_query`).
 | `retry_max_attempts` | int | `3` | `≥ 1` | Reintentos por upload. |
 | `retry_base_delay_s` | float | `2.0` | `≥ 0` | Backoff base. |
 | `workers` | int | `4` | `≥ 1` | Tamaño base del pool S5 (AIMD-resizable). |
+| `http2` | bool | `True` | — | `False` fuerza HTTP/1.1 (089). |
+| `upload_chunk_bytes` | int | `1048576` | `4096..67108864` | Chunk de lectura del multipart encoder; 1 MiB default (090). |
 | `auto_tune` | `AutoTuneConfig` | factory | — | AIMD. |
 
 ### `AutoTuneConfig` (recalibrado en 068)
@@ -303,6 +307,16 @@ Validators:
 | `stale_in_progress_minutes` | int | `30` | `1..1440` | Threshold para reclamar filas stale. |
 | `retry_attempts` | int | `3` | `1..10` | — |
 | `retry_base_delay_s` | float | `5.0` | `> 0` | — |
+| `mode` | `Literal["claim", "periodic"]` | `"claim"` | — | `claim` = sync atómico por-doc (034); `periodic` = reconciliador de fondo (096). |
+| `periodic` | `PeriodicSyncConfig \| None` | `None` | required if `mode="periodic"` | Validator lo verifica. |
+
+Validator: `mode="periodic"` exige el bloque `periodic`.
+
+### `PeriodicSyncConfig` (096)
+
+| Field | Type | Default | Constraint | Description |
+|-------|------|---------|------------|-------------|
+| `interval_minutes` | int | `5` | `1..1440` | Cada cuánto corre el reconciliador de fondo. |
 
 ### `NiarvilogColumnsModel`
 
@@ -341,6 +355,7 @@ Todas las columnas se interpolan en SQL (un nombre de columna nunca puede ser bi
 | `heavy_light_lanes` | `HeavyLightLanesConfig` | factory | — | Lanes (036). |
 | `s4_use_processes` | bool | `True` | — | `ProcessPoolExecutor` para S4 (066). |
 | `s4_max_processes` | `int \| None` | `None` | `≥ 1` | `None` → `os.cpu_count()`. |
+| `s4_smart_routing` | bool | `False` | — | Con el pool activo, rutea PDFs nativos inline y paginados al pool (094). |
 
 ### `StreamingConfig` (063)
 

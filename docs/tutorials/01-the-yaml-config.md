@@ -236,6 +236,8 @@ cmis:
   retry_max_attempts: 3                     # default 3, ≥ 1
   retry_base_delay_s: 2.0                   # default 2.0, ≥ 0
   workers: 4                                # default 4, ≥ 1 — tamaño inicial del pool S5
+  http2: true                               # default true (089) — false fuerza HTTP/1.1
+  upload_chunk_bytes: 1048576               # default 1 MiB (090) — chunk del multipart encoder
   auto_tune:                                # AIMD
     enabled: false                          # default false
     min_threads: 2                          # default 2
@@ -270,6 +272,7 @@ tracking:
   db_path: /var/cmcourier/tracking.sqlite
   as400_sync:
     enabled: false                          # default false
+    mode: claim                             # "claim" (default) o "periodic" (096)
     # connection: { host: ... }            # required si enabled
     # library: RVILIB                       # default
     # table: NIARVILOG                      # default
@@ -277,11 +280,13 @@ tracking:
     # stale_in_progress_minutes: 30         # default 30, rango 1..1440
     # retry_attempts: 3                     # default 3
     # retry_base_delay_s: 5.0               # default 5.0
+    # periodic:                             # required si mode: periodic
+    #   interval_minutes: 5                 # default 5, rango 1..1440
 ```
 
 La SQLite mantiene la state machine por documento: `S0_PENDING → S0_DONE → S1_PENDING → ... → S5_DONE | S5_FAILED`. Es la fuente de verdad para idempotencia: si `is_uploaded(txn_num)` devuelve `True`, el próximo run lo skipea con `S1_SKIPPED` (062).
 
-`as400_sync` es para idempotencia distribuida (034) — cuando múltiples instancias de CMCourier corren en paralelo contra el mismo CMIS, sincronizan estado vía la tabla NIARVILOG en AS400.
+`as400_sync` es para idempotencia distribuida (034) — cuando múltiples instancias de CMCourier corren en paralelo contra el mismo CMIS, sincronizan estado vía la tabla NIARVILOG en AS400. **`mode`** (096) elige cómo: `claim` usa un claim atómico por-documento en S5 (previene doble-upload); `periodic` saca AS400 del hot path — S5 escribe solo SQLite y un reconciliador de fondo propaga cada `periodic.interval_minutes`. Ojo: `periodic` NO previene doble-upload (los conflictos se detectan post-hoc) — usalo solo si no hay un migrador competidor.
 
 ---
 
@@ -321,6 +326,7 @@ processing:
   prep_workers: 1                           # default 1, ≥ 1 — S2/S3/S4
   s4_use_processes: true                    # default true (066)
   s4_max_processes: null                    # null = os.cpu_count()
+  s4_smart_routing: false                   # default false (094)
   streaming:
     bucket_size: 100                        # default 100 — solo aplica en mode: streaming
   heavy_light_lanes:
@@ -340,6 +346,7 @@ processing:
 | `bucket_size` | Cola bounded entre prep y upload. Más grande = más buffer (mejor para amortizar pausas), menos elasticidad. Default 100 está bien para la mayoría. |
 | `prep_workers` | Threads en S2/S3/S4. `1` es serial — byte-idéntico al pre-056. Subilo si tu cuello de botella es resolución de metadatos (S3) o ensamblado en TIFF pesado (S4). |
 | `s4_use_processes: true` | Default desde 066. Saltea el GIL para `img2pdf`/`PIL`/`PyPDF2`. Si lo apagás volvés a serializar el ensamblado contra el GIL — solo apagalo si tenés sospecha de fork bugs. |
+| `s4_smart_routing: true` | (094) Con el process pool activo, rutea los PDF nativos inline (su trabajo es `shutil.copy2`, I/O-bound, libera el GIL) y manda solo los paginados TIFF/JPEG al pool. Evita el overhead de pickle/IPC/spawn — clave en Windows. Default `false`. |
 | `batches_in_flight: 2` | Solo en batched. N=2 = overlap (mientras chunk K sube, K+1 prepara). Bajarlo a 1 desactiva el overlap pero es más predecible. |
 | `heavy_light_lanes.enabled: true` | Activa lanes adaptativos en S5 — separa docs ≥ 10 MB del resto. Para que valga la pena necesitás `heavy_lane_min_batch` (default 50) docs por chunk. |
 
