@@ -2,7 +2,7 @@
 
 > Migración de documentos bancarios de **IBM RVI / AS400** a **IBM Content Manager** vía **CMIS REST**. Idempotente, observable, parallelizable.
 
-**Versión actual**: `0.73.0` — pipeline MVP de punta a punta, modo `streaming` listo, AIMD + lanes en producción, TUI live de 5 tabs.
+**Versión actual**: `0.102.0` — pipeline de punta a punta: modos `batched` y `streaming`, AIMD + heavy/light lanes, sincronización distribuida con AS400 (`claim` / `periodic`) + herramienta de recuperación, TUI live de 5 tabs, e instalador offline para servidores air-gapped.
 
 ---
 
@@ -49,12 +49,14 @@ Detalle completo en [`docs/explanation/pipeline-stages.md`](docs/explanation/pip
 - **Dos modos de ejecución**: `batched` (multi-batch overlap N=2) y `streaming` (producer-consumer con bucket acotado, memoria peak fija independiente del total). Ver [`streaming-vs-batched`](docs/explanation/streaming-vs-batched.md).
 - **AIMD auto-tune** del pool S5: multiplicative growth (1.25×) + soft halve (0.75×) + tolerance threshold (1.5×). Recalibrado en spec 068 — alcanza techo en 2.5 min vs 11 min del aditivo. Ver [`aimd-auto-tuning`](docs/explanation/aimd-auto-tuning.md).
 - **Heavy/light lanes**: dual semáforo en S5 para evitar head-of-line blocking entre docs grandes y chicos. Rebalance dirigido por drain. Ver [`heavy-light-lanes`](docs/explanation/heavy-light-lanes.md).
-- **ProcessPool en S4**: PDF assembly bypassa el GIL con `multiprocessing.get_context("spawn")`. Default on. Ver [`processpool-for-pdf-assembly`](docs/explanation/processpool-for-pdf-assembly.md).
-- **TUI live de 5 tabs** (PREP, UPLOAD, CHUNKS, BUCKET, DETAIL) construida en Textual. Throughput, p95, lanes, slow-ops, drill-down por documento.
+- **ProcessPool en S4**: PDF assembly bypassa el GIL con `multiprocessing.get_context("spawn")`. Default on; con `s4_smart_routing` los PDF nativos corren inline (su trabajo es I/O) y solo los paginados TIFF/JPEG van al pool. Ver [`processpool-for-pdf-assembly`](docs/explanation/processpool-for-pdf-assembly.md).
+- **TUI live de 5 tabs** (PREP, UPLOAD, CHUNKS, BUCKET, DETAIL) construida en Textual. Throughput, p95, lanes, slow-ops, drill-down por documento. `q` cancela la corrida de forma cooperativa, con confirmación.
 - **HTTP/2 multiplexing** via `httpx[http2]` con ALPN — los N workers comparten conexión TCP.
 - **Idempotencia cross-batch** garantizada por UNIQUE constraint en `(rvabrep_txn_num, batch_id)` + check `is_uploaded()` en S1 (marker `S1_SKIPPED`, spec 062).
-- **Observabilidad por tiers**: app log (T1), pipeline metrics (T2), network events (T3), slow-ops aggregation (T4), system metrics via psutil (T5).
+- **Sincronización distribuida con AS400**: tracking centralizado en la tabla NIARVILOG. Modo `claim` (claim atómico por-documento — previene doble-upload contra un migrador competidor) o `periodic` (un reconciliador de fondo sincroniza cada X minutos). `cmcourier sync recover` recupera filas faltantes. Ver [`how-to/as400-sync.md`](docs/how-to/as400-sync.md).
+- **Observabilidad por tiers**: app log (T1), pipeline metrics (T2), network events (T3), slow-ops aggregation (T4), system metrics via psutil (T5). `cmcourier diagnose` reporta el cuello de botella por stage desde los logs JSONL — sin depender de SQLite.
 - **Pre-flight doctor**: 12+ checks (`connections`, `mapping`, `metadata`, `cm-targets`) antes de tocar producción.
+- **Instalador offline**: `installer/build-offline-bundle.{ps1,sh}` empaqueta CMCourier + todas sus dependencias en un `.zip` autocontenido para servidores air-gapped. Ver [`how-to/build-offline-installer.md`](docs/how-to/build-offline-installer.md).
 - **PII masking** por defecto: CIF, account numbers, customer names nunca a INFO. Constitution Principle VIII.
 
 ---
@@ -125,12 +127,26 @@ pre-commit install
 pre-commit install --hook-type commit-msg
 ```
 
+### Instalar offline (servidor air-gapped)
+
+Para un servidor de migración **sin internet** no se usa `pip install` — se
+arma un bundle autocontenido en una máquina con internet y se transfiere:
+
+```bash
+bash installer/build-offline-bundle.sh        # destino Linux
+# .\installer\build-offline-bundle.ps1         # destino Windows
+```
+
+El `.zip` resultante incluye CMCourier, todas las dependencias y un
+`install.{sh,bat}`. Detalle completo en
+[`docs/how-to/build-offline-installer.md`](docs/how-to/build-offline-installer.md).
+
 ### Smoke test
 
 ```bash
 pytest -m unit              # solo unit tests (rápidos)
 cmcourier --help            # confirma que el CLI está instalado
-cmcourier --version         # debe imprimir 0.73.0
+cmcourier --version         # debe imprimir 0.102.0
 ```
 
 ### Variables de entorno (cuando corras migraciones reales)
