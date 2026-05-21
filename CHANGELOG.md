@@ -52,6 +52,50 @@ Hitos operacionales fuera del documento de roadmap:
 
 ---
 
+## [0.99.0] — 2026-05-20 — **Cancelación cooperativa del pipeline desde el TUI**
+
+El operador reportó: al apretar **"q"** con la corrida en progreso, el
+TUI se cerraba pero el pipeline seguía corriendo; solo Ctrl+C repetido
+lo frenaba. Causa raíz (`cli/_tui_runner.py`): el pipeline corre en un
+worker thread `daemon=False` y, al cerrar el TUI, el `worker.join()`
+bloquea esperando que termine **solo** — no existía ningún mecanismo
+de cancelación (`rg cancel|abort|stop_event` en `orchestrators/` daba
+cero resultados).
+
+### Added
+
+- **`CancellationToken`** (`services/cancellation.py`): flag
+  thread-safe de cancelación cooperativa sobre `threading.Event`.
+- **Chequeos cooperativos** en `StagedPipeline`: el loop de triggers
+  de S0/S1 y los métodos per-doc (`_s2_one`/`_s3_one`/`_s4_one`/
+  `_upload_one`) saltean el trabajo cuando el token está prendido —
+  *drain*: dejan de tomar trabajo nuevo, lo que está en vuelo termina.
+- **`StreamingOrchestrator` / `MultiBatchOrchestrator`** exponen
+  `cancel_token` y cortan sus loops propios (producer / chunk loop).
+- **`ConfirmCancelScreen`** (`tui/confirm_screen.py`): modal sí/no.
+  `"q"` con la corrida en progreso lo abre; `s` confirma y prende el
+  token, `n`/`escape` la descarta. `"q"` con la corrida completa sale
+  directo (pre-097).
+
+### Changed
+
+- `cli/_tui_runner.py` comparte el `cancel_token` del orchestrator con
+  el `CMCourierTUI`. Al confirmar la cancelación, el `worker.join()`
+  espera solo el drain (segundos) en vez de la corrida entera.
+
+### Notas
+
+- **Backward-compat**: sin cancelar, el comportamiento es
+  byte-idéntico a pre-097. El token se crea siempre; headless nunca se
+  prende.
+- Ctrl+C **no** cambia — sigue siendo el abort de emergencia. 097
+  arregla la `"q"`, que ahora es una salida real y ordenada.
+- ~17 tests nuevos (`test_cancellation.py`,
+  `test_staged_cancellation.py`, `test_quit_confirmation.py`).
+- Spec: `specs/097-tui-cooperative-cancellation/`.
+
+---
+
 ## [0.96.0] — 2026-05-19 — **Smart routing PDF/TIFF en S4 (evita overhead del ProcessPool en Windows)**
 
 Datos reales del operador productivo (Windows, 200 docs mixtos)

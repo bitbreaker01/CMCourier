@@ -47,6 +47,7 @@ from cmcourier.domain.models import (  # noqa: F401 — TriggerRecord re-exporta
 from cmcourier.observability.metrics import MetricsRecorder
 from cmcourier.orchestrators.chunked import chunked
 from cmcourier.orchestrators.staged import RunReport, StagedPipeline, _StageItem
+from cmcourier.services.cancellation import CancellationToken
 
 _log = logging.getLogger(__name__)
 
@@ -191,6 +192,11 @@ class MultiBatchOrchestrator:
         # pre-042 "el más reciente entre PREP-o-UPLOAD" para el tab PREP.
         self._upload_active_recorder: MetricsRecorder | None = None
         self._state_lock = threading.Lock()
+
+    @property
+    def cancel_token(self) -> CancellationToken:
+        """097: token de cancelación, delegado al StagedPipeline interno."""
+        return self._pipeline.cancel_token
 
     # ----- Hooks de binding del TUI (030) ----------------------------
 
@@ -420,8 +426,15 @@ class MultiBatchOrchestrator:
         if controller is not None:
             controller.set_p95_provider(self._upload_p95_observer)
             controller.start()
+        # 097: cancelación cooperativa — getattr defensivo porque los
+        # dobles de test del pipeline no definen cancel_token.
+        cancel_token = getattr(self._pipeline, "cancel_token", None)
         try:
             for idx, chunk in enumerate(chunked(triggers, batch_size)):
+                # No arrancamos chunks nuevos; el chunk en vuelo drena
+                # vía los chequeos per-doc del StagedPipeline.
+                if cancel_token is not None and cancel_token.is_cancelled():
+                    break
                 prepared = self._prep_one_chunk(
                     idx, chunk, failed=failed, results_lock=results_lock
                 )

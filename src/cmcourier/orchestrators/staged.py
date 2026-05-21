@@ -76,6 +76,7 @@ from cmcourier.domain.ports import ITrackingStore, S0Strategy
 from cmcourier.observability.metrics import MetricsRecorder, StageTimer
 from cmcourier.observability.system_metrics import SystemMetricsSampler
 from cmcourier.services.auto_tune import AutoTuneController
+from cmcourier.services.cancellation import CancellationToken
 from cmcourier.services.document_cache import DocumentCacheService
 from cmcourier.services.indexing import IndexingService
 from cmcourier.services.lane_controller import LaneController
@@ -211,6 +212,11 @@ class StagedPipeline:
         # está seteado, el coordinador agrega encima el path de AS400
         # NIARVILOG.
         self._coordinator = coordinator
+        # 097: token de cancelación cooperativa. El TUI lo prende cuando
+        # el operador confirma "q"; los métodos per-doc lo chequean al
+        # entrar para frenar ordenadamente (drain). Headless = nunca se
+        # prende.
+        self._cancel_token = CancellationToken()
         # 037: cache de metadata cross-batch. None cuando está
         # deshabilitado (default) — S3 siempre invoca
         # MetadataService.resolve (comportamiento pre-037).
@@ -285,6 +291,11 @@ class StagedPipeline:
     def tracking_store(self) -> ITrackingStore:
         """052: handle de sólo lectura para el drill-down por `chunk` del TUI."""
         return self._tracking_store
+
+    @property
+    def cancel_token(self) -> CancellationToken:
+        """097: token de cancelación cooperativa compartido con el TUI."""
+        return self._cancel_token
 
     # --------------------------------------------------- wiring del auto-tune
 
@@ -598,6 +609,10 @@ class StagedPipeline:
         # NO un descarte silencioso.
         filtered = 0
         for trigger in triggers:
+            # 097: cancelación cooperativa — dejamos de tomar triggers
+            # nuevos; los ya convertidos a items siguen su curso.
+            if self._cancel_token.is_cancelled():
+                break
             audit = trigger.audit_row()
             audit_shortname = audit.get("shortname") or "<unknown>"
             docs: list[RVABREPDocument] = []
@@ -754,6 +769,10 @@ class StagedPipeline:
         """S2 mapping para un item. Devuelve ``(survivor_or_None,
         counted_failure)`` — una falla ya marcada como done en una
         corrida previa se descarta sin contar."""
+        # 097: cancelación cooperativa — el item se saltea sin contar
+        # como falla; queda pendiente para un resume.
+        if self._cancel_token.is_cancelled():
+            return None, False
         txn = item.document.txn_num
         with StageTimer(
             rec,
@@ -796,6 +815,9 @@ class StagedPipeline:
     ) -> tuple[_StageItem | None, bool]:
         """Resolución de metadata S3 para un item. Devuelve
         ``(survivor_or_None, counted_failure)``."""
+        # 097: cancelación cooperativa — saltea sin contar como falla.
+        if self._cancel_token.is_cancelled():
+            return None, False
         assert item.mapping is not None
         txn = item.document.txn_num
         fields = item.mapping.required_metadata_fields
@@ -887,6 +909,9 @@ class StagedPipeline:
         pero libera el `GIL`, dejando que otros `producer`s corran
         trabajo de S1-S3.
         """
+        # 097: cancelación cooperativa — saltea sin contar como falla.
+        if self._cancel_token.is_cancelled():
+            return None, False
         txn = item.document.txn_num
         with StageTimer(
             rec,
@@ -1111,6 +1136,12 @@ class StagedPipeline:
         assert item.mapping is not None
         assert item.metadata is not None
         assert item.staged_file is not None
+        # 097: cancelación cooperativa — un doc que aún no arrancó el
+        # upload se saltea limpio (queda pendiente para un resume). Los
+        # docs ya en vuelo pasaron este chequeo y terminan — eso es el
+        # drain. Chequeado antes de tomar el slot del semaphore.
+        if self._cancel_token.is_cancelled():
+            return "skipped"
         txn = item.document.txn_num
         worker_name = threading.current_thread().name
 

@@ -54,6 +54,7 @@ from cmcourier.domain.models import Trigger
 from cmcourier.observability.metrics import MetricsRecorder
 from cmcourier.orchestrators.multi_batch import ChunkState, MultiBatchRunReport
 from cmcourier.orchestrators.staged import RunReport, StagedPipeline, _StageItem
+from cmcourier.services.cancellation import CancellationToken
 from cmcourier.services.lane_controller import Lane, LaneController, LaneSnapshot
 
 _log = logging.getLogger(__name__)
@@ -227,6 +228,11 @@ class StreamingOrchestrator:
     def upload_recorder(self) -> MetricsRecorder | None:
         with self._state_lock:
             return self._recorder
+
+    @property
+    def cancel_token(self) -> CancellationToken:
+        """097: token de cancelación, delegado al StagedPipeline interno."""
+        return self._pipeline.cancel_token
 
     @property
     def bucket_size(self) -> int:
@@ -616,7 +622,14 @@ class StreamingOrchestrator:
         tally: _StreamingTally,
         tally_lock: threading.Lock,
     ) -> None:
+        # 097: cancelación cooperativa — getattr defensivo porque los
+        # dobles de test del pipeline no definen cancel_token.
+        cancel_token = getattr(self._pipeline, "cancel_token", None)
         while True:
+            # El producer deja de tomar triggers nuevos; lo que ya está
+            # en el bucket lo drena el consumer vía los chequeos per-doc.
+            if cancel_token is not None and cancel_token.is_cancelled():
+                return
             try:
                 trigger = next(trigger_iter)
             except StopIteration:

@@ -84,11 +84,16 @@ def run_orchestrator_with_tui(
 
     worker = threading.Thread(target=_worker, name="cmcourier-pipeline", daemon=False)
     worker.start()
-    app = CMCourierTUI(data_provider)
+    # 097: el TUI comparte el `cancel_token` del orchestrator. Apretar
+    # "q" durante la corrida abre un modal de confirmación; al confirmar,
+    # se prende el token y el pipeline drena de forma ordenada.
+    app = CMCourierTUI(data_provider, cancel_token=orchestrator.cancel_token)
     try:
         app.run()
     finally:
-        # Siempre esperamos a que el pipeline termine antes de volver: apretar
-        # Q durante la corrida cierra el viewer de la TUI pero no abandona la corrida.
+        # Siempre esperamos a que el pipeline termine antes de volver.
+        # Pre-097 apretar "q" cerraba el viewer y el join bloqueaba hasta
+        # que la corrida terminaba sola. Con 097, "q" confirmado cancela
+        # el pipeline — el join ahora espera solo el drain (segundos).
         worker.join()
     return outcome
