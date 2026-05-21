@@ -1,0 +1,13 @@
+# .exportignore — rutas excluidas del ZIP que arma scripts/export-bundle.sh
+#
+# Carpetas/archivos internos del equipo que NO van al destinatario
+# externo. Coincidencia por prefijo de path (relativo al root del repo).
+# Líneas en blanco y las que empiezan con '#' se ignoran.
+#
+# El repo NO se toca — esto solo filtra qué entra al ZIP de export.
+
+docs/adr/
+docs/roadmap/
+docs/runbooks/
+CONTRIBUTING.md
+scripts/
