@@ -21,8 +21,10 @@ from textual.containers import Container, VerticalScroll
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane
 
 from cmcourier.domain.models import DocDetail
+from cmcourier.services.cancellation import CancellationToken
 from cmcourier.tui.bucket_tab import render_bucket
 from cmcourier.tui.chunks_tab import render_chunks
+from cmcourier.tui.confirm_screen import ConfirmCancelScreen
 from cmcourier.tui.data_provider import TUIDataProvider, TUISnapshot
 from cmcourier.tui.detail_tab import render_detail
 from cmcourier.tui.prep_tab import render_prep
@@ -67,9 +69,17 @@ class CMCourierTUI(App[None]):
     }
     """
 
-    def __init__(self, data_provider: TUIDataProvider) -> None:
+    def __init__(
+        self,
+        data_provider: TUIDataProvider,
+        cancel_token: CancellationToken | None = None,
+    ) -> None:
         super().__init__()
         self._provider = data_provider
+        # 097: token de cancelación cooperativa compartido con el
+        # pipeline. ``None`` en tests o corridas sin token → ``"q"``
+        # sale directo (comportamiento pre-097).
+        self._cancel_token = cancel_token
         # 052: cursor de `chunk` para el tab DETAIL. ``None`` hasta que
         # el operador lo mueve con ``[`` / ``]``. ``_last_chunk_count`` se
         # refresca cada tick para que las acciones del cursor clampeen bien.
@@ -103,6 +113,36 @@ class CMCourierTUI(App[None]):
     def on_mount(self) -> None:
         self._refresh_panels()
         self.set_interval(_REFRESH_INTERVAL_S, self._refresh_panels)
+
+    def quit_needs_confirmation(self) -> bool:
+        """097: True si ``"q"`` debe abrir el modal de confirmación.
+
+        Solo cuando hay un token de cancelación, la corrida sigue en
+        progreso, y todavía no se canceló. En cualquier otro caso
+        ``"q"`` sale directo (corrida completa, sin token, o ya
+        cancelada y drenando)."""
+        if self._cancel_token is None or self._cancel_token.is_cancelled():
+            return False
+        return not self._provider.snapshot().is_complete
+
+    async def action_quit(self) -> None:
+        """097: ``"q"`` con la corrida en progreso pide confirmación
+        antes de cancelar; en cualquier otro caso sale directo.
+
+        ``async`` para matchear la firma de ``App.action_quit``."""
+        if not self.quit_needs_confirmation():
+            self.exit()
+            return
+
+        def _after_confirm(confirmed: bool | None) -> None:
+            if confirmed:
+                # El operador confirmó: prende el token (el pipeline
+                # drena) y cierra el TUI — el runner espera el drain.
+                assert self._cancel_token is not None
+                self._cancel_token.cancel()
+                self.exit()
+
+        self.push_screen(ConfirmCancelScreen(), _after_confirm)
 
     def action_show_prep(self) -> None:
         tabbed = self.query_one(TabbedContent)
