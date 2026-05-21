@@ -52,6 +52,40 @@ Hitos operacionales fuera del documento de roadmap:
 
 ---
 
+## [0.97.0] — 2026-05-20 — **Connection pool por worker para el sync AS400**
+
+Con `tracking.as400_sync.enabled=true` el operador reportó una caída
+substancial de la velocidad de carga. El rastreo confirmó la causa:
+`As400NiarvilogStore` cacheaba **una única conexión `pyodbc`**
+compartida por todos los worker threads de S5. Una conexión ODBC
+serializa statements, así que los 2-3 round-trips a NIARVILOG por
+documento (`try_claim` + `mark_uploaded`) de los N workers se
+encolaban en fila india — el paralelismo de S5 quedaba anulado para
+la porción AS400.
+
+### Changed
+
+- **`As400NiarvilogStore`** ahora usa **conexiones thread-local**:
+  cada worker thread abre y cachea la suya (`threading.local`). Un
+  registro interno (`_all_conns` + lock) permite que `close()` cierre
+  todas. `_reset_connection` (retry) resetea solo la conexión del
+  thread que reintenta.
+
+### Notas
+
+- **Backward-compat total**: el comportamiento single-thread es
+  byte-idéntico a pre-095 (mismo SQL, mismo orden, mismo retry). Sin
+  cambios de schema ni de wiring — el pool se dimensiona solo a la
+  cantidad de workers de S5.
+- **Riesgo operacional**: el banco pasa de ver 1 sola conexión de
+  CMCourier a ver hasta `s5_max_workers`. Confirmar que el perfil de
+  usuario AS400 admite ese número de sesiones concurrentes.
+- **4 tests nuevos** en
+  `tests/integration/adapters/test_as400_niarvilog_pool.py`.
+- Spec: `specs/095-as400-sync-connection-pool/`.
+
+---
+
 ## [0.96.0] — 2026-05-19 — **Smart routing PDF/TIFF en S4 (evita overhead del ProcessPool en Windows)**
 
 Datos reales del operador productivo (Windows, 200 docs mixtos)
