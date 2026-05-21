@@ -10,45 +10,8 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-### Tooling
-
-- **031** — `cmcourier mock generate`: generador sintético de árbol
-  de archivos RVABREP para dry runs y tests de integración. Lee filas
-  RVABREP desde CSV o AS400, materializa PDFs válidos (`img2pdf`
-  multi-página), TIFFs (Pillow LZW), y JPEGs (Pillow) bajo un root
-  configurable espejando `<source_root>/<ABAICD>/<ABAJCD>`. Límites
-  de tamaño parseados por sufijo (`--pdf-min 10kb`, `--pdf-max 2mb`, …),
-  `--seed`, `--dry-run`, `--force`, `--include-deleted`, `--limit`,
-  `--system`, `--document-type`. Superficie pure-additive; ver
-  `specs/031-mock-file-generator/spec.md`.
-
-### Planificado para próximos releases
-
-Roadmap post-MVP (`docs/roadmap/POST-MVP.md`) — todavía pendiente:
-
-- **§7 (N > 2)** — Elevar el cap de `batches_in_flight` por encima de 2
-  (el overlap producer-consumer N=2 shippeó en 028; N=3..5 requiere
-  un refactor más profundo — diferido).
-- **§8** — Cuota de bandwidth por-batch.
-- **§10** — Items de watchlist (concurrencia CMIS por-carpeta,
-  warm-up del pool, budgets de retry por pipeline, auto-completion
-  CLI, …).
-
-Hitos operacionales fuera del documento de roadmap:
-
-- Dry run con datos reales contra staging.
-- Primera migración productiva.
-
-### Removidos (ya no pendientes)
-
-- ~~§2 Nivel 5 de métricas de sistema (sampleo con `psutil`)~~ — shippeado en 026.
-- ~~§3 Análisis de logs offline (`cmcourier analyze`)~~ — shippeado en 027.
-- ~~§4 Idempotencia distribuida AS400 NIARVILOG~~ — shippeado en 034.
-- ~~§5 Auto-tuning adaptativo de workers AIMD~~ — shippeado en 025.
-- ~~§6 Pipelines adicionales (csv / as400 / local-scan)~~ —
-  shippeado en 012 / 014 / 016.
-- ~~§7 (N=2)~~ — overlap producer-consumer de dos batches en
-  vuelo, shippeado en 028.
+_Sin cambios pendientes de release — todo el trabajo está versionado
+abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
