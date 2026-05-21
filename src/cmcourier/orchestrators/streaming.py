@@ -415,6 +415,12 @@ class StreamingOrchestrator:
 
             controller.set_p95_provider(_p95_provider)
             controller.start()
+        # 096: el reconciliador periódico AS400 corre durante toda la
+        # corrida streaming; su pasada final está en stop(). getattr
+        # defensivo — los dobles de test del pipeline no lo definen.
+        periodic_recon = getattr(self._pipeline, "_periodic_reconciler", None)
+        if periodic_recon is not None:
+            periodic_recon.start()
         try:
             # 038: pre-abre el `connection pool` de S5 para que el
             # primer `batch` de uploads no pague el handshake
@@ -536,6 +542,8 @@ class StreamingOrchestrator:
                 for c in consumers:
                     c.join()
         finally:
+            if periodic_recon is not None:
+                periodic_recon.stop()
             if self._lane_controller is not None:
                 self._lane_controller.stop()
             if controller is not None:

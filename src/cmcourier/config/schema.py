@@ -582,6 +582,18 @@ class NiarvilogColumnsModel(BaseModel):
         return _validate_sql_identifier(v)
 
 
+class PeriodicSyncConfig(BaseModel):
+    """096 — perillas del modo de sincronización ``periodic``.
+
+    ``interval_minutes`` controla cada cuánto el reconciliador de fondo
+    sincroniza SQLite ↔ AS400. Solo aplica cuando
+    ``tracking.as400_sync.mode == "periodic"``.
+    """
+
+    model_config = _STRICT
+    interval_minutes: int = Field(default=5, ge=1, le=1440)
+
+
 class As400SyncConfig(BaseModel):
     """POST-MVP §4 — coordinación distribuida de `idempotency` vía AS400 NIARVILOG.
 
@@ -590,6 +602,16 @@ class As400SyncConfig(BaseModel):
     centralizada ``RVILIB.NIARVILOG`` para `idempotency` cross-`batch`,
     claim atómico contra procesos concurrentes, y estado de upload
     visible para el operador.
+
+    ``mode`` (096) elige cómo se sincroniza con AS400:
+
+    * ``"claim"`` (default): claim atómico por-documento en S5 — el
+      comportamiento pre-096. Previene doble-upload contra procesos
+      concurrentes a costa de 2-3 round-trips sincrónicos por doc.
+    * ``"periodic"``: S5 escribe solo SQLite; un reconciliador de fondo
+      sincroniza las dos bases cada ``periodic.interval_minutes``.
+      **No previene** doble-upload — los conflictos se detectan
+      post-hoc. Solo para entornos sin migrador competidor.
     """
 
     model_config = _STRICT
@@ -601,6 +623,8 @@ class As400SyncConfig(BaseModel):
     stale_in_progress_minutes: int = Field(default=30, ge=1, le=1440)
     retry_attempts: int = Field(default=3, ge=1, le=10)
     retry_base_delay_s: float = Field(default=5.0, gt=0)
+    mode: Literal["claim", "periodic"] = "claim"
+    periodic: PeriodicSyncConfig | None = None
 
     @field_validator("library", "table")
     @classmethod
@@ -612,6 +636,16 @@ class As400SyncConfig(BaseModel):
         if self.enabled and self.connection is None:
             msg = (
                 "tracking.as400_sync.enabled=true requires tracking.as400_sync.connection to be set"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _periodic_required_when_mode_periodic(self) -> As400SyncConfig:
+        if self.mode == "periodic" and self.periodic is None:
+            msg = (
+                "tracking.as400_sync.mode='periodic' requires "
+                "tracking.as400_sync.periodic to be set"
             )
             raise ValueError(msg)
         return self

@@ -52,6 +52,53 @@ Hitos operacionales fuera del documento de roadmap:
 
 ---
 
+## [0.98.0] — 2026-05-20 — **Modo de sincronización periódico para AS400**
+
+El sync AS400 del cambio 034 es **por-documento y sincrónico**: cada
+doc en S5 hace `try_claim` antes y `mark_uploaded`/`mark_failed`
+después — round-trips a DB2-for-i en el critical path del upload. Para
+despliegues **sin migrador competidor**, ese claim atómico distribuido
+es overhead que no compra nada. Este cambio agrega un modo de sync
+alternativo, opt-in, que saca AS400 del hot path.
+
+### Added
+
+- **`tracking.as400_sync.mode`** (`claim` | `periodic`, default
+  `claim`) + **`PeriodicSyncConfig.interval_minutes`** (schema).
+- **Modo `periodic`**: S5 escribe solo SQLite y encola el contexto
+  del doc en un `PendingSyncBuffer`. Un reconciliador de fondo
+  (`As400Reconciler` + daemon `PeriodicReconciler`) propaga a AS400
+  cada `interval_minutes`, más una pasada final al terminar la corrida.
+- **Tres categorías de reconciliación**: `synced_to_as400` (doc local
+  propagado), `synced_to_local` (fila `O` ajena importada a SQLite vía
+  `SQLiteTrackingStore.record_external_upload`), `conflict` (estado
+  divergente en las dos bases → resolución manual).
+- **Log nuevo `reconcile-{date}.jsonl`** (`cmcourier.metrics.reconcile`):
+  un evento `reconcile_pass` por pasada + un `reconcile_conflict` por
+  cada conflicto, con el `hint` de qué `sync resolve` correr.
+- Integración del daemon en los tres orchestrators (`StagedPipeline`,
+  `StreamingOrchestrator`, `MultiBatchOrchestrator`).
+
+### ⚠️ Tradeoff
+
+El modo `periodic` **sacrifica la prevención de doble-upload**. El
+claim atómico por-documento del modo `claim` existe para que dos
+sistemas no suban el mismo doc; en `periodic` los conflictos se
+detectan **post-hoc** vía el log, no se previenen. El default sigue
+siendo `claim`.
+
+### Notas
+
+- **Backward-compat total**: `mode: claim` (default) es byte-idéntico
+  a pre-096.
+- Diferido: el CLI `sync reconcile` standalone — un proceso CLI no
+  tiene el `PendingSyncBuffer` in-process. Se planifica por separado.
+- ~28 tests nuevos (`test_reconciler.py`, schema, coordinator,
+  observability).
+- Spec: `specs/096-as400-periodic-sync-mode/`.
+
+---
+
 ## [0.96.0] — 2026-05-19 — **Smart routing PDF/TIFF en S4 (evita overhead del ProcessPool en Windows)**
 
 Datos reales del operador productivo (Windows, 200 docs mixtos)

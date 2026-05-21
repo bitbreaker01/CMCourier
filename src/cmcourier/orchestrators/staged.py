@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from cmcourier.services.idempotency import IdempotencyCoordinator
+    from cmcourier.services.reconciler import PeriodicReconciler
 
 from cmcourier.adapters.assembly import PdfAssembler
 from cmcourier.adapters.assembly.pdf_assembler import AssemblyTimings
@@ -162,6 +163,7 @@ class StagedPipeline:
         auto_tune: AutoTuneConfig | None = None,
         sampler: SystemMetricsSampler | None = None,
         coordinator: IdempotencyCoordinator | None = None,
+        periodic_reconciler: PeriodicReconciler | None = None,
         heavy_light_lanes: HeavyLightLanesConfig | None = None,
         document_cache: DocumentCacheService | None = None,
         s4_process_pool: ProcessPoolExecutor | None = None,
@@ -211,6 +213,10 @@ class StagedPipeline:
         # está seteado, el coordinador agrega encima el path de AS400
         # NIARVILOG.
         self._coordinator = coordinator
+        # 096: reconciliador periódico AS400. None salvo cuando
+        # ``tracking.as400_sync.mode == "periodic"`` — la capa de wiring
+        # lo construye y este orchestrator solo lo arranca/para en run().
+        self._periodic_reconciler = periodic_reconciler
         # 037: cache de metadata cross-batch. None cuando está
         # deshabilitado (default) — S3 siempre invoca
         # MetadataService.resolve (comportamiento pre-037).
@@ -365,6 +371,11 @@ class StagedPipeline:
 
         if self._sampler is not None:
             self._sampler.start()
+        # 096: el reconciliador de fondo corre durante toda la corrida;
+        # su pasada FINAL (en stop()) garantiza que nada quede sin
+        # sincronizar a AS400.
+        if self._periodic_reconciler is not None:
+            self._periodic_reconciler.start()
         try:
             s0_start = time.monotonic()
             triggers = list(self._trigger_strategy.acquire(source_descriptor))
@@ -407,6 +418,11 @@ class StagedPipeline:
         finally:
             if self._sampler is not None:
                 self._sampler.stop()
+            # 096: para el daemon y corre la pasada de reconciliación
+            # final. Después del flush de SQLite para que el último
+            # estado terminal esté visible para la pasada final.
+            if self._periodic_reconciler is not None:
+                self._periodic_reconciler.stop()
 
         elapsed = time.monotonic() - start
         total_docs = s1_done + skipped

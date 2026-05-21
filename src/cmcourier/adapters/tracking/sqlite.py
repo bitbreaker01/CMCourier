@@ -78,6 +78,10 @@ CREATE TABLE IF NOT EXISTS migration_log (
 )
 """
 
+# 096: batch_id sintético bajo el que el As400Reconciler importa docs
+# que otro sistema subió (no choca con UUIDs de corridas reales).
+_EXTERNAL_IMPORT_BATCH = "__as400_import__"
+
 _CREATE_MIGRATION_BATCH = """
 CREATE TABLE IF NOT EXISTS migration_batch (
     batch_id        TEXT PRIMARY KEY,
@@ -394,6 +398,43 @@ class SQLiteTrackingStore(ITrackingStore):
                 "WHERE rvabrep_txn_num = ? AND batch_id = ?",
                 (stage.value, completed_at, cm_object_id, txn_num, batch_id),
             )
+
+    def record_external_upload(
+        self,
+        *,
+        txn_num: str,
+        file_name: str,
+        shortname: str,
+        cif: str,
+        system_id: str,
+        cm_object_id: str,
+    ) -> None:
+        """096: importa a ``migration_log`` un doc que otro sistema subió.
+
+        Lo usa el :class:`As400Reconciler` cuando AS400 tiene una fila
+        ``STSCOD='O'`` que el tracking local no conoce. La fila se inserta
+        bajo el ``batch_id`` sintético ``__as400_import__`` para no
+        colisionar con corridas reales; ``INSERT OR IGNORE`` la vuelve
+        idempotente entre pasadas."""
+        now = datetime.now().isoformat()
+        self._enqueue(
+            "INSERT OR IGNORE INTO migration_log ("
+            "trigger_shortname, trigger_cif, trigger_system_id, "
+            "rvabrep_txn_num, rvabrep_file_name, batch_id, status, created_at, "
+            "cm_object_id, completed_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, 'S5_DONE', ?, ?, ?)",
+            (
+                shortname,
+                cif,
+                system_id,
+                txn_num,
+                file_name,
+                _EXTERNAL_IMPORT_BATCH,
+                now,
+                cm_object_id,
+                now,
+            ),
+        )
 
     def mark_stage_failed(
         self, txn_num: str, batch_id: str, stage: StageStatus, error: str

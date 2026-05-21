@@ -38,6 +38,7 @@ _METRICS_LOGGERS: tuple[str, ...] = (
     "cmcourier.metrics.pipeline",
     "cmcourier.metrics.network",
     "cmcourier.metrics.slow_ops",
+    "cmcourier.metrics.reconcile",
 )
 
 
@@ -156,6 +157,23 @@ def configure(
         network_handler.setLevel(logging.INFO)
         network_handler.addFilter(pii_filter)
         network_log.addHandler(network_handler)
+
+    # 096: handler de reconciliación AS400. Siempre activo — el log de
+    # conflictos es operacionalmente crítico (le dice al operador qué
+    # resolver a mano) y es de bajo volumen (una pasada cada X minutos).
+    reconcile_log = logging.getLogger("cmcourier.metrics.reconcile")
+    reconcile_log.propagate = False
+    reconcile_log.setLevel(logging.INFO)
+    reconcile_handler = RotatingFileHandler(
+        log_dir / f"reconcile-{date_stamp}.jsonl",
+        maxBytes=rotation_bytes,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    reconcile_handler.setFormatter(json_formatter)
+    reconcile_handler.setLevel(logging.INFO)
+    reconcile_handler.addFilter(pii_filter)
+    reconcile_log.addHandler(reconcile_handler)
 
     # Logger de `slow ops`: el archivo por batch lo posee MetricsRecorder;
     # este logger existe solo por simetría de namespace.

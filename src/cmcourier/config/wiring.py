@@ -62,6 +62,11 @@ from cmcourier.services.metadata import (
     SourceConfig,
     ValidationConfig,
 )
+from cmcourier.services.reconciler import (
+    As400Reconciler,
+    PendingSyncBuffer,
+    PeriodicReconciler,
+)
 from cmcourier.services.triggers.csv import (
     CsvTriggerColumnsConfig,
     CsvTriggerStrategy,
@@ -166,7 +171,7 @@ def build_pipeline(
     # 034 fase 3: capa opcional de coordinación AS400 NIARVILOG. Cuando
     # tracking.as400_sync.enabled es false (default), esto es None y el
     # pipeline corre en modo legacy solo-SQLite.
-    coordinator = _build_idempotency_coordinator(
+    coordinator, periodic_reconciler = _build_idempotency_coordinator(
         config=config, secrets=secrets, sqlite_store=tracking_store
     )
     document_cache = _build_document_cache_service(config=config)
@@ -185,6 +190,7 @@ def build_pipeline(
         auto_tune=config.cmis.auto_tune,
         sampler=sampler,
         coordinator=coordinator,
+        periodic_reconciler=periodic_reconciler,
         heavy_light_lanes=config.processing.heavy_light_lanes,
         document_cache=document_cache,
         s4_process_pool=s4_process_pool,
@@ -209,15 +215,20 @@ def _build_idempotency_coordinator(
     config: PipelineConfig,
     secrets: Secrets,
     sqlite_store: SQLiteTrackingStore,
-) -> IdempotencyCoordinator | None:
+) -> tuple[IdempotencyCoordinator | None, PeriodicReconciler | None]:
     """Cablea el coordinador SQLite + (opcional) AS400 NIARVILOG (034).
 
-    Devuelve ``None`` cuando ``tracking.as400_sync.enabled=false`` para
-    que el StagedPipeline se quede en modo legacy pre-034.
+    Devuelve ``(None, None)`` cuando ``tracking.as400_sync.enabled=false``
+    para que el StagedPipeline se quede en modo legacy pre-034.
+
+    096: cuando ``mode == "periodic"`` devuelve también un
+    :class:`PeriodicReconciler` — el coordinador escribe solo SQLite +
+    encola en un buffer, y el reconciliador propaga a AS400 cada
+    ``periodic.interval_minutes``.
     """
     sync_cfg = config.tracking.as400_sync
     if not sync_cfg.enabled:
-        return None
+        return None, None
     if sync_cfg.connection is None:  # pragma: no cover — el schema lo garantiza
         raise ConfigurationError(
             "tracking.as400_sync.enabled=true requires connection settings",
@@ -237,7 +248,23 @@ def _build_idempotency_coordinator(
         retry_attempts=sync_cfg.retry_attempts,
         retry_base_delay_s=sync_cfg.retry_base_delay_s,
     )
-    return IdempotencyCoordinator(sqlite_store=sqlite_store, as400_store=as400_store)
+    if sync_cfg.mode == "periodic":
+        assert sync_cfg.periodic is not None  # el schema lo garantiza
+        buffer = PendingSyncBuffer()
+        coordinator = IdempotencyCoordinator(
+            sqlite_store=sqlite_store,
+            as400_store=as400_store,
+            mode="periodic",
+            pending_buffer=buffer,
+        )
+        reconciler = As400Reconciler(sqlite_store=sqlite_store, as400_store=as400_store)
+        periodic = PeriodicReconciler(
+            reconciler=reconciler,
+            buffer=buffer,
+            interval_s=sync_cfg.periodic.interval_minutes * 60.0,
+        )
+        return coordinator, periodic
+    return IdempotencyCoordinator(sqlite_store=sqlite_store, as400_store=as400_store), None
 
 
 # ---------------------------------------------------------------------------
