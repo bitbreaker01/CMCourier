@@ -52,6 +52,7 @@ Guías más densas, cada una atada a una feature concreta del sistema.
 | [`heavy-light-lanes.md`](heavy-light-lanes.md) | Lanes adaptativos heavy/light (036, POST-MVP §1) |
 | [`multi-batch.md`](multi-batch.md) | Multi-batch con `batches_in_flight` (028) |
 | [`as400-sync.md`](as400-sync.md) | Idempotencia distribuida AS400 NIARVILOG (034, POST-MVP §4) |
+| [`testing-as400-sync.md`](testing-as400-sync.md) | Probar el sync AS400 en staging — drills de conflicto, `sync resolve` (034) |
 | [`document-cache.md`](document-cache.md) | Cache cross-batch de metadatos (037, POST-MVP §9) |
 | [`log-analysis.md`](log-analysis.md) | Análisis offline con `cmcourier analyze` (027) |
 | [`mock-rvabrep-generator.md`](mock-rvabrep-generator.md) | Generar CSV RVABREP sintético (039) |
