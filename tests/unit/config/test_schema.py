@@ -1019,6 +1019,47 @@ class TestAs400SyncConfig:
         assert cfg.library == "MIBIB"
         assert cfg.table == "MININARVILOG"
 
+    # ----- 096: modo de sincronización (claim vs periodic) -----
+
+    def test_mode_defaults_to_claim(self) -> None:
+        # 096: el default preserva el claim atómico por-doc pre-096.
+        from cmcourier.config.schema import As400SyncConfig
+
+        cfg = As400SyncConfig()
+        assert cfg.mode == "claim"
+        assert cfg.periodic is None
+
+    def test_mode_rejects_unknown_value(self) -> None:
+        from cmcourier.config.schema import As400SyncConfig
+
+        with pytest.raises(ValidationError):
+            As400SyncConfig(mode="continuous")  # type: ignore[arg-type]
+
+    def test_mode_periodic_requires_periodic_block(self) -> None:
+        # 096: mode=periodic sin el bloque `periodic` es inválido.
+        from cmcourier.config.schema import As400SyncConfig
+
+        with pytest.raises(ValidationError) as ei:
+            As400SyncConfig(mode="periodic", periodic=None)
+        assert "periodic" in str(ei.value).lower()
+
+    def test_mode_periodic_with_block_valid(self) -> None:
+        from cmcourier.config.schema import As400SyncConfig, PeriodicSyncConfig
+
+        cfg = As400SyncConfig(mode="periodic", periodic=PeriodicSyncConfig())
+        assert cfg.mode == "periodic"
+        assert cfg.periodic is not None
+        assert cfg.periodic.interval_minutes == 5  # default
+
+    def test_periodic_interval_minutes_range(self) -> None:
+        from cmcourier.config.schema import PeriodicSyncConfig
+
+        with pytest.raises(ValidationError):
+            PeriodicSyncConfig(interval_minutes=0)
+        with pytest.raises(ValidationError):
+            PeriodicSyncConfig(interval_minutes=2000)
+        assert PeriodicSyncConfig(interval_minutes=15).interval_minutes == 15
+
 
 # ---------------------------------------------------------------------------
 # 049 — NiarvilogColumnsModel

@@ -34,6 +34,7 @@ __all__ = [
 
 import logging
 from dataclasses import dataclass, field
+from typing import Literal
 
 from cmcourier.adapters.tracking.as400_niarvilog import (
     As400NiarvilogStore,
@@ -47,6 +48,7 @@ from cmcourier.domain.models import (
     Trigger,
 )
 from cmcourier.domain.ports import ITrackingStore
+from cmcourier.services.reconciler import PendingSyncBuffer, PendingSyncItem
 
 _log = logging.getLogger(__name__)
 
@@ -86,9 +88,22 @@ class IdempotencyCoordinator:
         *,
         sqlite_store: ITrackingStore,
         as400_store: As400NiarvilogStore | None = None,
+        mode: Literal["claim", "periodic"] = "claim",
+        pending_buffer: PendingSyncBuffer | None = None,
     ) -> None:
         self._sqlite = sqlite_store
         self._as400 = as400_store
+        # 096: en mode=periodic, S5 escribe solo SQLite y encola el
+        # contexto del doc en `pending_buffer` — el claim y la propagación
+        # a AS400 quedan a cargo del reconciliador de fondo.
+        self._mode = mode
+        self._pending_buffer = pending_buffer
+
+    @property
+    def _as400_in_hot_path(self) -> bool:
+        """True solo cuando AS400 debe tocarse en el critical path de S5
+        (mode=claim con store activo). En periodic siempre False."""
+        return self._as400 is not None and self._mode == "claim"
 
     # ----- API de lectura --------------------------------------------
 
@@ -109,8 +124,9 @@ class IdempotencyCoordinator:
         la PK compuesta. Cuando AS400 es ``None``, cae a SQLite por
         txn_num.
         """
-        if self._as400 is None:
+        if not self._as400_in_hot_path:
             return self._sqlite.is_uploaded(document.txn_num)
+        assert self._as400 is not None
         row = self._as400.read_state(
             siscod=trigger.audit_row().get("system_id") or "",
             trnnum=document.txn_num,
@@ -135,8 +151,9 @@ class IdempotencyCoordinator:
         Con AS400 ``None``: siempre devuelve ``True`` (sin claim
         distribuido).
         """
-        if self._as400 is None:
+        if not self._as400_in_hot_path:
             return True
+        assert self._as400 is not None
         return self._as400.try_claim(
             record=record,
             document=document,
@@ -164,8 +181,19 @@ class IdempotencyCoordinator:
             StageStatus.S5_DONE,
             cm_object_id=cm_object_id,
         )
-        if self._as400 is None:
+        if self._mode == "periodic":
+            self._buffer_pending(
+                record=record,
+                document=document,
+                mapping=mapping,
+                trigger=trigger,
+                outcome="uploaded",
+                cm_object_id=cm_object_id,
+            )
             return
+        if not self._as400_in_hot_path:
+            return
+        assert self._as400 is not None
         self._as400.mark_uploaded(
             record=record,
             document=document,
@@ -186,14 +214,52 @@ class IdempotencyCoordinator:
     ) -> None:
         """Marca <stage>_FAILED en SQLite primero y luego propaga a AS400."""
         self._sqlite.mark_stage_failed(record.rvabrep_txn_num, record.batch_id, stage, error)
-        if self._as400 is None:
+        if self._mode == "periodic":
+            self._buffer_pending(
+                record=record,
+                document=document,
+                mapping=mapping,
+                trigger=trigger,
+                outcome="failed",
+                error=error,
+            )
             return
+        if not self._as400_in_hot_path:
+            return
+        assert self._as400 is not None
         self._as400.mark_failed(
             record=record,
             document=document,
             mapping=mapping,
             trigger=trigger,
             error=error,
+        )
+
+    def _buffer_pending(
+        self,
+        *,
+        record: MigrationRecord,
+        document: RVABREPDocument,
+        mapping: CMMapping,
+        trigger: Trigger,
+        outcome: Literal["uploaded", "failed"],
+        cm_object_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """096: encola el contexto del doc para que el reconciliador de
+        fondo lo propague a AS400. No-op si no hay buffer (defensivo)."""
+        if self._pending_buffer is None:
+            return
+        self._pending_buffer.append(
+            PendingSyncItem(
+                record=record,
+                document=document,
+                mapping=mapping,
+                trigger=trigger,
+                outcome=outcome,
+                cm_object_id=cm_object_id,
+                error=error,
+            )
         )
 
     # ----- pre-flight ------------------------------------------------
@@ -219,8 +285,11 @@ class IdempotencyCoordinator:
 
         Cuando AS400 es ``None``, devuelve un reporte vacío (no-op).
         """
-        if self._as400 is None:
+        # 096: en periodic, el preflight es no-op — los conflictos los
+        # detecta (y tolera) el reconciliador de fondo, no abortan S5.
+        if not self._as400_in_hot_path:
             return SyncReport()
+        assert self._as400 is not None
         stale = self._as400.cleanup_stale_in_progress()
         imported: list[str] = []
         conflicts: list[str] = []

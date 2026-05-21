@@ -317,3 +317,120 @@ class TestPreflightSync:
         with pytest.raises(IdempotencyConflictError) as ei:
             coord.preflight_sync(batch_scope={"0000001"}, raise_on_conflict=True)
         assert "0000001" in str(ei.value)
+
+
+# ---------------------------------------------------------------------------
+# 096 — modo de sincronización periódico
+# ---------------------------------------------------------------------------
+
+
+class TestCoordinatorPeriodicMode:
+    """En mode=periodic, S5 NO toca AS400 — solo escribe SQLite. La
+    reconciliación queda a cargo del As400Reconciler de fondo."""
+
+    def test_try_claim_does_not_touch_as400(self) -> None:
+        sqlite = MagicMock()
+        as400 = MagicMock()
+        coord = IdempotencyCoordinator(sqlite_store=sqlite, as400_store=as400, mode="periodic")
+        record, document, mapping, trigger = _record()
+        assert (
+            coord.try_claim(record=record, document=document, mapping=mapping, trigger=trigger)
+            is True
+        )
+        as400.try_claim.assert_not_called()
+
+    def test_mark_uploaded_writes_sqlite_only(self) -> None:
+        sqlite = MagicMock()
+        as400 = MagicMock()
+        coord = IdempotencyCoordinator(sqlite_store=sqlite, as400_store=as400, mode="periodic")
+        record, document, mapping, trigger = _record()
+        coord.mark_uploaded(
+            record=record,
+            document=document,
+            mapping=mapping,
+            trigger=trigger,
+            cm_object_id="cm-xyz",
+        )
+        sqlite.mark_stage_done.assert_called_once()
+        as400.mark_uploaded.assert_not_called()
+
+    def test_mark_failed_writes_sqlite_only(self) -> None:
+        sqlite = MagicMock()
+        as400 = MagicMock()
+        coord = IdempotencyCoordinator(sqlite_store=sqlite, as400_store=as400, mode="periodic")
+        record, document, mapping, trigger = _record()
+        coord.mark_failed(
+            record=record,
+            document=document,
+            mapping=mapping,
+            trigger=trigger,
+            stage=StageStatus.S5_FAILED,
+            error="boom",
+        )
+        sqlite.mark_stage_failed.assert_called_once()
+        as400.mark_failed.assert_not_called()
+
+    def test_preflight_sync_is_noop_and_never_raises(self) -> None:
+        # periodic tolera conflictos: el preflight no debe abortar el pipeline.
+        sqlite = MagicMock()
+        sqlite.is_uploaded.return_value = True
+        as400 = MagicMock()
+        as400.cleanup_stale_in_progress.return_value = 0
+        as400.read_state_by_txn.return_value = _niarvilog_row(stscod="N")
+        coord = IdempotencyCoordinator(sqlite_store=sqlite, as400_store=as400, mode="periodic")
+        report = coord.preflight_sync(batch_scope={"0000001"}, raise_on_conflict=True)
+        assert report.conflicts == []
+        as400.read_state_by_txn.assert_not_called()
+
+
+class TestCoordinatorPeriodicBuffer:
+    """En periodic con un PendingSyncBuffer, S5 encola el contexto del doc."""
+
+    def test_mark_uploaded_appends_uploaded_item_to_buffer(self) -> None:
+        from cmcourier.services.reconciler import PendingSyncBuffer
+
+        sqlite = MagicMock()
+        buffer = PendingSyncBuffer()
+        coord = IdempotencyCoordinator(
+            sqlite_store=sqlite,
+            as400_store=MagicMock(),
+            mode="periodic",
+            pending_buffer=buffer,
+        )
+        record, document, mapping, trigger = _record()
+        coord.mark_uploaded(
+            record=record,
+            document=document,
+            mapping=mapping,
+            trigger=trigger,
+            cm_object_id="cm-xyz",
+        )
+        items = buffer.drain()
+        assert len(items) == 1
+        assert items[0].outcome == "uploaded"
+        assert items[0].cm_object_id == "cm-xyz"
+
+    def test_mark_failed_appends_failed_item_to_buffer(self) -> None:
+        from cmcourier.services.reconciler import PendingSyncBuffer
+
+        sqlite = MagicMock()
+        buffer = PendingSyncBuffer()
+        coord = IdempotencyCoordinator(
+            sqlite_store=sqlite,
+            as400_store=MagicMock(),
+            mode="periodic",
+            pending_buffer=buffer,
+        )
+        record, document, mapping, trigger = _record()
+        coord.mark_failed(
+            record=record,
+            document=document,
+            mapping=mapping,
+            trigger=trigger,
+            stage=StageStatus.S5_FAILED,
+            error="boom",
+        )
+        items = buffer.drain()
+        assert len(items) == 1
+        assert items[0].outcome == "failed"
+        assert items[0].error == "boom"

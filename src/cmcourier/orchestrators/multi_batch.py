@@ -420,6 +420,12 @@ class MultiBatchOrchestrator:
         if controller is not None:
             controller.set_p95_provider(self._upload_p95_observer)
             controller.start()
+        # 096: arranca el reconciliador periódico AS400 para la corrida
+        # multi-batch con overlap. getattr defensivo — los dobles de
+        # test del pipeline no lo definen.
+        periodic_recon = getattr(self._pipeline, "_periodic_reconciler", None)
+        if periodic_recon is not None:
+            periodic_recon.start()
         try:
             for idx, chunk in enumerate(chunked(triggers, batch_size)):
                 prepared = self._prep_one_chunk(
@@ -430,6 +436,8 @@ class MultiBatchOrchestrator:
                         prepared, results=results, failed=failed, results_lock=results_lock
                     )
         finally:
+            if periodic_recon is not None:
+                periodic_recon.stop()
             if controller is not None:
                 controller.stop(timeout=2.0)
             if sampler is not None:

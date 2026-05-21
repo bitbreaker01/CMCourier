@@ -48,6 +48,7 @@ def _reset_cmcourier_logger() -> Iterator[None]:
         "cmcourier.metrics.pipeline",
         "cmcourier.metrics.network",
         "cmcourier.metrics.slow_ops",
+        "cmcourier.metrics.reconcile",
     )
     for name in targets:
         logger = logging.getLogger(name)
@@ -121,3 +122,18 @@ def test_configure_idempotent_replaces_handlers(obs_config: ObservabilityConfig)
     root = logging.getLogger("cmcourier")
     assert _stderr_handlers(root) == []
     assert len(_file_handlers(root)) == 1, "exactly one file handler after re-configure"
+
+
+def test_configure_attaches_reconcile_log(obs_config: ObservabilityConfig) -> None:
+    """096: el logger cmcourier.metrics.reconcile escribe a reconcile-*.jsonl."""
+    configure(obs_config, "INFO")
+    reconcile_log = logging.getLogger("cmcourier.metrics.reconcile")
+    file_handlers = _file_handlers(reconcile_log)
+    assert len(file_handlers) == 1, "reconcile log must have a rotating file handler"
+    assert reconcile_log.propagate is False
+    reconcile_log.info("reconcile_pass", extra={"event": "reconcile_pass"})
+    for h in file_handlers:
+        h.flush()
+    written = list((obs_config.log_dir).glob("reconcile-*.jsonl"))
+    assert len(written) == 1
+    assert "reconcile_pass" in written[0].read_text(encoding="utf-8")
