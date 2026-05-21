@@ -7,6 +7,7 @@ mockean con :class:`MagicMock`. ``read_state`` devuelve un
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
@@ -337,3 +338,84 @@ class TestPeriodicReconciler:
         )
         periodic.run_one()
         assert reconciler.run_pass.call_args.kwargs["import_scope"] == {"0000007"}
+
+
+# ---------------------------------------------------------------------------
+# 098 — resiliencia: ningún ítem drenado se pierde
+# ---------------------------------------------------------------------------
+
+
+class TestReconcilerResilience:
+    """098: una falla per-ítem NO debe abortar el batch ni perder ítems."""
+
+    def test_one_failing_item_does_not_abort_the_batch(self) -> None:
+        sqlite = MagicMock()
+        as400 = MagicMock()
+        as400.cleanup_stale_in_progress.return_value = 0
+        as400.try_claim.return_value = True
+        # El 2do ítem explota en read_state; el 1ro y el 3ro están OK.
+        as400.read_state.side_effect = [None, RuntimeError("AS400 boom"), None]
+        rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
+
+        items = [_item(txn="0000001"), _item(txn="0000002"), _item(txn="0000003")]
+        result = rec.run_pass(items)
+
+        # Los dos sanos se sincronizaron — la falla del 2do no los arrastró.
+        assert set(result.synced_to_as400) == {"0000001", "0000003"}
+        assert result.failed == 1
+        # El que falló queda para reintento, no se pierde.
+        assert len(result.requeued) == 1
+        assert result.requeued[0].document.txn_num == "0000002"
+
+    def test_run_pass_never_raises_even_if_everything_fails(self) -> None:
+        sqlite = MagicMock()
+        as400 = MagicMock()
+        as400.cleanup_stale_in_progress.side_effect = RuntimeError("AS400 down")
+        as400.read_state.side_effect = RuntimeError("AS400 down")
+        rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
+
+        # No debe levantar — todos los ítems van a requeued.
+        result = rec.run_pass([_item(txn="0000001"), _item(txn="0000002")])
+        assert result.failed == 2
+        assert len(result.requeued) == 2
+
+    def test_cleanup_stale_failure_does_not_abort_pass(self) -> None:
+        sqlite = MagicMock()
+        as400 = MagicMock()
+        as400.cleanup_stale_in_progress.side_effect = RuntimeError("stale boom")
+        as400.read_state.return_value = None
+        as400.try_claim.return_value = True
+        rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
+
+        result = rec.run_pass([_item(txn="0000001")])
+        # El fallo de cleanup no impide procesar los ítems.
+        assert result.synced_to_as400 == ["0000001"]
+
+    def test_stop_event_halts_pass_and_requeues_remainder(self) -> None:
+        sqlite = MagicMock()
+        as400 = MagicMock()
+        as400.cleanup_stale_in_progress.return_value = 0
+        rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
+
+        stop = threading.Event()
+        stop.set()  # ya seteado → corta antes del primer ítem
+        items = [_item(txn="0000001"), _item(txn="0000002")]
+        result = rec.run_pass(items, stop_event=stop)
+
+        assert result.synced_to_as400 == []
+        assert len(result.requeued) == 2  # todo vuelve al buffer
+
+    def test_run_one_rebuffers_failed_items(self) -> None:
+        sqlite = MagicMock()
+        as400 = MagicMock()
+        as400.cleanup_stale_in_progress.return_value = 0
+        as400.read_state.side_effect = RuntimeError("AS400 boom")
+        rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
+
+        buf = PendingSyncBuffer()
+        buf.append(_item(txn="0000001"))
+        periodic = PeriodicReconciler(reconciler=rec, buffer=buf, interval_s=999)
+
+        periodic.run_one()
+        # El ítem que falló volvió al buffer — no se perdió.
+        assert len(buf) == 1

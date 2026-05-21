@@ -52,6 +52,51 @@ Hitos operacionales fuera del documento de roadmap:
 
 ---
 
+## [0.99.1] — 2026-05-20 — **Fix de pérdida de datos en el reconciliador periódico**
+
+Reporte del operador: una corrida en `mode: periodic` procesó ~4000
+documentos pero AS400 NIARVILOG quedó con solo ~555 registros. Pérdida
+de datos real — dos bugs del cambio 096 que se combinaban en
+`services/reconciler.py`:
+
+- **`run_pass` abortaba el batch entero ante una falla per-ítem**: el
+  loop llamaba `_reconcile_item` sin `try/except`, así que un error de
+  AS400 en un solo doc desenrollaba toda la pasada.
+- **`run_one` drenaba el buffer ANTES de procesar**: si `run_pass`
+  explotaba a mitad, los ítems ya drenados no volvían al buffer — se
+  perdían en silencio.
+
+### Fixed
+
+- **`run_pass` resiliente**: `cleanup_stale_in_progress`, cada
+  `_reconcile_item` y `_import_foreign_uploads` van envueltos en
+  `try/except`. La pasada **nunca levanta excepción** y procesa
+  **todos** los ítems.
+- **Re-encolado de fallidos**: los ítems que fallan vuelven al buffer
+  (`ReconcileResult.requeued`) para reintento en la próxima pasada —
+  nunca se pierden en silencio.
+- **Corte cooperativo** (`run_pass(..., stop_event=)`): el daemon
+  corta entre ítems al pararse y re-encola el resto; la pasada final
+  corre completa en el thread no-daemon, a salvo del cierre del proceso.
+- **Observabilidad**: `reconcile_pass` ahora logea `failed` / `requeued`;
+  un `reconcile_failure` por ítem fallido con su txn y error.
+
+### Mitigación / recuperación
+
+- Mientras no se despliegue: usar `tracking.as400_sync.mode: claim`
+  (sincronización por-documento, más lenta pero sin pérdida).
+- Los ~3445 registros perdidos: los documentos están en CMIS y en
+  SQLite (`S5_DONE`) — solo faltan las filas de NIARVILOG. La
+  recuperación se planifica como cambio separado (requiere re-derivar
+  `DOCFRM`/`IMGTIP`/`IDNBAC`/`TIPIDN`, que SQLite no almacena).
+
+### Notas
+
+- ~5 tests nuevos en `tests/unit/services/test_reconciler.py`.
+- Spec: `specs/098-periodic-reconciler-data-loss/`.
+
+---
+
 ## [0.99.0] — 2026-05-20 — **Cancelación cooperativa del pipeline desde el TUI**
 
 El operador reportó: al apretar **"q"** con la corrida en progreso, el
