@@ -349,6 +349,53 @@ class As400NiarvilogStore:
         )
         return self._execute_write(sql, [cm_object_id, trnnum], "niarvilog_mark_uploaded_by_txn")
 
+    def insert_recovered_row(
+        self,
+        *,
+        siscod: str,
+        trnnum: str,
+        docfrm: str,
+        imgarc: str,
+        imgtip: str,
+        ctecif: str,
+        ctenum: int,
+        idnbac: str,
+        tipidn: str,
+        objidn: str,
+        numrei: int = 0,
+    ) -> int:
+        """099: INSERT directo de una fila terminal ``STSCOD='O'``.
+
+        Recupera un documento que se subió a CM pero perdió su fila en
+        NIARVILOG (bug 096, ver cambio 098). A diferencia de
+        ``try_claim``/``mark_uploaded``, recibe los 11 campos explícitos
+        — la recuperación los re-deriva desde SQLite + RVABREP + mapping,
+        no desde los objetos de dominio de una corrida en vuelo.
+        Devuelve el row count."""
+        c = self._cols
+        sql = (
+            f"INSERT INTO {self._full_table()} "
+            f"({c.system_id}, {c.txn_num}, {c.doc_format}, {c.image_archive}, "
+            f"{c.image_type}, {c.client_cif}, {c.client_num}, {c.status}, "
+            f"{c.idcm}, {c.cm_type}, {c.cm_object_id}, {c.retry_count}, "
+            f"{c.error_message}) "
+            f"VALUES (?, ?, ?, ?, ?, ?, ?, 'O', ?, ?, ?, ?, '')"
+        )
+        params: list[Any] = [
+            siscod,
+            trnnum,
+            docfrm,
+            imgarc,
+            imgtip,
+            ctecif,
+            ctenum,
+            idnbac,
+            tipidn,
+            objidn,
+            numrei,
+        ]
+        return self._execute_write(sql, params, "niarvilog_insert_recovered")
+
     def cleanup_stale_in_progress(self) -> int:
         """Resetea las filas con STSCOD='I' cuyo FINREI es más viejo que el umbral.
 

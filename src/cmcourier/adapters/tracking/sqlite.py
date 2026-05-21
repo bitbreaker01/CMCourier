@@ -212,6 +212,20 @@ class _WriteTask:
     params: tuple[Any, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class UploadedRecord:
+    """099: proyección de un doc ``S5_DONE`` con los campos que la
+    recuperación AS400 (`cmcourier sync recover`) necesita de SQLite."""
+
+    txn_num: str
+    cm_object_id: str
+    shortname: str
+    cif: str
+    system_id: str
+    file_name: str
+    retry_count: int
+
+
 # ---------------------------------------------------------------------------
 # Implementación
 # ---------------------------------------------------------------------------
@@ -487,6 +501,37 @@ class SQLiteTrackingStore(ITrackingStore):
             "WHERE rvabrep_txn_num = ? AND batch_id = ?",
             (source_file_path, page_count, file_size_bytes, txn_num, batch_id),
         )
+
+    def uploaded_records(self, batch_id: str | None = None) -> list[UploadedRecord]:
+        """099: devuelve los docs ``S5_DONE`` con los campos que la
+        recuperación AS400 necesita. ``batch_id`` opcional para acotar
+        a un batch; ``None`` recorre todo el tracking."""
+        sql = (
+            "SELECT rvabrep_txn_num, cm_object_id, trigger_shortname, "
+            "trigger_cif, trigger_system_id, rvabrep_file_name, retry_count "
+            "FROM migration_log WHERE status = 'S5_DONE'"
+        )
+        params: tuple[object, ...] = ()
+        if batch_id is not None:
+            sql += " AND batch_id = ?"
+            params = (batch_id,)
+        try:
+            with self._reader_lock:
+                rows = self._reader.execute(sql, params).fetchall()
+        except sqlite3.Error as exc:
+            raise TrackingError("uploaded_records failed", batch_id=batch_id) from exc
+        return [
+            UploadedRecord(
+                txn_num=r[0],
+                cm_object_id=r[1] or "",
+                shortname=r[2],
+                cif=r[3],
+                system_id=r[4],
+                file_name=r[5],
+                retry_count=r[6] or 0,
+            )
+            for r in rows
+        ]
 
     def is_uploaded(self, txn_num: str) -> bool:
         try:

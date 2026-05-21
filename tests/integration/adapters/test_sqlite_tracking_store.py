@@ -748,3 +748,43 @@ class TestRetryFailed:
         with pytest.raises(TrackingError):
             store.retry_failed(batch_id, stage=StageStatus.S5_DONE)
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# 099 — uploaded_records (entrada de la recuperación AS400)
+# ---------------------------------------------------------------------------
+
+
+class TestUploadedRecords:
+    def test_returns_only_s5_done_with_fields(self, store: SQLiteTrackingStore) -> None:
+        batch_id = store.start_batch(total_records=2)
+        # Un doc subido (S5_DONE) y uno que solo llegó a S1.
+        done = _make_record(batch_id, "TXN_UP1", status=StageStatus.S5_PENDING)
+        store.mark_stage_pending(done, StageStatus.S5_PENDING)
+        store.mark_stage_done("TXN_UP1", batch_id, StageStatus.S5_DONE, cm_object_id="cm-1")
+        pending = _make_record(batch_id, "TXN_UP2")
+        store.mark_stage_pending(pending, StageStatus.S1_PENDING)
+        store.mark_stage_done("TXN_UP2", batch_id, StageStatus.S1_DONE)
+        store.flush()
+
+        records = store.uploaded_records()
+
+        assert [r.txn_num for r in records] == ["TXN_UP1"]  # solo el S5_DONE
+        r = records[0]
+        assert r.cm_object_id == "cm-1"
+        assert r.system_id == "1"
+        assert r.file_name == "TESTFILE.001"
+        store.close()
+
+    def test_filters_by_batch_id(self, store: SQLiteTrackingStore) -> None:
+        b1 = store.start_batch(total_records=1)
+        b2 = store.start_batch(total_records=1)
+        for batch, txn in ((b1, "TXN_B1"), (b2, "TXN_B2")):
+            rec = _make_record(batch, txn, status=StageStatus.S5_PENDING)
+            store.mark_stage_pending(rec, StageStatus.S5_PENDING)
+            store.mark_stage_done(txn, batch, StageStatus.S5_DONE, cm_object_id=f"cm-{txn}")
+        store.flush()
+
+        assert [r.txn_num for r in store.uploaded_records(batch_id=b1)] == ["TXN_B1"]
+        assert {r.txn_num for r in store.uploaded_records()} == {"TXN_B1", "TXN_B2"}
+        store.close()

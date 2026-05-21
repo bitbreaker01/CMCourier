@@ -67,6 +67,7 @@ from cmcourier.services.reconciler import (
     PendingSyncBuffer,
     PeriodicReconciler,
 )
+from cmcourier.services.recovery import As400Recovery
 from cmcourier.services.triggers.csv import (
     CsvTriggerColumnsConfig,
     CsvTriggerStrategy,
@@ -265,6 +266,46 @@ def _build_idempotency_coordinator(
         )
         return coordinator, periodic
     return IdempotencyCoordinator(sqlite_store=sqlite_store, as400_store=as400_store), None
+
+
+def build_as400_recovery(
+    config: PipelineConfig,
+    secrets: Secrets,
+    *,
+    sqlite_store: SQLiteTrackingStore,
+) -> As400Recovery:
+    """099: arma el :class:`As400Recovery` para ``cmcourier sync recover``.
+
+    El caller (CLI) ya validó que ``tracking.as400_sync`` está habilitado
+    con conexión y credenciales — acá se asume y se construyen las cuatro
+    dependencias: store SQLite (provisto), store AS400, servicio de
+    indexing (para re-derivar DOCFRM/IMGTIP desde RVABREP) y servicio de
+    mapping (para IDNBAC/TIPIDN)."""
+    sync_cfg = config.tracking.as400_sync
+    assert sync_cfg.connection is not None  # el CLI lo valida antes
+    as400_store = As400NiarvilogStore(
+        connection=sync_cfg.connection,
+        username=secrets.as400_username,
+        password=secrets.as400_password,
+        library=sync_cfg.library,
+        table=sync_cfg.table,
+        columns=_niarvilog_columns_from_schema(sync_cfg.columns),
+        stale_in_progress_minutes=sync_cfg.stale_in_progress_minutes,
+        retry_attempts=sync_cfg.retry_attempts,
+        retry_base_delay_s=sync_cfg.retry_base_delay_s,
+    )
+    rvabrep_src = _build_rvabrep_source(config.indexing, secrets)
+    indexing_service = IndexingService(
+        rvabrep_src,
+        _indexing_columns_from_schema(config.indexing.columns),
+        batch_size=config.indexing.batch_size,
+    )
+    return As400Recovery(
+        sqlite_store=sqlite_store,
+        as400_store=as400_store,
+        indexing_service=indexing_service,
+        mapping_service=build_mapping_service(config.mapping),
+    )
 
 
 # ---------------------------------------------------------------------------
