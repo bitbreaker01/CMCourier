@@ -6,8 +6,17 @@
 #
 # El repo NO se toca — esto solo filtra qué entra al ZIP de export.
 
+# --- documentación interna del equipo ---
 docs/adr/
 docs/roadmap/
 docs/runbooks/
 CONTRIBUTING.md
+
+# --- tooling interno (dev / IA / SDD) ---
 scripts/
+.pre-commit-config.yaml
+.atl/
+.specify/
+
+# --- traza SDD: el "por qué" de cada cambio (interno) ---
+specs/
