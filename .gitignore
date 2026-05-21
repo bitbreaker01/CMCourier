@@ -101,5 +101,7 @@ tests/fixtures/assembly/**/*.[0-9][0-9][0-9][0-9]
 # wheels descargados — grande, binario, NO se commitea.
 dist-offline/
 
-# El ZIP de export (scripts/export-bundle.sh) ahora vive en releases/ y SÍ
-# se commitea — versionado, un bundle por release. No se ignora.
+# Bundles de export / release (scripts/export-bundle.sh → releases/).
+# NO se commitean — son binarios; se publican en GitHub Releases vía
+# scripts/publish-release.sh.
+releases/

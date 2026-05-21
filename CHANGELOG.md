@@ -31,6 +31,9 @@ una contraparte Linux + documentación.
   (manylinux x86_64 + `install.sh`).
 - **`docs/how-to/build-offline-installer.md`** — how-to del flujo de
   dos máquinas, con el gotcha de la versión de Python.
+- **`scripts/publish-release.sh`** — arma el export bundle y lo
+  publica como GitHub Release (tag `v<version>`) vía `gh`. El ZIP NO
+  se commitea — los binarios no ensucian el historial de git.
 
 ### Changed
 
@@ -38,7 +41,8 @@ una contraparte Linux + documentación.
   nombre versionado (`cmcourier-export-<version>.zip`).
 - `.exportignore`: agrega `releases/`; `installer/` NO se excluye —
   el instalador es un entregable.
-- `.gitignore`: ignora `dist-offline/` (output del instalador offline).
+- `.gitignore`: ignora `dist-offline/` (output del instalador offline)
+  y `releases/` (los bundles van a GitHub Releases, no al repo).
 
 ---
 
