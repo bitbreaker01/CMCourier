@@ -52,6 +52,31 @@ Hitos operacionales fuera del documento de roadmap:
 
 ---
 
+## [0.101.0] — 2026-05-21 — **Refresh de documentación: config + comandos al día**
+
+Auditoría previa al handoff: la documentación de referencia estaba
+desactualizada por ~48 versiones. `config-reference.yaml` declaraba
+"version 0.52.0".
+
+### Changed
+
+- **`docs/reference/config-reference.yaml`** — al día contra
+  `config/schema.py`. Agregados: `processing.mode`/`streaming` (063),
+  `s4_use_processes`/`s4_max_processes`/`s4_smart_routing` (066/094),
+  `cmis.http2`/`upload_chunk_bytes` (089/090), las perillas AIMD de
+  068, `assembly.keep_staged_files` (085), `as400_sync.mode`/`periodic`
+  (096), `local_scan.recursive` (088).
+- **`docs/reference/cli.md`** — secciones nuevas `diagnose` (092) y
+  `sync recover` (099).
+
+### Notas
+
+- Sin cambios de código. Diferido a un refresh futuro:
+  `config-schema.md`, los tutoriales y los diagramas — ver
+  `specs/100-docs-refresh/`.
+
+---
+
 ## [0.100.0] — 2026-05-21 — **`cmcourier sync recover`: recuperar filas faltantes en NIARVILOG**
 
 El bug 096 (arreglado en 098) dejó documentos subidos a CM y marcados

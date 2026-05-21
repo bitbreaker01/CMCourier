@@ -257,6 +257,19 @@ Serie temporal sobre los últimos N batches.
 
 ---
 
+## `diagnose` (092)
+
+Analiza los logs JSONL de un batch y reporta el cuello de botella por stage, con sugerencias automáticas. Lee `observability.log_dir/metrics-*.jsonl` — **no depende de SQLite**, así que el diagnóstico funciona aunque la tracking DB se haya perdido.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--config` | Path (required) | — | YAML del pipeline — se usa para ubicar `observability.log_dir`. |
+| `--batch` | str | `None` | `batch_id` puntual a analizar. Mutuamente excluyente con `--latest`. |
+| `--latest` | flag | `False` | Analiza el `batch_summary` más reciente de los metrics logs. |
+| `--list` | flag | `False` | Lista los `batch_summary` disponibles y sale. |
+
+---
+
 ## `completion <shell>`
 
 Emite el script de shell-completion (032).
@@ -297,6 +310,18 @@ Resuelve una divergencia para un `TRNNUM`.
 | `--cm-object-id` | str | `None` | Required cuando `--prefer-local`. |
 
 Exactamente uno de `--prefer-as400` / `--prefer-local`.
+
+### `sync recover` (099)
+
+Recupera filas faltantes en `NIARVILOG` para documentos ya subidos a CM (`S5_DONE` en SQLite pero sin fila en AS400) — repara el daño del bug del modo `periodic`. Re-deriva los campos que SQLite no almacena (`DOCFRM`/`IMGTIP` desde RVABREP, `IDNBAC`/`TIPIDN` desde el mapping) e inserta las filas terminales. Idempotente: re-correr saltea las ya presentes.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--config` | Path (required) | — | — |
+| `--apply` | flag | `False` | Sin el flag = **dry-run** (reporta el plan, no escribe). Con `--apply`, ejecuta los INSERT en AS400. |
+| `--batch-id` | str | `None` | Acota la recuperación a un `batch_id`. Default: todo el tracking. |
+
+Un `txn` sin fila RVABREP o con id RVI no mapeado se reporta como `unrecoverable` — nunca se inserta a ciegas.
 
 ---
 
