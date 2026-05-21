@@ -96,3 +96,12 @@ tests/fixtures/assembly/**/*.[0-9]
 tests/fixtures/assembly/**/*.[0-9][0-9]
 tests/fixtures/assembly/**/*.[0-9][0-9][0-9]
 tests/fixtures/assembly/**/*.[0-9][0-9][0-9][0-9]
+
+# Output del instalador offline (installer/build-offline-bundle.{ps1,sh}):
+# wheels descargados — grande, binario, NO se commitea.
+dist-offline/
+
+# Bundles de export / release (scripts/export-bundle.sh → releases/).
+# NO se commitean — son binarios; se publican en GitHub Releases vía
+# scripts/publish-release.sh.
+releases/

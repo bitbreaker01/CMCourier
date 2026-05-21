@@ -10,45 +10,64 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-### Tooling
+_Sin cambios pendientes de release — todo el trabajo está versionado
+abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
-- **031** — `cmcourier mock generate`: generador sintético de árbol
-  de archivos RVABREP para dry runs y tests de integración. Lee filas
-  RVABREP desde CSV o AS400, materializa PDFs válidos (`img2pdf`
-  multi-página), TIFFs (Pillow LZW), y JPEGs (Pillow) bajo un root
-  configurable espejando `<source_root>/<ABAICD>/<ABAJCD>`. Límites
-  de tamaño parseados por sufijo (`--pdf-min 10kb`, `--pdf-max 2mb`, …),
-  `--seed`, `--dry-run`, `--force`, `--include-deleted`, `--limit`,
-  `--system`, `--document-type`. Superficie pure-additive; ver
-  `specs/031-mock-file-generator/spec.md`.
+---
 
-### Planificado para próximos releases
+## [0.102.0] — 2026-05-21 — **Instalador offline para servidores air-gapped**
 
-Roadmap post-MVP (`docs/roadmap/POST-MVP.md`) — todavía pendiente:
+El script que arma el bundle de instalación offline (para el servidor
+de migración del banco, sin internet) vivía solo en la máquina del
+operador — nunca estuvo en el repo. Este cambio lo incorpora y le da
+una contraparte Linux + documentación.
 
-- **§7 (N > 2)** — Elevar el cap de `batches_in_flight` por encima de 2
-  (el overlap producer-consumer N=2 shippeó en 028; N=3..5 requiere
-  un refactor más profundo — diferido).
-- **§8** — Cuota de bandwidth por-batch.
-- **§10** — Items de watchlist (concurrencia CMIS por-carpeta,
-  warm-up del pool, budgets de retry por pipeline, auto-completion
-  CLI, …).
+### Added
 
-Hitos operacionales fuera del documento de roadmap:
+- **`installer/build-offline-bundle.ps1`** — arma un bundle offline
+  para Windows Server x86_64 air-gapped (wheels + wheel del proyecto +
+  config + `install.bat`).
+- **`installer/build-offline-bundle.sh`** — la versión Linux
+  (manylinux x86_64 + `install.sh`).
+- **`docs/how-to/build-offline-installer.md`** — how-to del flujo de
+  dos máquinas, con el gotcha de la versión de Python.
+- **`scripts/publish-release.sh`** — arma el export bundle y lo
+  publica como GitHub Release (tag `v<version>`) vía `gh`. El ZIP NO
+  se commitea — los binarios no ensucian el historial de git.
 
-- Dry run con datos reales contra staging.
-- Primera migración productiva.
+### Changed
 
-### Removidos (ya no pendientes)
+- `scripts/export-bundle.sh` ahora deja el ZIP en `releases/` con
+  nombre versionado (`cmcourier-export-<version>.zip`).
+- `.exportignore`: agrega `releases/`; `installer/` NO se excluye —
+  el instalador es un entregable.
+- `.gitignore`: ignora `dist-offline/` (output del instalador offline)
+  y `releases/` (los bundles van a GitHub Releases, no al repo).
 
-- ~~§2 Nivel 5 de métricas de sistema (sampleo con `psutil`)~~ — shippeado en 026.
-- ~~§3 Análisis de logs offline (`cmcourier analyze`)~~ — shippeado en 027.
-- ~~§4 Idempotencia distribuida AS400 NIARVILOG~~ — shippeado en 034.
-- ~~§5 Auto-tuning adaptativo de workers AIMD~~ — shippeado en 025.
-- ~~§6 Pipelines adicionales (csv / as400 / local-scan)~~ —
-  shippeado en 012 / 014 / 016.
-- ~~§7 (N=2)~~ — overlap producer-consumer de dos batches en
-  vuelo, shippeado en 028.
+---
+
+## [0.101.0] — 2026-05-21 — **Refresh de documentación: config + comandos al día**
+
+Auditoría previa al handoff: la documentación de referencia estaba
+desactualizada por ~48 versiones. `config-reference.yaml` declaraba
+"version 0.52.0".
+
+### Changed
+
+- **`docs/reference/config-reference.yaml`** — al día contra
+  `config/schema.py`. Agregados: `processing.mode`/`streaming` (063),
+  `s4_use_processes`/`s4_max_processes`/`s4_smart_routing` (066/094),
+  `cmis.http2`/`upload_chunk_bytes` (089/090), las perillas AIMD de
+  068, `assembly.keep_staged_files` (085), `as400_sync.mode`/`periodic`
+  (096), `local_scan.recursive` (088).
+- **`docs/reference/cli.md`** — secciones nuevas `diagnose` (092) y
+  `sync recover` (099).
+
+### Notas
+
+- Sin cambios de código. Diferido a un refresh futuro:
+  `config-schema.md`, los tutoriales y los diagramas — ver
+  `specs/100-docs-refresh/`.
 
 ---
 

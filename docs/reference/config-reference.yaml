@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # This file documents the COMPLETE configurable surface of CMCourier as of
-# version 0.52.0. It is a *reference*, not a runnable config:
+# version 0.100.0. It is a *reference*, not a runnable config:
 #
 #   * Every path below is a PLACEHOLDER (`/path/to/...`). The schema uses
 #     pydantic FilePath / DirectoryPath for inputs that MUST already exist,
@@ -53,6 +53,8 @@ trigger:
   #   Each file in `scan_path` is cross-referenced against RVABREP by name.
   # kind: local_scan
   # scan_path: /path/to/local-scan-pool    # (REQUIRED) directory; must exist
+  # recursive: false                       # (default: false; 088) true → descend
+  #                                        #   into every subdirectory of scan_path
 
   # ---- OR ---- kind: single_doc — one-shot diagnostic pipeline.
   #   No extra fields: the trigger (shortname / cif / system_id) is passed
@@ -228,6 +230,10 @@ assembly:
     B: image/tiff                          # (default)
     O: application/pdf                     # (default)
     C: image/jpeg                          # (default)
+  # keep_staged_files — preserve the assembled PDF under temp_dir after a
+  # successful S5_DONE (085). Default false → the orchestrator deletes
+  # temp_dir/{txn}.pdf post-upload. true keeps it for debug/inspection.
+  keep_staged_files: false                 # (default: false)
 
 
 # -----------------------------------------------------------------------------
@@ -243,6 +249,14 @@ cmis:
   retry_max_attempts: 3                    # (default: 3)  >= 1
   retry_base_delay_s: 2.0                  # (default: 2.0)  >= 0  (exponential backoff base)
   workers: 4                               # (default: 4)  >= 1  (S5 upload pool size)
+  http2: true                              # (default: true; 089) false → force HTTP/1.1.
+  #                                        #   Useful when many parallel uploads share a
+  #                                        #   server-side h2 flow-control window and
+  #                                        #   serialize aggregate throughput.
+  upload_chunk_bytes: 1048576              # (default: 1048576 = 1 MiB; 090)
+  #                                        #   range 4096..67108864. Read chunk size of
+  #                                        #   the multipart encoder; bigger = fewer GIL
+  #                                        #   acquisitions under parallel uploads.
 
   # auto_tune — AIMD adaptive worker pool. When enabled, a
   # background controller grows/shrinks the worker count (and optionally the
@@ -263,6 +277,10 @@ cmis:
     timeout_auto_adjust: true              # (default: true)  also tune the CMIS timeout
     min_timeout_s: 30                      # (default: 30)  >= 1
     max_timeout_s: 600                     # (default: 600) >= 1  (must be >= min_timeout_s)
+    # 068: shape of the AIMD growth / halve response.
+    growth_factor: 1.25                    # (default: 1.25)  range 1.0..4.0  (multiplicative grow)
+    halve_factor: 0.75                     # (default: 0.75)  range 0.05..1.0 (shrink multiplier)
+    halve_threshold_ratio: 1.5             # (default: 1.5)   range 1.05..10  (× target_p95 to halve)
 
 
 # -----------------------------------------------------------------------------
@@ -306,6 +324,17 @@ tracking:
     stale_in_progress_minutes: 30          # (default: 30)  range 1..1440
     retry_attempts: 3                      # (default: 3)   range 1..10
     retry_base_delay_s: 5.0                # (default: 5.0) > 0
+    # mode (096) — how S5 syncs with AS400:
+    #   "claim"    (default): atomic per-document claim in S5 — prevents
+    #              double-upload against a competing migrator, at the cost
+    #              of 2-3 synchronous DB2 round-trips per doc.
+    #   "periodic": S5 writes SQLite only; a background reconciler pushes
+    #              to AS400 every `periodic.interval_minutes`. Does NOT
+    #              prevent double-upload (conflicts detected post-hoc).
+    mode: claim                            # (default: "claim")  one of: claim | periodic
+    # periodic — REQUIRED when mode == "periodic"; ignored otherwise.
+    periodic:                              # (default: null)
+      interval_minutes: 5                  # (default: 5)  range 1..1440
 
 
 # -----------------------------------------------------------------------------
@@ -336,9 +365,24 @@ observability:
 # processing  (optional — has a full default)  — multi-batch + dual-lane knobs.
 # -----------------------------------------------------------------------------
 processing:
+  # mode (063) — which orchestrator runs the pipeline:
+  #   "batched"   (default): historical multi-batch pipeline; while batch N
+  #               uploads (S5), batch N+1 prepares (S0–S4). Honors
+  #               `batches_in_flight` and full resume semantics.
+  #   "streaming": continuous producer-consumer pipeline bounded by a queue
+  #               (`streaming.bucket_size`). `batches_in_flight` is IGNORED;
+  #               resume args (--from-stage, --batch-id) are rejected.
+  mode: batched                            # (default: "batched")  one of: batched | streaming
+
+  # streaming — knobs for `mode: streaming`. `bucket_size` is the max number
+  # of fully-prepared docs sitting between PREP (S1–S4) and UPLOAD (S5).
+  # Peak memory scales with bucket_size, independent of total trigger count.
+  streaming:
+    bucket_size: 100                       # (default: 100)  >= 1
+
   # batches_in_flight — producer-consumer overlap: while batch N uploads (S5),
   # batch N+1 prepares (S0–S4). CAPPED AT 2 — values > 2 (POST-MVP §7) are a
-  # deferred change and rejected by the schema.
+  # deferred change and rejected by the schema. Ignored in `mode: streaming`.
   batches_in_flight: 2                     # (default: 2)  range 1..2
 
   # prep_workers — thread count for the prep stages S2 (mapping), S3
@@ -358,6 +402,19 @@ processing:
     heavy_initial_ratio: 0.2               # (default: 0.2)  range 0.0..1.0  (heavy lane's worker share)
     rebalance_interval_s: 10.0             # (default: 10.0)  range >0..600
     idle_threshold_s: 15.0                 # (default: 15.0)  range >0..3600
+
+  # s4_use_processes (066) — run S4 (PDF assembly) in a ProcessPoolExecutor
+  # for real CPU-bound parallelism (img2pdf/PIL are GIL-bound under threads).
+  # Default true. false → S4 runs inline in the producer thread (pre-066).
+  s4_use_processes: true                   # (default: true)
+  # s4_max_processes — pool size. null → os.cpu_count(); an int overrides it.
+  s4_max_processes: null                   # (default: null)  >= 1 when set
+  # s4_smart_routing (094) — when true AND the process pool is active,
+  # native PDFs run inline (shutil.copy2 releases the GIL during I/O) while
+  # paginated TIFF/JPEG go to the pool (img2pdf is CPU-bound). Avoids the
+  # pickle/IPC/spawn overhead of the pool for non-CPU-bound docs — matters
+  # most on Windows where `spawn` is expensive. Default false (pre-094).
+  s4_smart_routing: false                  # (default: false)
 
 
 # -----------------------------------------------------------------------------
