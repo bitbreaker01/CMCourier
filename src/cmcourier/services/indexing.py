@@ -139,6 +139,18 @@ class IndexingService:
             f"add a dispatch branch in IndexingService.enrich"
         )
 
+    def find_document_by_txn(self, txn_num: str) -> RVABREPDocument | None:
+        """099: busca la fila RVABREP de un ``txn_num`` y la convierte a
+        :class:`RVABREPDocument`. Devuelve ``None`` si no existe.
+
+        Lo usa la recuperación AS400 (`cmcourier sync recover`) para
+        re-derivar ``index7`` / ``image_type`` de un doc ya subido cuya
+        fila NIARVILOG se perdió."""
+        rows = self._source.get_by_fields({self._cfg.txn_num_column: txn_num})
+        if not rows:
+            return None
+        return self._row_to_document(dict(rows[0]))
+
     def _enrich_known_row(self, row: Mapping[str, Any]) -> list[RVABREPDocument]:
         """Envuelve una fila de RVABREP ya conocida en un único
         ``RVABREPDocument``.

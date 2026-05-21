@@ -52,6 +52,42 @@ Hitos operacionales fuera del documento de roadmap:
 
 ---
 
+## [0.100.0] — 2026-05-21 — **`cmcourier sync recover`: recuperar filas faltantes en NIARVILOG**
+
+El bug 096 (arreglado en 098) dejó documentos subidos a CM y marcados
+`S5_DONE` en SQLite, pero sin su fila en AS400 NIARVILOG. El 098 frenó
+la pérdida futura; este cambio agrega la herramienta de remediación
+para reparar lo ya perdido.
+
+### Added
+
+- **`cmcourier sync recover --config X [--apply] [--batch-id Y]`**:
+  reconcilia SQLite → AS400 por txn. Para cada doc `S5_DONE` que
+  NIARVILOG no tiene, re-deriva los campos que SQLite no almacena
+  (`DOCFRM`/`IMGTIP` desde la fila RVABREP vía `IndexingService`,
+  `IDNBAC`/`TIPIDN` desde el mapping) e inserta la fila terminal.
+  **Dry-run por defecto** — `--apply` ejecuta los INSERT.
+- **`As400Recovery`** (`services/recovery.py`): el motor de
+  recuperación. Recorrido **resiliente por-txn** (lección del 098) —
+  un txn que falla se reporta como `unrecoverable`, no aborta el resto.
+- **`SQLiteTrackingStore.uploaded_records`**: enumera los docs
+  `S5_DONE` con los campos que la recuperación necesita.
+- **`As400NiarvilogStore.insert_recovered_row`**: INSERT directo de
+  una fila terminal `STSCOD='O'`.
+- **`IndexingService.find_document_by_txn`**: busca la fila RVABREP de
+  un txn y la convierte a `RVABREPDocument`.
+
+### Notas
+
+- Solo recupera la dirección SQLite → AS400 para docs `S5_DONE`.
+- Idempotente: re-correr `recover --apply` saltea las filas ya
+  presentes. Un txn sin fila RVABREP o con id RVI no mapeado se
+  reporta como `unrecoverable` — nunca se inserta a ciegas.
+- ~10 tests nuevos (`test_recovery.py`, `uploaded_records`).
+- Spec: `specs/099-as400-recovery-command/`.
+
+---
+
 ## [0.99.1] — 2026-05-20 — **Fix de pérdida de datos en el reconciliador periódico**
 
 Reporte del operador: una corrida en `mode: periodic` procesó ~4000
