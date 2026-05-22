@@ -125,6 +125,23 @@ def render_upload(snap: TUISnapshot, *, width: int = 76) -> str:
             worker = str(op.get("worker", "?"))
             lines.append(f"  {rank}  {txn:<14}  {worker:<20}  {dms:>10,.0f} ms")
 
+    # 104: desglose de la tasa de error por tipo — visible en vivo, para
+    # ver el instante en que arrancan los 5xx durante una prueba de estrés.
+    lines.append("")
+    lines.append(f" ERRORS BY TYPE ({snap.failed_total} total)")
+    if snap.failed_total == 0:
+        lines.append("    (none yet)")
+    else:
+        for category in ("timeout", "http_4xx", "http_5xx", "transport", "app_error"):
+            n = snap.failures_by_type.get(category, 0)
+            if n:
+                lines.append(f"  {category:<13}{n:>6}")
+        if snap.failures_by_status:
+            status_str = "  ".join(
+                f"{code}×{cnt}" for code, cnt in sorted(snap.failures_by_status.items())
+            )
+            lines.append(f"    HTTP status:  {status_str}")
+
     if snap.is_complete:
         lines.append("")
         lines.append(" ──────────────────────────────────────────────────────")

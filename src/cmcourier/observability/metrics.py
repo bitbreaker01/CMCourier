@@ -421,6 +421,10 @@ class BatchSummary:
     elapsed_s: float
     throughput_docs_per_s: float
     stages: dict[str, dict[str, float | int]]
+    # 104: desglose de la tasa de error de S5 por tipo y por status HTTP.
+    failed_total: int = 0
+    failures_by_type: dict[str, int] = field(default_factory=dict)
+    failures_by_status: dict[int, int] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -431,6 +435,9 @@ class BatchSummary:
             "total_docs": self.total_docs,
             "elapsed_s": round(self.elapsed_s, 4),
             "throughput_docs_per_s": round(self.throughput_docs_per_s, 4),
+            "failed_total": self.failed_total,
+            "failures_by_type": self.failures_by_type,
+            "failures_by_status": self.failures_by_status,
             "stages": self.stages,
         }
 
@@ -487,6 +494,10 @@ class MetricsRecorder:
         self._s5_failed: int = 0
         self._s5_done_lock = threading.Lock()
         self._s5_failed_lock = threading.Lock()
+        # 104: desglose de fallas de S5 por categoría y por status HTTP.
+        # Se guardan bajo ``_s5_failed_lock`` junto con ``_s5_failed``.
+        self._failures_by_type: dict[str, int] = {}
+        self._failures_by_status: dict[int, int] = {}
 
     def start_batch(self, *, pipeline: str, batch_id: str) -> None:
         self._stage_buckets = {}
@@ -564,6 +575,9 @@ class MetricsRecorder:
                         "total_docs": summary.total_docs,
                         "elapsed_s": summary.elapsed_s,
                         "throughput_docs_per_s": summary.throughput_docs_per_s,
+                        "failed_total": summary.failed_total,
+                        "failures_by_type": summary.failures_by_type,
+                        "failures_by_status": summary.failures_by_status,
                         "stages": summary.stages,
                         "kind": "batch_summary",
                     },
@@ -586,6 +600,7 @@ class MetricsRecorder:
         stages: dict[str, dict[str, float | int]] = {}
         for stage_name, bucket in sorted(self._stage_buckets.items()):
             stages[stage_name] = bucket.summary()
+        failed_total, failures_by_type, failures_by_status = self.failure_breakdown()
         return BatchSummary(
             pipeline=pipeline,
             batch_id=batch_id,
@@ -593,6 +608,9 @@ class MetricsRecorder:
             elapsed_s=elapsed_s,
             throughput_docs_per_s=throughput,
             stages=stages,
+            failed_total=failed_total,
+            failures_by_type=failures_by_type,
+            failures_by_status=failures_by_status,
         )
 
     def _flush_slow_ops(self, *, batch_id: str) -> None:
@@ -655,14 +673,41 @@ class MetricsRecorder:
         with self._s5_done_lock:
             return self._s5_done
 
-    def record_upload_failed(self) -> None:
-        """042: contabiliza un outcome S5 de ``"failed"`` (upload con error)."""
+    def record_upload_failed(
+        self,
+        category: str = "app_error",
+        status_code: int | None = None,
+    ) -> None:
+        """042/104: contabiliza un outcome S5 de ``"failed"`` (upload con error).
+
+        ``category`` viene de :func:`classify_failure` (``timeout`` /
+        ``http_4xx`` / ``http_5xx`` / ``transport`` / ``app_error``).
+        ``status_code`` es el código HTTP exacto para las categorías HTTP,
+        o ``None`` para el resto — solo los no-``None`` cuentan en el
+        sub-desglose por status.
+        """
         with self._s5_failed_lock:
             self._s5_failed += 1
+            self._failures_by_type[category] = self._failures_by_type.get(category, 0) + 1
+            if status_code is not None:
+                self._failures_by_status[status_code] = (
+                    self._failures_by_status.get(status_code, 0) + 1
+                )
 
     def upload_failed_count(self) -> int:
         with self._s5_failed_lock:
             return self._s5_failed
+
+    def failure_breakdown(self) -> tuple[int, dict[str, int], dict[int, int]]:
+        """Snapshot ``(total, por_categoría, por_status)`` de las fallas de S5.
+
+        Lo consume :meth:`_build_summary` y la pestaña de upload del TUI."""
+        with self._s5_failed_lock:
+            return (
+                self._s5_failed,
+                dict(self._failures_by_type),
+                dict(self._failures_by_status),
+            )
 
 
 # ---------------------------------------------------------------------------

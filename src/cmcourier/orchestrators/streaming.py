@@ -715,8 +715,9 @@ class StreamingOrchestrator:
                         tally.s5_done += 1
                         recorder.record_upload_done()
                     elif outcome == "failed":
+                        # 104: la falla ya quedó contabilizada (total + tipo
+                        # + status) por ``_upload_one``.
                         tally.s5_failed += 1
-                        recorder.record_upload_failed()
                     elif outcome == "skipped":
                         tally.s5_skipped += 1
                         recorder.record_upload_skipped()
@@ -825,8 +826,9 @@ class StreamingOrchestrator:
                         tally.s5_done += 1
                         recorder.record_upload_done()
                     elif outcome == "failed":
+                        # 104: la falla ya quedó contabilizada (total + tipo
+                        # + status) por ``_upload_one``.
                         tally.s5_failed += 1
-                        recorder.record_upload_failed()
                     elif outcome == "skipped":
                         tally.s5_skipped += 1
                         recorder.record_upload_skipped()

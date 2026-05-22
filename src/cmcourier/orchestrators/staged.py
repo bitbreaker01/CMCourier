@@ -74,6 +74,7 @@ from cmcourier.domain.models import (
     Trigger,
 )
 from cmcourier.domain.ports import ITrackingStore, S0Strategy
+from cmcourier.observability.error_classification import classify_failure
 from cmcourier.observability.metrics import MetricsRecorder, StageTimer
 from cmcourier.observability.system_metrics import SystemMetricsSampler
 from cmcourier.services.auto_tune import AutoTuneController
@@ -1046,8 +1047,9 @@ class StagedPipeline:
                     s5_done += 1
                     rec.record_upload_done()
                 elif outcome == "failed":
+                    # 104: el conteo de fallas (total + tipo + status) ya lo
+                    # hizo ``_upload_one`` con la excepción en mano.
                     failed += 1
-                    rec.record_upload_failed()
                 elif outcome == "skipped":
                     rec.record_upload_skipped()
                 self._pool_stats.set_queue_depth(self._pool_stats.snapshot().queue_depth - 1)
@@ -1125,8 +1127,9 @@ class StagedPipeline:
                         s5_done += 1
                         rec.record_upload_done()
                     elif outcome == "failed":
+                        # 104: ``_upload_one`` ya contabilizó la falla por
+                        # tipo + status con la excepción en mano.
                         failed += 1
-                        rec.record_upload_failed()
                     elif outcome == "skipped":
                         rec.record_upload_skipped()
                     depths[lane] = max(0, depths[lane] - 1)
@@ -1227,6 +1230,12 @@ class StagedPipeline:
                     )
                 except (CMISClientError, CMISServerError, RetriesExhaustedError) as exc:
                     timer.mark_failed()
+                    # 104: clasifica la falla y la contabiliza por tipo +
+                    # status HTTP. Se hace acá — con la excepción en mano —
+                    # porque el outcome string que ve el loop consumidor ya
+                    # perdió el tipo.
+                    category, status_code = classify_failure(exc)
+                    (recorder or self._metrics).record_upload_failed(category, status_code)
                     if self._coordinator is not None:
                         self._coordinator.mark_failed(
                             record=record,

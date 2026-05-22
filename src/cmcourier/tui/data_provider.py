@@ -86,6 +86,11 @@ class TUISnapshot:
     # ---------- slow ops + uploads recientes
     slow_ops_all: tuple[dict[str, object], ...] = ()
 
+    # ---------- 104: desglose de la tasa de error de S5 por tipo + status
+    failed_total: int = 0
+    failures_by_type: dict[str, int] = field(default_factory=dict)
+    failures_by_status: dict[int, int] = field(default_factory=dict)
+
     # ---------- 030: estado de `chunk`s (vista multi-batch)
     chunks_state: tuple[dict[str, object], ...] = ()
 
@@ -278,6 +283,9 @@ class TUIDataProvider:
         ) = self._current_chunk_progress(chunks_snapshot, global_elapsed_s=elapsed)
 
         bw_cfg = self._cmis_config.auto_tune
+        failed_total, failures_by_type, failures_by_status = (
+            self._upload_metrics.failure_breakdown()
+        )
         return TUISnapshot(
             pipeline=self._pipeline_name,
             batch_id=self._batch_id,
@@ -316,6 +324,9 @@ class TUIDataProvider:
             bandwidth_ceiling_mbps=self._bandwidth_ceiling_mbps,
             bandwidth_series=tuple(self._upload_metrics.bandwidth.series(60)),
             slow_ops_all=tuple(self._upload_metrics.aggregator_snapshot()),
+            failed_total=failed_total,
+            failures_by_type=failures_by_type,
+            failures_by_status=failures_by_status,
             chunks_state=chunks_snapshot,
             # 051: total de docs filtrados en S1 entre todos los `chunk`s
             # vistos hasta ahora. ``prep_filtered`` es un ``int`` en
