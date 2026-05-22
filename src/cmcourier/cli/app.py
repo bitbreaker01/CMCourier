@@ -47,6 +47,8 @@ from cmcourier.observability.setup import configure as configure_observability
 from cmcourier.orchestrators.multi_batch import MultiBatchOrchestrator, MultiBatchRunReport
 from cmcourier.orchestrators.staged import RunReport, StagedPipeline
 from cmcourier.orchestrators.streaming import StreamingOrchestrator
+from cmcourier.services.deadline import DeadlineWatchdog
+from cmcourier.services.duration import parse_duration
 from cmcourier.services.triggers import SingleDocTriggerStrategy
 
 _log = logging.getLogger(__name__)
@@ -139,6 +141,13 @@ def csv_trigger_pipeline_group() -> None:
     default=None,
     help="Process at most N triggers from the source (for validation runs).",
 )
+@click.option(
+    "--max-duration",
+    "max_duration",
+    type=str,
+    default=None,
+    help="Stop the run after this wall-clock duration, e.g. 30m, 2h, 1h30m.",
+)
 @click.option("--log-level", type=click.Choice(_LOG_LEVELS, case_sensitive=False), default="INFO")
 def csv_run_command(
     config_path: Path,
@@ -151,6 +160,7 @@ def csv_run_command(
     tui: bool,
     batches_in_flight: int | None,
     total: int | None,
+    max_duration: str | None,
     log_level: str,
 ) -> None:
     """Corre el `csv-trigger pipeline` de punta a punta."""
@@ -167,6 +177,7 @@ def csv_run_command(
         tui=tui,
         batches_in_flight=batches_in_flight,
         total=total,
+        max_duration=max_duration,
     )
 
 
@@ -206,6 +217,13 @@ def rvabrep_pipeline_group() -> None:
     default=None,
     help="Process at most N triggers from the source (for validation runs).",
 )
+@click.option(
+    "--max-duration",
+    "max_duration",
+    type=str,
+    default=None,
+    help="Stop the run after this wall-clock duration, e.g. 30m, 2h, 1h30m.",
+)
 @click.option("--log-level", type=click.Choice(_LOG_LEVELS, case_sensitive=False), default="INFO")
 def rvabrep_run_command(
     config_path: Path,
@@ -217,6 +235,7 @@ def rvabrep_run_command(
     tui: bool,
     batches_in_flight: int | None,
     total: int | None,
+    max_duration: str | None,
     log_level: str,
 ) -> None:
     """Corre el `rvabrep-pipeline` de punta a punta."""
@@ -233,6 +252,7 @@ def rvabrep_run_command(
         tui=tui,
         batches_in_flight=batches_in_flight,
         total=total,
+        max_duration=max_duration,
     )
 
 
@@ -272,6 +292,13 @@ def local_scan_pipeline_group() -> None:
     default=None,
     help="Process at most N triggers from the source (for validation runs).",
 )
+@click.option(
+    "--max-duration",
+    "max_duration",
+    type=str,
+    default=None,
+    help="Stop the run after this wall-clock duration, e.g. 30m, 2h, 1h30m.",
+)
 @click.option("--log-level", type=click.Choice(_LOG_LEVELS, case_sensitive=False), default="INFO")
 def local_scan_run_command(
     config_path: Path,
@@ -283,6 +310,7 @@ def local_scan_run_command(
     tui: bool,
     batches_in_flight: int | None,
     total: int | None,
+    max_duration: str | None,
     log_level: str,
 ) -> None:
     """Corre el `local-scan-pipeline` de punta a punta."""
@@ -299,6 +327,7 @@ def local_scan_run_command(
         tui=tui,
         batches_in_flight=batches_in_flight,
         total=total,
+        max_duration=max_duration,
     )
 
 
@@ -342,6 +371,13 @@ def single_doc_group() -> None:
     default=None,
     help="Process at most N triggers from the source (for validation runs).",
 )
+@click.option(
+    "--max-duration",
+    "max_duration",
+    type=str,
+    default=None,
+    help="Stop the run after this wall-clock duration, e.g. 30m, 2h, 1h30m.",
+)
 @click.option("--log-level", type=click.Choice(_LOG_LEVELS, case_sensitive=False), default="INFO")
 def single_doc_run_command(
     config_path: Path,
@@ -356,10 +392,12 @@ def single_doc_run_command(
     tui: bool,
     batches_in_flight: int | None,
     total: int | None,
+    max_duration: str | None,
     log_level: str,
 ) -> None:
     """Corre un pipeline one-shot para un unico documento."""
     configure_logging(log_level)
+    max_duration_s = _parse_max_duration(max_duration)
     try:
         config = load_config(config_path)
         secrets = load_secrets()
@@ -415,6 +453,7 @@ def single_doc_run_command(
         pipeline_kwargs=pipeline_kwargs,
         tui=tui,
         log_level=log_level,
+        max_duration_s=max_duration_s,
     )
     _emit_outcome(
         report=report,
@@ -490,8 +529,10 @@ def _run_pipeline_command(
     tui: bool = False,
     batches_in_flight: int | None = None,
     total: int | None = None,
+    max_duration: str | None = None,
 ) -> None:
     configure_logging(log_level)
+    max_duration_s = _parse_max_duration(max_duration)
     try:
         config = load_config(config_path)
         secrets = load_secrets()
@@ -542,12 +583,24 @@ def _run_pipeline_command(
         pipeline_kwargs=pipeline_kwargs,
         tui=tui,
         log_level=log_level,
+        max_duration_s=max_duration_s,
     )
     _emit_outcome(
         report=report,
         expected_kind=expected_kind,
         quiet=quiet,
     )
+
+
+def _parse_max_duration(text: str | None) -> float | None:
+    """Parsea ``--max-duration`` a segundos; sale con código 2 si es inválido."""
+    if text is None:
+        return None
+    try:
+        return parse_duration(text)
+    except ValueError as exc:
+        click.echo(f"ConfigurationError: --max-duration: {exc}", err=True)
+        sys.exit(2)
 
 
 def _apply_overrides(
@@ -578,6 +631,7 @@ def _run_with_optional_tui(
     pipeline_kwargs: dict[str, Any],
     tui: bool,
     log_level: str,
+    max_duration_s: float | None = None,
 ) -> MultiBatchRunReport:
     """Rutea la corrida por el multi-batch orchestrator (028 + 030).
 
@@ -663,12 +717,30 @@ def _run_with_optional_tui(
         "total": total,
     }
 
+    # 103: watchdog de deadline. Cuando ``--max-duration`` está seteado,
+    # prende el `cancel_token` del orchestrator al vencer el plazo — el
+    # mismo drain cooperativo de 097, disparado por reloj. Funciona con
+    # TUI y headless.
+    watchdog = (
+        DeadlineWatchdog(orchestrator.cancel_token, max_duration_s)
+        if max_duration_s is not None
+        else None
+    )
+
     if not tui:
+        if watchdog is not None:
+            watchdog.start()
         try:
-            return orchestrator.run(**orchestrator_kwargs)
+            report = orchestrator.run(**orchestrator_kwargs)
         except Exception:
             _log.exception("pipeline run failed unexpectedly")
             sys.exit(3)
+        finally:
+            if watchdog is not None:
+                watchdog.stop()
+        if watchdog is not None and watchdog.fired:
+            click.echo("Run detenido por --max-duration; el drain ordenado se completó.")
+        return report
 
     # 041: una vez que estamos comprometidos a lanzar la TUI de Textual,
     # re-instalamos los handlers de observabilidad SIN un `StreamHandler`
@@ -707,17 +779,25 @@ def _run_with_optional_tui(
         mode=config.processing.mode,
         bucket_provider=bucket_provider,
     )
-    outcome = run_orchestrator_with_tui(
-        orchestrator=orchestrator,
-        data_provider=data_provider,
-        orchestrator_kwargs=orchestrator_kwargs,
-    )
+    if watchdog is not None:
+        watchdog.start()
+    try:
+        outcome = run_orchestrator_with_tui(
+            orchestrator=orchestrator,
+            data_provider=data_provider,
+            orchestrator_kwargs=orchestrator_kwargs,
+        )
+    finally:
+        if watchdog is not None:
+            watchdog.stop()
     if outcome.exception is not None:
         _log.exception(
             "pipeline run failed unexpectedly",
             exc_info=outcome.exception,
         )
         sys.exit(3)
+    if watchdog is not None and watchdog.fired:
+        click.echo("Run detenido por --max-duration; el drain ordenado se completó.")
     assert outcome.report is not None
     return outcome.report
 
