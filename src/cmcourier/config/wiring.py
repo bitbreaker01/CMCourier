@@ -62,6 +62,12 @@ from cmcourier.services.metadata import (
     SourceConfig,
     ValidationConfig,
 )
+from cmcourier.services.mock.sizing import parse_size
+from cmcourier.services.mock.synthetic_content import (
+    SizeBand,
+    SizeMix,
+    SyntheticPdfProvider,
+)
 from cmcourier.services.reconciler import (
     As400Reconciler,
     PendingSyncBuffer,
@@ -113,10 +119,33 @@ def build_pipeline(
         _metadata_config_from_schema(config.metadata),
         metadata_sources,
     )
+    # 102: contenido sintético on-the-fly. Default off → comportamiento
+    # intacto; con size_mix vacío se usa la distribución 60/30/10.
+    synthetic_cfg = config.assembly.synthetic_content
+    synthetic_provider: SyntheticPdfProvider | None = None
+    if synthetic_cfg.enabled:
+        if synthetic_cfg.size_mix:
+            synthetic_provider = SyntheticPdfProvider(
+                size_mix=SizeMix(
+                    bands=tuple(
+                        SizeBand(
+                            name=band.name,
+                            weight=band.weight,
+                            min_bytes=parse_size(band.min),
+                            max_bytes=parse_size(band.max),
+                        )
+                        for band in synthetic_cfg.size_mix
+                    )
+                ),
+                seed=synthetic_cfg.seed,
+            )
+        else:
+            synthetic_provider = SyntheticPdfProvider(seed=synthetic_cfg.seed)
     assembler_config = AssemblerConfig(
         source_root=config.assembly.source_root,
         temp_dir=config.assembly.temp_dir,
         image_type_map=config.assembly.image_type_map,
+        synthetic_provider=synthetic_provider,
     )
     assembler = PdfAssembler(assembler_config)
     # 066: `ProcessPoolExecutor` opcional para S4 (`PDF assembly`).

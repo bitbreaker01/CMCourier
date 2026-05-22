@@ -24,6 +24,8 @@ __all__ = [
     "As400MetadataSourceConfig",
     "As400RvabrepSource",
     "AssemblyConfig",
+    "SyntheticBandConfig",
+    "SyntheticContentConfig",
     "AutoTuneConfig",
     "CmisConfigModel",
     "CsvMetadataSourceConfig",
@@ -443,6 +445,34 @@ class MetadataConfigModel(BaseModel):
     cache: MetadataCacheConfig = Field(default_factory=MetadataCacheConfig)
 
 
+class SyntheticBandConfig(BaseModel):
+    """102: una clase de tamaño del generador sintético.
+
+    ``min`` / ``max`` aceptan sufijos binarios (``50kb``, ``1mb``,
+    ``10mb``) — ver :func:`cmcourier.services.mock.sizing.parse_size`.
+    """
+
+    model_config = _STRICT
+    name: str
+    weight: float = Field(ge=0.0)
+    min: str
+    max: str
+
+
+class SyntheticContentConfig(BaseModel):
+    """102: generación de contenido sintético on-the-fly para stress tests.
+
+    ``enabled=False`` (default) deja el comportamiento intacto. Con
+    ``size_mix`` vacío se usa la distribución por defecto 60/30/10
+    alineada al plan de pruebas §3.3.
+    """
+
+    model_config = _STRICT
+    enabled: bool = False
+    seed: int = 0
+    size_mix: tuple[SyntheticBandConfig, ...] = ()
+
+
 class AssemblyConfig(BaseModel):
     """085: ``keep_staged_files`` controla si los archivos ensamblados
     bajo ``temp_dir`` se preservan después de un S5_DONE exitoso.
@@ -463,6 +493,8 @@ class AssemblyConfig(BaseModel):
         }
     )
     keep_staged_files: bool = False
+    # 102: contenido sintético on-the-fly para pruebas de stress.
+    synthetic_content: SyntheticContentConfig = Field(default_factory=SyntheticContentConfig)
 
 
 class AutoTuneConfig(BaseModel):

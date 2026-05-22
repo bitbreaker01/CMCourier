@@ -45,6 +45,7 @@ from cmcourier.domain.exceptions import (
 )
 from cmcourier.domain.models import RVABREPDocument, StagedFile
 from cmcourier.domain.ports import IAssembler
+from cmcourier.services.mock.synthetic_content import SyntheticPdfProvider
 
 _log = logging.getLogger(__name__)
 
@@ -71,6 +72,10 @@ class AssemblerConfig:
     source_root: Path
     temp_dir: Path
     image_type_map: Mapping[str, str] = field(default_factory=_default_image_type_map)
+    # 102: cuando está seteado, S4 genera un PDF sintético on-the-fly en
+    # vez de leer el archivo fuente — para pruebas de stress sin
+    # materializar TB de corpus. Default None → comportamiento intacto.
+    synthetic_provider: SyntheticPdfProvider | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +142,15 @@ class PdfAssembler(IAssembler):
         en el ``batch_summary`` con el resto de las etapas, lo que
         permite que ``cmcourier diagnose`` los muestre.
         """
+        if self._cfg.synthetic_provider is not None and not document.is_pdf:
+            # 102 REQ-008: el modo sintético exige un RVABREP PDF-only.
+            raise PDFAssemblyFailedError(
+                txn_num=document.txn_num,
+                reason=(
+                    "synthetic content mode requires a PDF-only RVABREP; "
+                    "regenerate it with `mock rvabrep --image-mix pdf:100`"
+                ),
+            )
         if document.is_pdf:
             return self._passthrough_native_pdf_traced(document)
         return self._assemble_paged_traced(document)
@@ -152,7 +166,13 @@ class PdfAssembler(IAssembler):
     def _passthrough_native_pdf_traced(
         self, doc: RVABREPDocument
     ) -> tuple[StagedFile, AssemblyTimings]:
-        """093: PDF nativo con timings sub-stage."""
+        """093: PDF nativo con timings sub-stage.
+
+        102: con un ``synthetic_provider`` configurado, el PDF se genera
+        on-the-fly y no se lee ningún archivo fuente.
+        """
+        if self._cfg.synthetic_provider is not None:
+            return self._generate_synthetic_traced(doc, self._cfg.synthetic_provider)
         src = self._cfg.source_root / doc.image_path / doc.file_name
         t0 = time.perf_counter()
         if not src.is_file():
@@ -175,6 +195,23 @@ class PdfAssembler(IAssembler):
             copy_native_ms=copy_ms,
             dst_stat_ms=dst_stat_ms,
         )
+        return staged, timings
+
+    def _generate_synthetic_traced(
+        self, doc: RVABREPDocument, provider: SyntheticPdfProvider
+    ) -> tuple[StagedFile, AssemblyTimings]:
+        """102: genera un PDF sintético on-the-fly en el dir de staging.
+
+        No lee ningún archivo fuente. El dir de staging puede estar
+        montado sobre RAM (tmpfs) para velocidad de memoria: el código
+        escribe normal, el operador elige el filesystem (REQ-005)."""
+        dst = self.temp_dir / f"{doc.txn_num}.pdf"
+        t0 = time.perf_counter()
+        dst.write_bytes(provider.generate(doc.txn_num))
+        gen_ms = (time.perf_counter() - t0) * 1000.0
+        size_bytes = dst.stat().st_size
+        staged = StagedFile(path=dst, size_bytes=size_bytes, page_count=doc.total_pages)
+        timings = AssemblyTimings(path_kind="synthetic_pdf", copy_native_ms=gen_ms)
         return staged, timings
 
     def _assemble_paged_traced(self, doc: RVABREPDocument) -> tuple[StagedFile, AssemblyTimings]:
