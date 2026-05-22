@@ -33,6 +33,12 @@ class _InMemorySource(IDataSource):
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self._rows = rows
 
+    def query(self, sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
+        raise NotImplementedError("_InMemorySource no ejecuta SQL crudo")
+
+    def query_stream(self, sql: str, params: list[Any] | None = None) -> Iterator[dict[str, Any]]:
+        raise NotImplementedError("_InMemorySource no ejecuta SQL crudo")
+
     def get_by_fields(self, filters: Mapping[str, Any]) -> list[dict[str, Any]]:
         return [r for r in self._rows if all(r.get(k) == v for k, v in filters.items())]
 

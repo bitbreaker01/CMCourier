@@ -460,31 +460,10 @@ class TestAliases:
 
 
 class TestSourceDispatch:
-    def test_as400_source_raises_not_implemented(
-        self, sources_registry: dict[str, IDataSource]
-    ) -> None:
-        cfg = MetadataConfig(
-            field_aliases={},
-            field_sources={
-                "BAC_X": FieldSourceConfig(
-                    sources=(
-                        SourceConfig(
-                            source_type="as400:default",
-                            lookup_value_column="V",
-                            lookup_key_column="K",
-                        ),
-                    ),
-                ),
-            },
-        )
-        svc = MetadataService(cfg, sources_registry)
-        with pytest.raises(NotImplementedError) as exc:
-            svc.resolve(
-                TriggerRecord(shortname="X", cif="123", system_id="1"),
-                _make_document(),
-                _make_mapping("BAC_X"),
-            )
-        assert "as400" in str(exc.value).lower()
+    # 084 implementó los sources ``as400:<alias>`` — el test previo que
+    # afirmaba "as400 raises NotImplementedError" quedó obsoleto y se
+    # eliminó. El comportamiento real de as400 lo cubre
+    # ``test_metadata_as400_lookup.py``.
 
     def test_unknown_source_type_raises_configuration(
         self, sources_registry: dict[str, IDataSource]

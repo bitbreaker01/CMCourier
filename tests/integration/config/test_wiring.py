@@ -443,7 +443,9 @@ class TestNiarvilogColumnsWiring049:
         )
         sqlite_store = SQLiteTrackingStore(tmp_path / "tracking.db")
         try:
-            coordinator = _build_idempotency_coordinator(
+            # 096: _build_idempotency_coordinator devuelve la tupla
+            # (coordinator, periodic_reconciler).
+            coordinator, _reconciler = _build_idempotency_coordinator(
                 config=config, secrets=secrets, sqlite_store=sqlite_store
             )
             assert coordinator is not None

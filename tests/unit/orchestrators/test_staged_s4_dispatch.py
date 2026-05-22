@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from cmcourier.adapters.assembly.pdf_assembler import AssemblyTimings
 from cmcourier.domain.models import (
     ClientTrigger,
     CMMapping,
@@ -75,11 +76,15 @@ def _pipeline_with_pool(pool: object | None) -> StagedPipeline:
 
 class TestS4DispatchByMode:
     def test_no_pool_calls_assembler_directly(self, tmp_path) -> None:
-        # 066: con ``s4_process_pool=None`` (camino pre-066), `_s4_one`
-        # debe llamar a ``self._assembler.assemble`` directamente.
+        # 066+093: con ``s4_process_pool=None``, `_s4_one` debe llamar a
+        # ``self._assembler.assemble_traced`` directamente (la variante
+        # con timings sub-stage que introdujo 093).
         pipeline = _pipeline_with_pool(None)
         assembler = pipeline._assembler  # MagicMock
-        assembler.assemble.return_value = _staged_file(tmp_path)
+        assembler.assemble_traced.return_value = (
+            _staged_file(tmp_path),
+            AssemblyTimings(path_kind="native_pdf"),
+        )
         # Hace que `tracking_store.mark_stage_done` sea no-op y
         # `is_stage_done` devuelva False.
         pipeline._tracking_store.is_stage_done.return_value = False
@@ -89,15 +94,15 @@ class TestS4DispatchByMode:
 
         assert survivor is item
         assert failed is False
-        assembler.assemble.assert_called_once_with(item.document)
+        assembler.assemble_traced.assert_called_once_with(item.document)
 
     def test_pool_provided_dispatches_via_submit(self, tmp_path) -> None:
-        # 066: con `pool`, `_s4_one` debe usar
-        # ``pool.submit(_pool_assemble, doc).result()`` — sin llamar
-        # nunca a ``self._assembler.assemble`` directamente.
+        # 066+093: con `pool`, `_s4_one` debe usar
+        # ``pool.submit(_pool_assemble_traced, doc).result()`` — sin
+        # llamar nunca al assembler directamente.
         staged = _staged_file(tmp_path)
         fake_future = MagicMock()
-        fake_future.result.return_value = staged
+        fake_future.result.return_value = (staged, AssemblyTimings(path_kind="native_pdf"))
         fake_pool = MagicMock()
         fake_pool.submit.return_value = fake_future
 
@@ -110,15 +115,15 @@ class TestS4DispatchByMode:
         assert survivor is item
         assert failed is False
         # El assembler directo NO debe haber sido llamado.
-        pipeline._assembler.assemble.assert_not_called()
+        pipeline._assembler.assemble_traced.assert_not_called()
         # El `pool` recibió el doc y esperamos `result()`.
         fake_pool.submit.assert_called_once()
         args, _kwargs = fake_pool.submit.call_args
-        # El primer arg debe ser la función `_pool_assemble` a nivel de
-        # módulo, el segundo el documento.
-        from cmcourier.adapters.assembly.pool import _pool_assemble
+        # El primer arg debe ser la función `_pool_assemble_traced` a
+        # nivel de módulo, el segundo el documento.
+        from cmcourier.adapters.assembly.pool import _pool_assemble_traced
 
-        assert args[0] is _pool_assemble
+        assert args[0] is _pool_assemble_traced
         assert args[1] is item.document
         fake_future.result.assert_called_once()
 

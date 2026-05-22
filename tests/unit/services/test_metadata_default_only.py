@@ -129,7 +129,7 @@ class TestStillRaisesWhenSourcesFailAndNoDefault:
                     sources=(
                         SourceConfig(
                             source_type="trigger",
-                            lookup_value_column="campo_inexistente",
+                            lookup_value_column="cif",
                             validation=ValidationConfig(allowed_pattern=r"^\d{6}$"),
                         ),
                     ),
@@ -139,5 +139,8 @@ class TestStillRaisesWhenSourcesFailAndNoDefault:
             prefetch_enabled=False,
         )
         service = MetadataService(config, sources_registry={})
+        # El trigger sin CIF hace que el source no devuelva valor; el
+        # motor cae al default "notdigits", que no pasa la validación
+        # ^\d{6}$ → DefaultValidationFailedError.
         with pytest.raises(DefaultValidationFailedError):
-            service.resolve(_trigger(), _document(), _mapping("BAC_X"))
+            service.resolve(_trigger(cif=None), _document(), _mapping("BAC_X"))
