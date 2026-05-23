@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cmcourier"
-version = "0.102.0"
+version = "0.103.0"
 description = "CMCourier - banking document migration tool from IBM RVI on AS400 to IBM Content Manager via CMIS."
 readme = "README.md"
 requires-python = ">=3.11"

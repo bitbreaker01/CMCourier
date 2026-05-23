@@ -15,6 +15,58 @@ abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
+## [0.103.0] — 2026-05-22 — **Banco de pruebas de stress: contenido sintético, deadline y desglose de errores**
+
+Tres specs hermanos para correr el plan de stress contra el destino
+CMIS sin materializar 13 millones de documentos / 20 TB de corpus, sin
+estar de niñera durante un soak de 24 h, y con diagnóstico real cuando
+el destino empieza a degradar.
+
+### Added
+
+- **Spec 102 — contenido sintético on-the-fly.**
+  `services/mock/synthetic_content.py` genera un PDF de una página
+  válido por documento, sin `img2pdf`/`PIL` — costo O(tamaño), nunca
+  cuello de botella. Tamaño determinístico por `txn_num`, distribución
+  configurable (default 60/30/10 alineado al plan de stress §3.3). Con
+  `assembly.synthetic_content.enabled: true`, S4 genera en vez de leer
+  el archivo fuente — el dir de staging puede ir sobre tmpfs / RAM
+  disk para velocidad de memoria, sin tocar el disco físico del origen.
+- **Spec 103 — control de tiempo de ejecución (`--max-duration`).**
+  `DeadlineWatchdog` prende el `CancellationToken` existente (097) al
+  vencer un plazo de pared — el mismo drain cooperativo, disparado por
+  reloj. Acepta duraciones humanas (`30m`, `1h30m`, `90`) en los
+  cuatro comandos `run`; funciona headless (caso T04, soak 24 h).
+- **Spec 104 — desglose de la tasa de error de upload por tipo.**
+  `observability/error_classification.py` clasifica cada falla de S5
+  en `timeout` / `http_4xx` / `http_5xx` / `transport` / `app_error`,
+  desenvolviendo `RetriesExhaustedError.__cause__`. El
+  `MetricsRecorder` cuenta total + por tipo + por status HTTP exacto;
+  el `BatchSummary` y el tab UPLOAD del TUI exponen el desglose en
+  vivo (clave para T05: ver el instante en que arrancan los 503).
+
+### Changed
+
+- `MetricsRecorder.record_upload_failed` ahora recibe
+  `(category, status_code)`. El `BatchSummary` lleva `failed_total` /
+  `failures_by_type` / `failures_by_status` — derivable la tasa de
+  error contra los umbrales del plan §6.1.
+- `PdfAssembler.AssemblerConfig` acepta un `synthetic_provider`
+  opcional; default `None` → comportamiento intacto para migraciones
+  reales.
+- `AssemblyConfig` (schema) gana un sub-bloque `synthetic_content`
+  con `enabled` / `seed` / `size_mix`.
+
+### Fixed
+
+- 11 tests pre-existentes rotos por drift de specs previos (no eran
+  regresiones de estos cambios — ya estaban rojos en `0.102.0`). Test
+  doubles desactualizados tras 084, 093, 096; el port `IDataSource`
+  creció `query` / `query_stream`. La suite completa pasa:
+  **1626 / 1626**.
+
+---
+
 ## [0.102.0] — 2026-05-21 — **Instalador offline para servidores air-gapped**
 
 El script que arma el bundle de instalación offline (para el servidor
