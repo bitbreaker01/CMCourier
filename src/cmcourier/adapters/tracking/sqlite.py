@@ -1,11 +1,15 @@
 """:class:`ITrackingStore` respaldado por SQLite.
 
-Dos conexiones conviven sobre el mismo archivo de base de datos en
-`WAL mode`:
+Tres tipos de conexión conviven sobre el mismo archivo de base de datos
+en `WAL mode`:
 
-* una conexión **reader** en el thread principal, usada para lecturas
-  sincrónicas y para ``start_batch`` (la única escritura que debe ser
-  visible inmediatamente);
+* conexiones de **lectura por thread** (107) vía
+  :class:`ThreadLocalConnectionPool` — WAL permite lectores concurrentes
+  con conexiones separadas, así que las lecturas del pipeline (hasta
+  50-100 worker threads) y del TUI corren sin lock de aplicación;
+* una conexión **sync** (``_sync_conn`` + ``_sync_lock``) para las dos
+  escrituras que deben ser visibles inmediatamente: ``start_batch`` y
+  ``retry_failed``;
 * una conexión **writer** que pertenece a un thread daemon que drena una
   :class:`queue.Queue` de sentencias y las commitea en `batches` (hasta
   500 sentencias, o cada 1 segundo — lo que ocurra primero).
@@ -35,6 +39,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from cmcourier.adapters.connection_pool import ThreadLocalConnectionPool
 from cmcourier.domain.exceptions import TrackingError
 from cmcourier.domain.models import (
     BatchDetails,
@@ -102,6 +107,15 @@ ON migration_log (rvabrep_txn_num)
 WHERE status = 'S5_DONE'
 """
 
+# 107: las queries que filtran SOLO por batch_id (tab DETAIL del TUI a
+# 4 Hz, get_batch_details, retry_failed, resume scope) hacían full table
+# scan — el índice único (rvabrep_txn_num, batch_id) tiene el txn como
+# columna líder y no les sirve.
+_CREATE_IDX_BATCH = """
+CREATE INDEX IF NOT EXISTS idx_migration_log_batch
+ON migration_log (batch_id)
+"""
+
 # 037: cache de metadatos cross-`batch` (POST-MVP §9). La tabla se crea
 # incondicionalmente — la migración de schema es barata e idempotente. El
 # `pipeline` solo lee / escribe sobre ella cuando ``metadata.cache.enabled``
@@ -132,6 +146,16 @@ _PRAGMAS_WAL: tuple[str, ...] = (
     "PRAGMA journal_mode=WAL",
     "PRAGMA synchronous=OFF",
     "PRAGMA cache_size=-64000",
+    "PRAGMA temp_store=MEMORY",
+)
+
+# 107: las conexiones de lectura por-thread usan un page cache chico —
+# con hasta 50-100 worker threads de S5, el cache de 64 MiB de las
+# conexiones de escritura multiplicado por N lectores sería un techo de
+# RAM absurdo para queries de una fila.
+_PRAGMAS_READER: tuple[str, ...] = (
+    "PRAGMA journal_mode=WAL",
+    "PRAGMA cache_size=-8000",
     "PRAGMA temp_store=MEMORY",
 )
 
@@ -198,6 +222,19 @@ _STATUSES_AT_OR_PAST: dict[StageStatus, frozenset[str]] = {
     StageStatus.S5_DONE: frozenset({"S5_DONE"}),
 }
 
+# 107: el SQL de is_stage_done se precomputa por stage — armarlo con
+# f-string en cada llamada (6 veces por documento) era trabajo repetido
+# en el camino más caliente del store y rompía el statement cache.
+_STAGE_DONE_SQL: dict[StageStatus, tuple[str, tuple[str, ...]]] = {
+    stage: (
+        "SELECT 1 FROM migration_log "
+        "WHERE rvabrep_txn_num = ? AND batch_id = ? "
+        f"AND status IN ({','.join('?' * len(statuses))}) LIMIT 1",
+        tuple(sorted(statuses)),
+    )
+    for stage, statuses in _STATUSES_AT_OR_PAST.items()
+}
+
 
 # ---------------------------------------------------------------------------
 # Envelope de tarea de escritura
@@ -240,18 +277,22 @@ class SQLiteTrackingStore(ITrackingStore):
         self._stop = threading.Event()
         self._closed = False
 
-        # 025: ``check_same_thread=False`` permite que los `threads` `worker`
-        # de S5 emitan lecturas contra esta conexión. ``_reader_lock`` serializa
-        # esas lecturas (SQLite en `WAL mode` permite lecturas concurrentes vía
-        # conexiones SEPARADAS, pero una sola conexión sigue necesitando un
-        # `lock` a nivel de aplicación).
+        # 107: las lecturas usan una conexión POR THREAD (WAL permite
+        # lectores concurrentes con conexiones separadas) — el viejo
+        # ``_reader_lock`` global serializaba 6 lecturas por documento
+        # contra una única conexión compartida. ``_sync_conn`` queda solo
+        # para las dos escrituras síncronas (``start_batch`` /
+        # ``retry_failed``), serializadas por ``_sync_lock``.
         try:
-            self._reader = sqlite3.connect(str(db_path), check_same_thread=False)
-            self._apply_pragmas(self._reader)
-            self._create_schema(self._reader)
+            self._sync_conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            self._apply_pragmas(self._sync_conn)
+            self._create_schema(self._sync_conn)
         except sqlite3.Error as exc:
             raise TrackingError("failed to open tracking store", path=str(db_path)) from exc
-        self._reader_lock = threading.Lock()
+        self._sync_lock = threading.Lock()
+        # El pool poda las conexiones de threads muertos (106) — los
+        # ThreadPoolExecutor del pipeline se reciclan por chunk.
+        self._read_pool = ThreadLocalConnectionPool(self._open_read_connection)
 
         self._writer_thread = threading.Thread(
             target=self._writer_loop, name="cmcourier-tracking-writer", daemon=True
@@ -271,9 +312,22 @@ class SQLiteTrackingStore(ITrackingStore):
         conn.execute(_CREATE_MIGRATION_BATCH)
         conn.execute(_CREATE_IDX_TXN_BATCH)
         conn.execute(_CREATE_IDX_UPLOADED)
+        conn.execute(_CREATE_IDX_BATCH)
         conn.execute(_CREATE_DOCUMENT_CACHE)
         conn.execute(_CREATE_IDX_DOCUMENT_CACHE_AGE)
         conn.commit()
+
+    def _open_read_connection(self) -> sqlite3.Connection:
+        """107: conexión de lectura del thread actual. ``check_same_thread=
+        False`` solo para que ``close_all()`` pueda cerrarla desde otro
+        thread — cada conexión la usa un único thread."""
+        try:
+            conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+            for stmt in _PRAGMAS_READER:
+                conn.execute(stmt)
+        except sqlite3.Error as exc:
+            raise TrackingError("failed to open read connection", path=str(self._db_path)) from exc
+        return conn
 
     # ------------------------------------------------------------ loop del writer
 
@@ -350,13 +404,13 @@ class SQLiteTrackingStore(ITrackingStore):
         """Inserta una nueva fila de `batch` de forma sincrónica y devuelve su UUID4."""
         batch_id = str(uuid.uuid4())
         try:
-            with self._reader_lock:
-                self._reader.execute(
+            with self._sync_lock:
+                self._sync_conn.execute(
                     "INSERT INTO migration_batch (batch_id, total_records, started_at) "
                     "VALUES (?, ?, ?)",
                     (batch_id, total_records, datetime.now().isoformat()),
                 )
-                self._reader.commit()
+                self._sync_conn.commit()
         except sqlite3.Error as exc:
             raise TrackingError("start_batch failed", batch_id=batch_id) from exc
         return batch_id
@@ -516,8 +570,7 @@ class SQLiteTrackingStore(ITrackingStore):
             sql += " AND batch_id = ?"
             params = (batch_id,)
         try:
-            with self._reader_lock:
-                rows = self._reader.execute(sql, params).fetchall()
+            rows = self._read_pool.acquire().execute(sql, params).fetchall()
         except sqlite3.Error as exc:
             raise TrackingError("uploaded_records failed", batch_id=batch_id) from exc
         return [
@@ -535,39 +588,38 @@ class SQLiteTrackingStore(ITrackingStore):
 
     def is_uploaded(self, txn_num: str) -> bool:
         try:
-            with self._reader_lock:
-                row = self._reader.execute(
+            row = (
+                self._read_pool.acquire()
+                .execute(
                     "SELECT 1 FROM migration_log "
                     "WHERE rvabrep_txn_num = ? AND status = 'S5_DONE' LIMIT 1",
                     (txn_num,),
-                ).fetchone()
+                )
+                .fetchone()
+            )
         except sqlite3.Error as exc:
             raise TrackingError("is_uploaded failed", txn_num=txn_num) from exc
         return row is not None
 
     def is_stage_done(self, txn_num: str, batch_id: str, stage: StageStatus) -> bool:
         _require_state(stage, "DONE")
-        valid = _STATUSES_AT_OR_PAST[stage]
-        placeholders = ",".join("?" * len(valid))
+        sql, statuses = _STAGE_DONE_SQL[stage]
         try:
-            with self._reader_lock:
-                row = self._reader.execute(
-                    f"SELECT 1 FROM migration_log "
-                    f"WHERE rvabrep_txn_num = ? AND batch_id = ? AND status IN ({placeholders}) "
-                    f"LIMIT 1",
-                    (txn_num, batch_id, *valid),
-                ).fetchone()
+            row = self._read_pool.acquire().execute(sql, (txn_num, batch_id, *statuses)).fetchone()
         except sqlite3.Error as exc:
             raise TrackingError("is_stage_done failed", txn_num=txn_num) from exc
         return row is not None
 
     def list_txn_nums_for_batch(self, batch_id: str) -> set[str]:
         try:
-            with self._reader_lock:
-                rows = self._reader.execute(
+            rows = (
+                self._read_pool.acquire()
+                .execute(
                     "SELECT DISTINCT rvabrep_txn_num FROM migration_log WHERE batch_id = ?",
                     (batch_id,),
-                ).fetchall()
+                )
+                .fetchall()
+            )
         except sqlite3.Error as exc:
             raise TrackingError("list_txn_nums_for_batch failed", batch_id=batch_id) from exc
         return {row[0] for row in rows}
@@ -586,31 +638,30 @@ class SQLiteTrackingStore(ITrackingStore):
             sql += " WHERE completed_at IS NOT NULL"
         sql += " ORDER BY started_at DESC"
         try:
-            with self._reader_lock:
-                rows = self._reader.execute(sql, params).fetchall()
+            rows = self._read_pool.acquire().execute(sql, params).fetchall()
         except sqlite3.Error as exc:
             raise TrackingError("list_batches failed") from exc
         return [_row_to_batch_info(row) for row in rows]
 
     def get_batch_details(self, batch_id: str) -> BatchDetails | None:
         try:
-            with self._reader_lock:
-                batch_row = self._reader.execute(
-                    "SELECT batch_id, started_at, completed_at, total_records "
-                    "FROM migration_batch WHERE batch_id = ?",
-                    (batch_id,),
-                ).fetchone()
-                if batch_row is None:
-                    return None
-                status_rows = self._reader.execute(
-                    "SELECT status, COUNT(*) FROM migration_log WHERE batch_id = ? GROUP BY status",
-                    (batch_id,),
-                ).fetchall()
-                failed_rows = self._reader.execute(
-                    "SELECT rvabrep_txn_num, status, COALESCE(error_message, '') "
-                    "FROM migration_log WHERE batch_id = ? AND status LIKE '%_FAILED'",
-                    (batch_id,),
-                ).fetchall()
+            conn = self._read_pool.acquire()
+            batch_row = conn.execute(
+                "SELECT batch_id, started_at, completed_at, total_records "
+                "FROM migration_batch WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()
+            if batch_row is None:
+                return None
+            status_rows = conn.execute(
+                "SELECT status, COUNT(*) FROM migration_log WHERE batch_id = ? GROUP BY status",
+                (batch_id,),
+            ).fetchall()
+            failed_rows = conn.execute(
+                "SELECT rvabrep_txn_num, status, COALESCE(error_message, '') "
+                "FROM migration_log WHERE batch_id = ? AND status LIKE '%_FAILED'",
+                (batch_id,),
+            ).fetchall()
         except sqlite3.Error as exc:
             raise TrackingError("get_batch_details failed", batch_id=batch_id) from exc
         return BatchDetails(
@@ -624,13 +675,16 @@ class SQLiteTrackingStore(ITrackingStore):
     def list_docs_for_batch(self, batch_id: str) -> list[DocDetail]:
         """052: detalle por documento para el drill-down por `chunk` de la TUI."""
         try:
-            with self._reader_lock:
-                rows = self._reader.execute(
+            rows = (
+                self._read_pool.acquire()
+                .execute(
                     "SELECT rvabrep_txn_num, COALESCE(rvabrep_file_name, ''), status, "
                     "COALESCE(error_message, ''), COALESCE(file_size_bytes, 0) "
                     "FROM migration_log WHERE batch_id = ? ORDER BY rvabrep_txn_num",
                     (batch_id,),
-                ).fetchall()
+                )
+                .fetchall()
+            )
         except sqlite3.Error as exc:
             raise TrackingError("list_docs_for_batch failed", batch_id=batch_id) from exc
         return [
@@ -658,9 +712,9 @@ class SQLiteTrackingStore(ITrackingStore):
         # estado consistente.
         self.flush()
         try:
-            with self._reader_lock:
+            with self._sync_lock:
                 if stage is None:
-                    cursor = self._reader.execute(
+                    cursor = self._sync_conn.execute(
                         "UPDATE migration_log "
                         "SET status = REPLACE(status, '_FAILED', '_PENDING'), "
                         "    error_message = NULL "
@@ -668,14 +722,14 @@ class SQLiteTrackingStore(ITrackingStore):
                         (batch_id,),
                     )
                 else:
-                    cursor = self._reader.execute(
+                    cursor = self._sync_conn.execute(
                         "UPDATE migration_log "
                         "SET status = REPLACE(status, '_FAILED', '_PENDING'), "
                         "    error_message = NULL "
                         "WHERE batch_id = ? AND status = ?",
                         (batch_id, stage.value),
                     )
-                self._reader.commit()
+                self._sync_conn.commit()
         except sqlite3.Error as exc:
             raise TrackingError("retry_failed failed", batch_id=batch_id) from exc
         return int(cursor.rowcount)
@@ -688,10 +742,11 @@ class SQLiteTrackingStore(ITrackingStore):
         self._queue.join()
         self._stop.set()
         self._writer_thread.join(timeout=5.0)
+        self._read_pool.close_all()
         try:
-            self._reader.close()
+            self._sync_conn.close()
         except sqlite3.Error:
-            _log.exception("tracking store: failed to close reader connection")
+            _log.exception("tracking store: failed to close sync connection")
 
     # --------------------------------------------------------------- helpers
 

@@ -527,21 +527,23 @@ class TestErrorWrapping:
             SQLiteTrackingStore(bogus)
 
     def test_is_uploaded_wraps_sqlite_error(self, store: SQLiteTrackingStore) -> None:
-        # Forzamos el cierre de la conexión de lectura así una query posterior levanta.
-        store._reader.close()  # type: ignore[reportPrivateUsage]
+        # 107: cerramos la conexión de lectura del thread actual así la
+        # query posterior levanta (la conexión cerrada queda cacheada en
+        # el pool thread-local hasta el reset).
+        store._read_pool.acquire().close()  # type: ignore[reportPrivateUsage]
         with pytest.raises(TrackingError):
             store.is_uploaded("TXN-DEAD")
         # Resetea el flag _closed así el ruido del teardown queda silenciado.
         store._closed = True  # type: ignore[reportPrivateUsage]
 
     def test_is_stage_done_wraps_sqlite_error(self, store: SQLiteTrackingStore) -> None:
-        store._reader.close()  # type: ignore[reportPrivateUsage]
+        store._read_pool.acquire().close()  # type: ignore[reportPrivateUsage]
         with pytest.raises(TrackingError):
             store.is_stage_done("TXN-DEAD", "batch", StageStatus.S1_DONE)
         store._closed = True  # type: ignore[reportPrivateUsage]
 
     def test_start_batch_wraps_sqlite_error(self, store: SQLiteTrackingStore) -> None:
-        store._reader.close()  # type: ignore[reportPrivateUsage]
+        store._sync_conn.close()  # type: ignore[reportPrivateUsage]
         with pytest.raises(TrackingError):
             store.start_batch(total_records=1)
         store._closed = True  # type: ignore[reportPrivateUsage]

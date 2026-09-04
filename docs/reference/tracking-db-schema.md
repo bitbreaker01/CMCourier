@@ -74,9 +74,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_migration_log_txn_batch
 CREATE INDEX IF NOT EXISTS idx_migration_log_uploaded
     ON migration_log (rvabrep_txn_num)
     WHERE status = 'S5_DONE';
+
+CREATE INDEX IF NOT EXISTS idx_migration_log_batch
+    ON migration_log (batch_id);
 ```
 
 El partial index sobre `S5_DONE` es lo que hace barato el check de cross-batch idempotency (`is_uploaded()`).
+
+El índice sobre `batch_id` (spec 107) sirve a las queries que filtran solo por batch — el drill-down del tab DETAIL de la TUI, `get_batch_details`, `retry_failed` y el resume scope — que antes hacían full table scan. Las DBs creadas por versiones anteriores lo adquieren automáticamente al reabrirse (`CREATE INDEX IF NOT EXISTS` corre en cada apertura del store).
 
 ---
 
