@@ -302,6 +302,13 @@ class CmisUploader(IUploader):
         # multiplica por la cantidad de `workers`).
         self._bandwidth_bucket = TokenBucket(mbps=config.max_bandwidth_mbps)
 
+    @property
+    def current_timeout_s(self) -> float:
+        """122: el timeout vivo (el AIMD lo ajusta a mitad de batch).
+        Accessor público para el TUI — pre-122 el data provider leía
+        ``_timeout_s`` directo."""
+        return self._timeout_s
+
     def _request_timeout(self) -> httpx.Timeout:
         """116: timeout por request con connect capeado.
 
@@ -396,11 +403,8 @@ class CmisUploader(IUploader):
                 "worker": threading.current_thread().name,
             },
         )
-        body = _truncate(resp.text)
-        if resp.status_code >= 500:
-            raise CMISServerError(status_code=resp.status_code, response_body=body)
         if resp.status_code >= 400:
-            raise CMISClientError(status_code=resp.status_code, response_body=body)
+            raise _http_error(resp)
         try:
             data = resp.json()
         except ValueError:
@@ -443,11 +447,8 @@ class CmisUploader(IUploader):
         )
         if resp.status_code == 404:
             return False
-        body = _truncate(resp.text)
-        if resp.status_code >= 500:
-            raise CMISServerError(status_code=resp.status_code, response_body=body)
         if resp.status_code >= 400:
-            raise CMISClientError(status_code=resp.status_code, response_body=body)
+            raise _http_error(resp)
         try:
             data = resp.json()
         except ValueError:
@@ -624,9 +625,18 @@ class CmisUploader(IUploader):
     def _lookup_existing_object_id(self, folder_url: str, document_name: str) -> str | None:
         """Lista los hijos de ``folder_url``, devuelve el cmis:objectId que matchee."""
         t0 = time.monotonic()
+        # 120: solo las dos propiedades que el matching necesita, en
+        # formato succinct — pre-120 cada hijo viajaba con TODAS sus
+        # propiedades CMIS (respuesta enorme por cada 409 en carpetas
+        # grandes).
         resp = self._client.get(
             folder_url,
-            params={"cmisselector": "children", "maxItems": "5000"},
+            params={
+                "cmisselector": "children",
+                "maxItems": "5000",
+                "filter": "cmis:name,cmis:objectId",
+                "succinct": "true",
+            },
             timeout=self._request_timeout(),
         )
         _network_log.info(
@@ -639,11 +649,8 @@ class CmisUploader(IUploader):
                 "worker": threading.current_thread().name,
             },
         )
-        body = _truncate(resp.text)
-        if resp.status_code >= 500:
-            raise CMISServerError(status_code=resp.status_code, response_body=body)
         if resp.status_code >= 400:
-            raise CMISClientError(status_code=resp.status_code, response_body=body)
+            raise _http_error(resp)
         try:
             data = resp.json()
         except ValueError:
@@ -1137,3 +1144,15 @@ def _truncate(text: str) -> str:
     if len(text) <= _RESPONSE_BODY_TRUNCATION:
         return text
     return text[:_RESPONSE_BODY_TRUNCATION] + "...(truncated)"
+
+
+def _http_error(resp: httpx.Response) -> CMISClientError | CMISServerError:
+    """120: construye la excepción HTTP decodificando el body SOLO acá.
+
+    Pre-120 los GET decodificaban ``resp.text`` completo antes de
+    chequear el status — trabajo tirado en cada respuesta 200.
+    """
+    body = _truncate(resp.text)
+    if resp.status_code >= 500:
+        return CMISServerError(status_code=resp.status_code, response_body=body)
+    return CMISClientError(status_code=resp.status_code, response_body=body)
