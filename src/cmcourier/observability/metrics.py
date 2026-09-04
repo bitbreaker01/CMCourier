@@ -23,6 +23,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
@@ -60,43 +61,66 @@ class NetworkEvent:
 # ---------------------------------------------------------------------------
 
 
+# 108: techo de muestras retenidas por bucket para percentiles. 2048
+# muestras dan un p95 `nearest-rank` con precisión de sobra para el TUI
+# y el AIMD; la memoria por bucket queda en ~16 KiB independientemente
+# del tamaño de la corrida (pre-108, el recorder único del modo
+# streaming acumulaba TODAS las muestras — O(total_docs) por bucket).
+_STAGE_WINDOW_SAMPLES = 2048
+
+
 @dataclass(slots=True)
 class _StageBucket:
-    """Acumulador `thread-safe` de timing por etapa (025).
+    """Acumulador `thread-safe` de timing por etapa (025, acotado en 108).
 
-    La versión single-threaded de 020 no tenía lock — append desde un
-    `thread`, snapshot desde el mismo `thread`. 025 agrega concurrencia
-    de `workers` de S5: ``record`` se llama desde N `worker threads`
-    mientras que ``summary`` se llama desde los `threads` del orquestador
-    + TUI. El lock mantiene la lista subyacente consistente.
+    ``record`` se llama desde N `worker threads` mientras ``summary`` se
+    llama desde el orquestador + TUI. 108 reemplaza la lista sin techo
+    por una **ventana deslizante** (`deque(maxlen)`) para los
+    percentiles — el p95 refleja el comportamiento reciente, que es lo
+    que el AIMD y el operador necesitan ver — mientras ``count`` y
+    ``sum_ms`` siguen siendo **acumulativos** (el `batch_summary`,
+    `analyze` y `diagnose` calculan fracciones de tiempo total sobre
+    ellos). El resultado de ``summary`` se cachea y solo se recomputa
+    cuando entraron muestras nuevas: las ~13 lecturas por segundo del
+    TUI sobre un bucket quieto no ordenan nada.
     """
 
-    durations_ms: list[float] = field(default_factory=list)
+    window: deque[float] = field(default_factory=lambda: deque(maxlen=_STAGE_WINDOW_SAMPLES))
+    count: int = 0
+    sum_ms: float = 0.0
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    _cached: dict[str, float | int] | None = None
 
     def record(self, duration_ms: float) -> None:
         with self._lock:
-            self.durations_ms.append(duration_ms)
+            self.window.append(duration_ms)
+            self.count += 1
+            self.sum_ms += duration_ms
+            self._cached = None
 
     def summary(self) -> dict[str, float | int]:
         with self._lock:
-            snapshot = list(self.durations_ms)
-        if not snapshot:
-            return {
-                "count": 0,
-                "p50_ms": 0.0,
-                "p95_ms": 0.0,
-                "p99_ms": 0.0,
-                "sum_ms": 0.0,
-            }
-        sorted_ms = sorted(snapshot)
-        return {
-            "count": len(sorted_ms),
-            "p50_ms": _percentile(sorted_ms, 0.50),
-            "p95_ms": _percentile(sorted_ms, 0.95),
-            "p99_ms": _percentile(sorted_ms, 0.99),
-            "sum_ms": sum(sorted_ms),
-        }
+            if self._cached is not None:
+                return self._cached
+            if not self.window:
+                result: dict[str, float | int] = {
+                    "count": 0,
+                    "p50_ms": 0.0,
+                    "p95_ms": 0.0,
+                    "p99_ms": 0.0,
+                    "sum_ms": 0.0,
+                }
+            else:
+                sorted_ms = sorted(self.window)
+                result = {
+                    "count": self.count,
+                    "p50_ms": _percentile(sorted_ms, 0.50),
+                    "p95_ms": _percentile(sorted_ms, 0.95),
+                    "p99_ms": _percentile(sorted_ms, 0.99),
+                    "sum_ms": self.sum_ms,
+                }
+            self._cached = result
+            return result
 
 
 def _percentile(sorted_values: list[float], q: float) -> float:
@@ -472,6 +496,11 @@ class MetricsRecorder:
         self._enabled = enabled
         self._pipeline_metrics_enabled = pipeline_metrics_enabled
         self._stage_buckets: dict[str, _StageBucket] = {}
+        # 108: protege el DICT de buckets (setdefault desde N workers vs
+        # iteración desde TUI/orchestrator — pre-108 un stage nuevo en
+        # plena iteración tiraba "dictionary changed size during
+        # iteration"). Cada bucket sigue teniendo su propio lock interno.
+        self._buckets_lock = threading.Lock()
         self._aggregator: SlowOpAggregator | None = None
         self._slow_op_handler: _SlowOpHandler | None = None
         self._monitored_loggers: list[logging.Logger] = []
@@ -500,7 +529,8 @@ class MetricsRecorder:
         self._failures_by_status: dict[int, int] = {}
 
     def start_batch(self, *, pipeline: str, batch_id: str) -> None:
-        self._stage_buckets = {}
+        with self._buckets_lock:
+            self._stage_buckets = {}
         if not self._enabled:
             return
         self._aggregator = SlowOpAggregator(
@@ -524,12 +554,19 @@ class MetricsRecorder:
         stage: str,
         duration_ms: float,
     ) -> None:
-        bucket = self._stage_buckets.setdefault(stage, _StageBucket())
+        with self._buckets_lock:
+            bucket = self._stage_buckets.setdefault(stage, _StageBucket())
         bucket.record(duration_ms)
 
     def current_stage_p95(self, stage: str) -> float:
-        """Latencia p95 live para una etapa (025 — alimenta el auto-tune)."""
-        bucket = self._stage_buckets.get(stage)
+        """Latencia p95 live para una etapa (025 — alimenta el auto-tune).
+
+        108: el p95 es de la **ventana** de muestras recientes, no del
+        acumulado histórico — una degradación de CMIS mueve la señal en
+        segundos en vez de quedar diluida por miles de muestras viejas.
+        """
+        with self._buckets_lock:
+            bucket = self._stage_buckets.get(stage)
         if bucket is None:
             return 0.0
         return float(bucket.summary()["p95_ms"])
@@ -543,7 +580,8 @@ class MetricsRecorder:
         El `dict-builder` en ``_StageBucket.summary()`` ya sostiene el lock
         del `bucket` para ambos valores, así que el par queda consistente.
         """
-        bucket = self._stage_buckets.get(stage)
+        with self._buckets_lock:
+            bucket = self._stage_buckets.get(stage)
         if bucket is None:
             return 0.0, 0
         snap = bucket.summary()
@@ -597,8 +635,10 @@ class MetricsRecorder:
         elapsed_s: float,
     ) -> BatchSummary:
         throughput = (total_docs / elapsed_s) if elapsed_s > 0 else 0.0
+        with self._buckets_lock:
+            items = sorted(self._stage_buckets.items())
         stages: dict[str, dict[str, float | int]] = {}
-        for stage_name, bucket in sorted(self._stage_buckets.items()):
+        for stage_name, bucket in items:
             stages[stage_name] = bucket.summary()
         failed_total, failures_by_type, failures_by_status = self.failure_breakdown()
         return BatchSummary(
@@ -653,7 +693,9 @@ class MetricsRecorder:
 
     def stages_snapshot(self) -> dict[str, dict[str, float | int]]:
         """Snapshot de percentiles/count por etapa para la TUI."""
-        return {stage: bucket.summary() for stage, bucket in self._stage_buckets.items()}
+        with self._buckets_lock:
+            items = list(self._stage_buckets.items())
+        return {stage: bucket.summary() for stage, bucket in items}
 
     def record_upload_skipped(self) -> None:
         """041: contabiliza un outcome S5 de ``"skipped"`` (idempotencia / `claim-lost`)."""
