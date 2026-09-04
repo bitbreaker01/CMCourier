@@ -75,17 +75,25 @@ class As400Recovery:
         recovered: list[str] = []
         already_present: list[str] = []
         unrecoverable: list[RecoveryItem] = []
-        for rec in self._sqlite.uploaded_records(batch_id):
+        records = self._sqlite.uploaded_records(batch_id)
+        # 118: el chequeo de existencia es batcheado (IN chunkeado, 113)
+        # — pre-118 era un SELECT por doc, y en el caso común (casi todo
+        # ya presente) ese chequeo era el ÚNICO trabajo por doc. Si AS400
+        # está caído, esto falla de entrada con el error real — mejor
+        # que 100k `unrecoverable` idénticos.
+        present = self._as400.read_states_by_txns([r.txn_num for r in records])
+        for rec in records:
+            if rec.txn_num in present:
+                already_present.append(rec.txn_num)
+                continue
             try:
-                outcome = self._recover_one(rec, apply=apply)
+                outcome = self._recover_missing(rec, apply=apply)
             except Exception as exc:  # noqa: BLE001 — un txn malo no aborta el resto
                 _log.exception("recover: txn=%s falló inesperadamente", rec.txn_num)
                 unrecoverable.append(RecoveryItem(rec.txn_num, f"error: {exc}"))
                 continue
             if isinstance(outcome, RecoveryItem):
                 unrecoverable.append(outcome)
-            elif outcome == "already_present":
-                already_present.append(rec.txn_num)
             else:  # "recovered"
                 recovered.append(rec.txn_num)
         _log.info(
@@ -101,11 +109,10 @@ class As400Recovery:
             unrecoverable=unrecoverable,
         )
 
-    def _recover_one(self, rec: UploadedRecord, *, apply: bool) -> RecoveryItem | str:
-        """Recupera un doc. Devuelve ``"recovered"``, ``"already_present"``
-        o un :class:`RecoveryItem` (no recuperable)."""
-        if self._as400.read_state_by_txn(trnnum=rec.txn_num) is not None:
-            return "already_present"
+    def _recover_missing(self, rec: UploadedRecord, *, apply: bool) -> RecoveryItem | str:
+        """Recupera un doc que NIARVILOG no tiene (la ausencia ya fue
+        determinada por la lectura batcheada de :meth:`recover`).
+        Devuelve ``"recovered"`` o un :class:`RecoveryItem`."""
         # Re-derivar DOCFRM / IMGTIP desde la fila RVABREP.
         document = self._indexing.find_document_by_txn(rec.txn_num)
         if document is None:

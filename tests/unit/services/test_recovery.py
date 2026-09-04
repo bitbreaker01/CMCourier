@@ -68,7 +68,7 @@ def _recovery(
 class TestRecoverHappyPath:
     def test_missing_txn_is_recovered_with_apply(self) -> None:
         as400 = MagicMock()
-        as400.read_state_by_txn.return_value = None  # ausente en NIARVILOG
+        as400.read_states_by_txns.return_value = {}  # ausente en NIARVILOG
         indexing = MagicMock()
         indexing.find_document_by_txn.return_value = _document()
         mapping = MagicMock()
@@ -85,7 +85,7 @@ class TestRecoverHappyPath:
 
     def test_recovered_row_carries_the_rederived_fields(self) -> None:
         as400 = MagicMock()
-        as400.read_state_by_txn.return_value = None
+        as400.read_states_by_txns.return_value = {}
         indexing = MagicMock()
         indexing.find_document_by_txn.return_value = _document(index7="FF17", image_type="O")
         mapping = MagicMock()
@@ -107,7 +107,7 @@ class TestRecoverHappyPath:
 
     def test_dry_run_does_not_write_as400(self) -> None:
         as400 = MagicMock()
-        as400.read_state_by_txn.return_value = None
+        as400.read_states_by_txns.return_value = {}
         indexing = MagicMock()
         indexing.find_document_by_txn.return_value = _document()
         mapping = MagicMock()
@@ -131,7 +131,7 @@ class TestRecoverHappyPath:
 class TestRecoverSkipsAndFailures:
     def test_txn_already_in_as400_is_skipped(self) -> None:
         as400 = MagicMock()
-        as400.read_state_by_txn.return_value = object()  # ya existe
+        as400.read_states_by_txns.return_value = {"0000001": object()}  # ya existe
         rec = _recovery(
             uploaded=[_uploaded("0000001")],
             as400=as400,
@@ -147,7 +147,7 @@ class TestRecoverSkipsAndFailures:
 
     def test_missing_rvabrep_row_is_unrecoverable(self) -> None:
         as400 = MagicMock()
-        as400.read_state_by_txn.return_value = None
+        as400.read_states_by_txns.return_value = {}
         indexing = MagicMock()
         indexing.find_document_by_txn.return_value = None  # sin fila RVABREP
         rec = _recovery(
@@ -165,7 +165,7 @@ class TestRecoverSkipsAndFailures:
 
     def test_unmapped_id_rvi_is_unrecoverable(self) -> None:
         as400 = MagicMock()
-        as400.read_state_by_txn.return_value = None
+        as400.read_states_by_txns.return_value = {}
         indexing = MagicMock()
         indexing.find_document_by_txn.return_value = _document(index7="CC99")
         mapping = MagicMock()
@@ -183,7 +183,7 @@ class TestRecoverSkipsAndFailures:
     def test_one_failing_txn_does_not_abort_the_rest(self) -> None:
         # La lección del 098: un txn que explota no se lleva a los demás.
         as400 = MagicMock()
-        as400.read_state_by_txn.return_value = None
+        as400.read_states_by_txns.return_value = {}
         indexing = MagicMock()
         indexing.find_document_by_txn.return_value = _document()
         mapping = MagicMock()
@@ -202,3 +202,24 @@ class TestRecoverSkipsAndFailures:
         assert set(result.recovered) == {"0000001", "0000003"}
         assert len(result.unrecoverable) == 1
         assert result.unrecoverable[0].txn_num == "0000002"
+
+
+class TestBatchedExistenceCheck118:
+    def test_single_batched_read_for_all_records(self) -> None:
+        """118: N docs → UNA llamada batcheada, no N SELECTs."""
+        as400 = MagicMock()
+        txns = [f"{i:07d}" for i in range(50)]
+        as400.read_states_by_txns.return_value = {t: object() for t in txns}
+        rec = _recovery(
+            uploaded=[_uploaded(t) for t in txns],
+            as400=as400,
+            indexing=MagicMock(),
+            mapping=MagicMock(),
+        )
+
+        result = rec.recover(apply=True)
+
+        assert len(result.already_present) == 50
+        as400.read_states_by_txns.assert_called_once()
+        as400.read_state_by_txn.assert_not_called()
+        as400.insert_recovered_row.assert_not_called()
