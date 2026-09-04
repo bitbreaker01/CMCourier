@@ -326,7 +326,7 @@ processing:
   prep_workers: 1                           # default 1, ≥ 1 — S2/S3/S4
   s4_use_processes: true                    # default true (066)
   s4_max_processes: null                    # null = os.cpu_count()
-  s4_smart_routing: false                   # default false (094)
+  s4_smart_routing: true                    # default true (114)
   streaming:
     bucket_size: 100                        # default 100 — solo aplica en mode: streaming
   heavy_light_lanes:
@@ -346,7 +346,7 @@ processing:
 | `bucket_size` | Cola bounded entre prep y upload. Más grande = más buffer (mejor para amortizar pausas), menos elasticidad. Default 100 está bien para la mayoría. |
 | `prep_workers` | Threads en S2/S3/S4. `1` es serial — byte-idéntico al pre-056. Subilo si tu cuello de botella es resolución de metadatos (S3) o ensamblado en TIFF pesado (S4). |
 | `s4_use_processes: true` | Default desde 066. Saltea el GIL para `img2pdf`/`PIL`/`PyPDF2`. Si lo apagás volvés a serializar el ensamblado contra el GIL — solo apagalo si tenés sospecha de fork bugs. |
-| `s4_smart_routing: true` | (094) Con el process pool activo, rutea los PDF nativos inline (su trabajo es `shutil.copy2`, I/O-bound, libera el GIL) y manda solo los paginados TIFF/JPEG al pool. Evita el overhead de pickle/IPC/spawn — clave en Windows. Default `false`. |
+| `s4_smart_routing: true` | (094) Con el process pool activo, rutea los PDF nativos inline (su trabajo es `shutil.copy2`, I/O-bound, libera el GIL) y manda solo los paginados TIFF/JPEG al pool. Evita el overhead de pickle/IPC/spawn — clave en Windows. Default `true` desde 114 (opt-out con `false`). |
 | `batches_in_flight: 2` | Solo en batched. N=2 = overlap (mientras chunk K sube, K+1 prepara). Bajarlo a 1 desactiva el overlap pero es más predecible. |
 | `heavy_light_lanes.enabled: true` | Activa lanes adaptativos en S5 — separa docs ≥ 10 MB del resto. Para que valga la pena necesitás `heavy_lane_min_batch` (default 50) docs por chunk. |
 

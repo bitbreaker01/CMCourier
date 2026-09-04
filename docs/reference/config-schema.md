@@ -355,7 +355,7 @@ Todas las columnas se interpolan en SQL (un nombre de columna nunca puede ser bi
 | `heavy_light_lanes` | `HeavyLightLanesConfig` | factory | — | Lanes (036). |
 | `s4_use_processes` | bool | `True` | — | `ProcessPoolExecutor` para S4 (066). |
 | `s4_max_processes` | `int \| None` | `None` | `≥ 1` | `None` → `os.cpu_count()`. |
-| `s4_smart_routing` | bool | `False` | — | Con el pool activo, rutea PDFs nativos inline y paginados al pool (094). |
+| `s4_smart_routing` | bool | `True` | — | Con el pool activo, rutea PDFs nativos inline y paginados al pool (094; default on desde 114). |
 
 ### `StreamingConfig` (063)
 

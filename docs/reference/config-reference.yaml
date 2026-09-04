@@ -414,7 +414,7 @@ processing:
   # paginated TIFF/JPEG go to the pool (img2pdf is CPU-bound). Avoids the
   # pickle/IPC/spawn overhead of the pool for non-CPU-bound docs — matters
   # most on Windows where `spawn` is expensive. Default false (pre-094).
-  s4_smart_routing: false                  # (default: false)
+  s4_smart_routing: true                   # (default: true, 114)
 
 
 # -----------------------------------------------------------------------------

@@ -783,9 +783,10 @@ class ProcessingConfig(BaseModel):
     # process pool (``img2pdf`` es CPU bound). Evita el overhead de
     # pickle/IPC/spawn del process pool para docs cuyo trabajo útil
     # NO es CPU bound. Crítico en Windows donde ``spawn`` es caro.
-    # Default ``False`` preserva el comportamiento pre-094 (todo al
-    # process pool si está activo).
-    s4_smart_routing: bool = False
+    # 114: default ``True`` — con ``s4_use_processes`` on por default,
+    # mandar los PDF nativos al pool era puro overhead. ``false`` en el
+    # YAML restaura el comportamiento 094-off (todo al pool).
+    s4_smart_routing: bool = True
 
 
 class SystemMetricsConfig(BaseModel):

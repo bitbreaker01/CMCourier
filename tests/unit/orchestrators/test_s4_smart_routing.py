@@ -132,16 +132,17 @@ class TestNoProcessPool:
 
 
 class TestSchemaDefault:
-    def test_processing_config_default_disables_smart_routing(self) -> None:
+    def test_processing_config_default_enables_smart_routing(self) -> None:
         from cmcourier.config.schema import ProcessingConfig
 
         cfg = ProcessingConfig()
-        assert cfg.s4_smart_routing is False, (
-            "094: default must preserve pre-094 behavior (no routing)"
+        assert cfg.s4_smart_routing is True, (
+            "114: con s4_use_processes=True por default, los PDF nativos "
+            "(shutil.copy2) no deben pagar pickle/IPC del process pool"
         )
 
-    def test_processing_config_opt_in(self) -> None:
+    def test_processing_config_opt_out(self) -> None:
         from cmcourier.config.schema import ProcessingConfig
 
-        cfg = ProcessingConfig(s4_smart_routing=True)
-        assert cfg.s4_smart_routing is True
+        cfg = ProcessingConfig(s4_smart_routing=False)
+        assert cfg.s4_smart_routing is False

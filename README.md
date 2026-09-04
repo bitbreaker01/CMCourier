@@ -2,7 +2,7 @@
 
 > Migración de documentos bancarios de **IBM RVI / AS400** a **IBM Content Manager** vía **CMIS REST**. Idempotente, observable, parallelizable.
 
-**Versión actual**: `0.104.0` — pipeline de punta a punta: modos `batched` y `streaming`, AIMD + heavy/light lanes, sincronización distribuida con AS400 (`claim` / `periodic`) + herramienta de recuperación, TUI live de 5 tabs, instalador offline para servidores air-gapped, y banco de pruebas de stress (contenido sintético on-the-fly, `--max-duration` y desglose de errores por tipo).
+**Versión actual**: `0.105.0` — pipeline de punta a punta: modos `batched` y `streaming`, AIMD + heavy/light lanes, sincronización distribuida con AS400 (`claim` / `periodic`) + herramienta de recuperación, TUI live de 5 tabs, instalador offline para servidores air-gapped, y banco de pruebas de stress (contenido sintético on-the-fly, `--max-duration` y desglose de errores por tipo).
 
 ---
 
@@ -49,7 +49,7 @@ Detalle completo en [`docs/explanation/pipeline-stages.md`](docs/explanation/pip
 - **Dos modos de ejecución**: `batched` (multi-batch overlap N=2) y `streaming` (producer-consumer con bucket acotado, memoria peak fija independiente del total). Ver [`streaming-vs-batched`](docs/explanation/streaming-vs-batched.md).
 - **AIMD auto-tune** del pool S5: multiplicative growth (1.25×) + soft halve (0.75×) + tolerance threshold (1.5×). Recalibrado en spec 068 — alcanza techo en 2.5 min vs 11 min del aditivo. Ver [`aimd-auto-tuning`](docs/explanation/aimd-auto-tuning.md).
 - **Heavy/light lanes**: dual semáforo en S5 para evitar head-of-line blocking entre docs grandes y chicos. Rebalance dirigido por drain. Ver [`heavy-light-lanes`](docs/explanation/heavy-light-lanes.md).
-- **ProcessPool en S4**: PDF assembly bypassa el GIL con `multiprocessing.get_context("spawn")`. Default on; con `s4_smart_routing` los PDF nativos corren inline (su trabajo es I/O) y solo los paginados TIFF/JPEG van al pool. Ver [`processpool-for-pdf-assembly`](docs/explanation/processpool-for-pdf-assembly.md).
+- **ProcessPool en S4**: PDF assembly bypassa el GIL con `multiprocessing.get_context("spawn")`. Default on; con `s4_smart_routing` (default on desde 114) los PDF nativos corren inline (su trabajo es I/O) y solo los paginados TIFF/JPEG van al pool. Ver [`processpool-for-pdf-assembly`](docs/explanation/processpool-for-pdf-assembly.md).
 - **TUI live de 5 tabs** (PREP, UPLOAD, CHUNKS, BUCKET, DETAIL) construida en Textual. Throughput, p95, lanes, slow-ops, drill-down por documento. `q` cancela la corrida de forma cooperativa, con confirmación.
 - **HTTP/2 multiplexing** via `httpx[http2]` con ALPN — los N workers comparten conexión TCP.
 - **Idempotencia cross-batch** garantizada por UNIQUE constraint en `(rvabrep_txn_num, batch_id)` + check `is_uploaded()` en S1 (marker `S1_SKIPPED`, spec 062).
@@ -146,7 +146,7 @@ El `.zip` resultante incluye CMCourier, todas las dependencias y un
 ```bash
 pytest -m unit              # solo unit tests (rápidos)
 cmcourier --help            # confirma que el CLI está instalado
-cmcourier --version         # debe imprimir 0.104.0
+cmcourier --version         # debe imprimir 0.105.0
 ```
 
 ### Variables de entorno (cuando corras migraciones reales)
