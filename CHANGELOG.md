@@ -15,6 +15,38 @@ abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
+## [0.107.0] — 2026-09-04 — **Papel de lija: la auditoría queda saldada**
+
+Tres specs con los micro-hallazgos restantes. Con esto, todos los
+items accionables de la auditoría de rendimiento (críticos, altos,
+medios y menores) están cerrados o declinados con motivo documentado.
+
+### Changed
+
+- **Spec 120 — higiene de respuestas del uploader.** `resp.text` se
+  decodifica SOLO en el path de error (helper `_http_error`); el
+  lookup de 409 pide únicamente `cmis:name` + `cmis:objectId` en
+  formato succinct en vez de 5000 hijos con todas sus propiedades.
+- **Spec 121 — se elimina `find_documents_batch` (código muerto).**
+  El lookup batcheado de S1 no tenía callers de producción y su
+  semántica (sin distinción not-found vs all-deleted) no matcheaba el
+  contrato de `S1_FILTERED` — una trampa para quien lo "aprovechara".
+  `indexing.batch_size` del YAML se conserva (sin efecto) para no
+  romper configs existentes.
+- **Spec 122 — micro-hallazgos.** `compute_fields_hash` memoizado (se
+  computaba 2× por doc); los aliases de metadata se precomputan en el
+  constructor (se reconstruían por doc); `decrement_queue_depth()`
+  atómico (antes: dos locks + una dataclass por doc); dos carreras
+  menores cerradas (`_chunks_state` en el path de error de prep,
+  `_peak_qsize` del BUCKET tab); el productor N=2 chequea cancelación
+  entre chunks; el warmup de conexiones usa el techo AIMD (paridad con
+  streaming); `CmisUploader.current_timeout_s` reemplaza el acceso
+  privado del TUI. Declinado con motivo: throttlear las publicaciones
+  por-doc del streaming (riesgo de estados finales rancios por un
+  ahorro de microsegundos).
+
+---
+
 ## [0.106.0] — 2026-09-04 — **Hallazgos medios de la auditoría: backlog cerrado**
 
 Cuatro specs que cierran el backlog de la auditoría de rendimiento: la
