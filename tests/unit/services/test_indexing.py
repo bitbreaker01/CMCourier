@@ -225,77 +225,6 @@ class TestDuplicateHandling:
 
 
 # ---------------------------------------------------------------------------
-# Grupo 4 — Lookup `batched`
-# ---------------------------------------------------------------------------
-
-
-class TestBatchedLookup:
-    def test_batch_size_drives_call_count(self, source: TabularDataSource) -> None:
-        counting = _CallCountingSource(source)
-        service = IndexingService(counting, _friendly_config(), batch_size=2)
-        triggers = [
-            _trigger("JUANPEREZ01"),
-            _trigger("PEPELOPEZ03"),
-            _trigger("MULTISYS01", system_id="5"),
-            _trigger("ALONECLIENT"),
-            _trigger("EDGEDATES"),
-        ]
-        results = list(service.find_documents_batch(triggers))
-        # 5 triggers / `batch_size=2` → ceil(5/2) = 3 llamadas.
-        assert counting.get_by_fields_in_calls == 3
-        assert len(results) == 5
-
-    def test_missing_trigger_yields_empty_list(self, service: IndexingService) -> None:
-        triggers = [
-            _trigger("JUANPEREZ01"),
-            _trigger("NO_SUCH_CLIENT"),
-            _trigger("ALONECLIENT"),
-        ]
-        results = list(service.find_documents_batch(triggers))
-        assert len(results) == 3
-        assert results[0][0].shortname == "JUANPEREZ01"
-        assert len(results[0][1]) == 3
-        assert results[1][0].shortname == "NO_SUCH_CLIENT"
-        assert results[1][1] == []
-        assert results[2][0].shortname == "ALONECLIENT"
-        assert len(results[2][1]) == 1
-
-    def test_same_shortname_different_system_id_isolated(self, service: IndexingService) -> None:
-        # MULTISYS01 tiene 1 fila bajo sistema 1 y 1 fila bajo sistema 5.
-        triggers = [
-            _trigger("MULTISYS01", system_id="1"),
-            _trigger("MULTISYS01", system_id="5"),
-        ]
-        results = list(service.find_documents_batch(triggers))
-        assert len(results) == 2
-        _, docs_sys1 = results[0]
-        _, docs_sys5 = results[1]
-        assert len(docs_sys1) == 1
-        assert docs_sys1[0].txn_num == "TXN0000010"
-        assert len(docs_sys5) == 1
-        assert docs_sys5[0].txn_num == "TXN0000011"
-
-    def test_input_order_preserved(self, service: IndexingService) -> None:
-        triggers = [
-            _trigger("ALONECLIENT"),
-            _trigger("JUANPEREZ01"),
-            _trigger("PEPELOPEZ03"),
-        ]
-        order = [t.shortname for t, _ in service.find_documents_batch(triggers)]
-        assert order == ["ALONECLIENT", "JUANPEREZ01", "PEPELOPEZ03"]
-
-    def test_repeated_trigger_yielded_twice(self, service: IndexingService) -> None:
-        triggers = [
-            _trigger("ALONECLIENT"),
-            _trigger("ALONECLIENT"),
-        ]
-        results = list(service.find_documents_batch(triggers))
-        assert len(results) == 2
-        assert len(results[0][1]) == 1
-        assert len(results[1][1]) == 1
-
-
-# ---------------------------------------------------------------------------
 # Grupo 5 — Coerción de filas
 # ---------------------------------------------------------------------------
 
@@ -430,11 +359,6 @@ class TestErrorWrapping:
         assert isinstance(ei.value.__cause__, RuntimeError)
         assert ei.value.context["shortname"] == "JUANPEREZ01"
         assert ei.value.context["system_id"] == "1"
-
-    def test_batched_adapter_exception_becomes_indexing_error(self) -> None:
-        service = IndexingService(_BrokenSource(), _friendly_config())
-        with pytest.raises(IndexingError):
-            list(service.find_documents_batch([_trigger("JUANPEREZ01")]))
 
 
 # ---------------------------------------------------------------------------

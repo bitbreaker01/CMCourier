@@ -77,9 +77,7 @@ def inspect_rvabrep_command(config_path: Path, shortname: str, system_id: str) -
     rvabrep_src = _build_rvabrep_source(config.indexing, secrets)
     try:
         indexing = IndexingService(
-            rvabrep_src,
-            _indexing_columns_from_schema(config.indexing.columns),
-            batch_size=config.indexing.batch_size,
+            rvabrep_src, _indexing_columns_from_schema(config.indexing.columns)
         )
         trigger = TriggerRecord(shortname=shortname, cif=None, system_id=system_id)
         try:
@@ -285,11 +283,7 @@ def _strategy_from_config(
     except ConfigurationError:
         secrets = Secrets(cmis_username="", cmis_password="")
     rvabrep_src = _build_rvabrep_source(config.indexing, secrets)
-    indexing = IndexingService(
-        rvabrep_src,
-        _indexing_columns_from_schema(config.indexing.columns),
-        batch_size=config.indexing.batch_size,
-    )
+    indexing = IndexingService(rvabrep_src, _indexing_columns_from_schema(config.indexing.columns))
     try:
         strategy = _build_trigger_strategy(config, secrets, rvabrep_src, indexing)
     except ConfigurationError as exc:

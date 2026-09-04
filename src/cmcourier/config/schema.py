@@ -251,6 +251,8 @@ class IndexingConfig(BaseModel):
     model_config = _STRICT
     source: RvabrepSourceUnion
     columns: IndexingColumnsModel = Field(default_factory=IndexingColumnsModel)
+    # 121: sin efecto — alimentaba al lookup batcheado eliminado.
+    # Se conserva para no romper YAMLs existentes (extra="forbid").
     batch_size: int = Field(default=50, ge=1)
 
 

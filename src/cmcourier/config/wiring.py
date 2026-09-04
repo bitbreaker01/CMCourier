@@ -109,7 +109,6 @@ def build_pipeline(
     indexing_service = IndexingService(
         rvabrep_src,
         _indexing_columns_from_schema(config.indexing.columns),
-        batch_size=config.indexing.batch_size,
     )
     trigger_strategy = trigger_strategy_override or _build_trigger_strategy(
         config, secrets, rvabrep_src, indexing_service
@@ -327,7 +326,6 @@ def build_as400_recovery(
     indexing_service = IndexingService(
         rvabrep_src,
         _indexing_columns_from_schema(config.indexing.columns),
-        batch_size=config.indexing.batch_size,
     )
     return As400Recovery(
         sqlite_store=sqlite_store,

@@ -6,16 +6,13 @@ Dado un :class:`TriggerRecord`, encuentra cada
 intencionalmente: el self-healing de CIF es responsabilidad del
 Stage S3 (Metadata).
 
-Dos APIs públicas:
-
-* :meth:`find_documents`: lookup de un único trigger con semántica
-  de errores tipados (lanza :class:`RVABREPNotFoundError` o
-  :class:`RVABREPDeletedError`).
-* :meth:`find_documents_batch`: iterator que yieldea
-  ``(trigger, docs)`` por cada trigger de entrada, chunkeado en
-  `batches` de lista IN de ``batch_size`` (por defecto 50) contra
-  la fuente de datos. Los triggers sin match yieldean lista vacía;
-  el orchestrator decide la semántica por `pipeline`.
+API pública: :meth:`enrich` (dispatch polimórfico de S1) sobre
+:meth:`find_documents` — lookup de un único trigger con semántica de
+errores tipados (:class:`RVABREPNotFoundError` /
+:class:`RVABREPDeletedError`). 121: el lookup batcheado
+``find_documents_batch`` se eliminó — era código muerto cuya semántica
+(sin distinción not-found vs all-deleted) no matcheaba el contrato de
+`S1_FILTERED` del orchestrator.
 
 Principio I de la Constitución: este módulo importa solo la
 biblioteca estándar y :mod:`cmcourier.domain`. Principio VIII:
@@ -29,8 +26,7 @@ from __future__ import annotations
 __all__ = ["IndexingColumnsConfig", "IndexingService"]
 
 import logging
-from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -101,11 +97,9 @@ class IndexingService:
         self,
         source: IDataSource,
         config: IndexingColumnsConfig,
-        batch_size: int = 50,
     ) -> None:
         self._source = source
         self._cfg = config
-        self._batch_size = batch_size
 
     # ----------------------------------------------------------- API pública
 
@@ -187,20 +181,6 @@ class IndexingService:
             )
         return docs
 
-    def find_documents_batch(
-        self, triggers: Iterable[TriggerRecord]
-    ) -> Iterator[tuple[TriggerRecord, list[RVABREPDocument]]]:
-        """Yieldea ``(trigger, docs)`` por cada trigger de entrada.
-        Los faltantes yieldean ``[]``."""
-        buffer: list[TriggerRecord] = []
-        for trigger in triggers:
-            buffer.append(trigger)
-            if len(buffer) >= self._batch_size:
-                yield from self._process_chunk(buffer)
-                buffer = []
-        if buffer:
-            yield from self._process_chunk(buffer)
-
     # ----------------------------------------------------------- internos
 
     def _query_for_trigger(self, trigger: TriggerRecord) -> list[dict[str, Any]]:
@@ -217,29 +197,6 @@ class IndexingService:
                 shortname=trigger.shortname,
                 system_id=trigger.system_id,
             ) from exc
-
-    def _process_chunk(
-        self, chunk: list[TriggerRecord]
-    ) -> Iterator[tuple[TriggerRecord, list[RVABREPDocument]]]:
-        shortnames = [t.shortname for t in chunk]
-        try:
-            rows = self._source.get_by_fields_in(
-                field=self._cfg.shortname_column,
-                values=shortnames,
-                fixed_filters={},
-            )
-        except Exception as exc:
-            raise IndexingError(
-                "indexing batched query failed",
-                shortnames=shortnames,
-            ) from exc
-        by_key: defaultdict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-        for row in rows:
-            key = (str(row[self._cfg.shortname_column]), str(row[self._cfg.system_id_column]))
-            by_key[key].append(row)
-        for trigger in chunk:
-            trigger_rows = by_key.get((trigger.shortname, trigger.system_id), [])
-            yield trigger, self._classify(trigger_rows, trigger)
 
     def _classify(
         self, rows: list[dict[str, Any]], trigger: TriggerRecord
