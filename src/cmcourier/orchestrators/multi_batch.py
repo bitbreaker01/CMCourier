@@ -343,27 +343,36 @@ class MultiBatchOrchestrator:
         ``total`` (033) acota la cantidad de triggers luego del acquire.
         Se aplica de manera uniforme a los paths N=1 y N=2.
         """
-        if resume_batch_id is not None or batches_in_flight == 1 or from_stage > 1:
-            # Resume + single-in-flight + from_stage no default fuerzan
-            # todos el path legacy single-batch: preserva la semántica
-            # byte-idéntica a las invocaciones pre-028 de ``pipeline.run``.
-            return self._run_single(
+        try:
+            if resume_batch_id is not None or batches_in_flight == 1 or from_stage > 1:
+                # Resume + single-in-flight + from_stage no default fuerzan
+                # todos el path legacy single-batch: preserva la semántica
+                # byte-idéntica a las invocaciones pre-028 de ``pipeline.run``.
+                return self._run_single(
+                    source_descriptor=source_descriptor,
+                    batch_size=batch_size,
+                    resume_batch_id=resume_batch_id,
+                    from_stage=from_stage,
+                    total=total,
+                )
+            if batches_in_flight != 2:
+                raise ValueError(
+                    f"batches_in_flight={batches_in_flight} not supported "
+                    "(spec 028 ships only 1 and 2; 3..5 deferred to a future change)"
+                )
+            return self._run_overlapped(
                 source_descriptor=source_descriptor,
                 batch_size=batch_size,
-                resume_batch_id=resume_batch_id,
-                from_stage=from_stage,
                 total=total,
             )
-        if batches_in_flight != 2:
-            raise ValueError(
-                f"batches_in_flight={batches_in_flight} not supported "
-                "(spec 028 ships only 1 and 2; 3..5 deferred to a future change)"
-            )
-        return self._run_overlapped(
-            source_descriptor=source_descriptor,
-            batch_size=batch_size,
-            total=total,
-        )
+        finally:
+            # 119: los pools persistentes del pipeline viven la corrida
+            # entera (todos los chunks los comparten) y se cierran acá.
+            # ``getattr`` defensivo — paridad con el patrón del
+            # reconciler para los fakes de test.
+            shutdown_pools = getattr(self._pipeline, "shutdown_worker_pools", None)
+            if shutdown_pools is not None:
+                shutdown_pools()
 
     # ----- Path N=1 ---------------------------------------------------
 

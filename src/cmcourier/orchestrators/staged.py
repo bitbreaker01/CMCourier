@@ -255,6 +255,17 @@ class StagedPipeline:
                 rebalance_interval_s=heavy_light_lanes.rebalance_interval_s,
                 idle_threshold_s=heavy_light_lanes.idle_threshold_s,
             )
+        # 119: pools de threads de vida larga — lazy, reutilizados por
+        # todos los chunks/stages de la corrida. Pre-119 cada stage de
+        # prep y cada chunk de S5 creaba y destruía su executor
+        # (~80 000 ciclos de spawn/join en una corrida de 20M docs, y la
+        # causa raíz de la fuga de conexiones ODBC que 106 mitigó desde
+        # el adapter). ``shutdown_worker_pools`` los cierra al final.
+        self._pools_lock = threading.Lock()
+        self._prep_pool: ThreadPoolExecutor | None = None
+        self._s5_pool: ThreadPoolExecutor | None = None
+        self._s5_heavy_pool: ThreadPoolExecutor | None = None
+        self._s5_light_pool: ThreadPoolExecutor | None = None
 
     # ------------------------------------------------- Accessors del TUI
 
@@ -428,6 +439,8 @@ class StagedPipeline:
             self._tracking_store.flush()
             self._tracking_store.complete_batch(resolved_batch_id)
         finally:
+            # 119: cierra los pools persistentes de la corrida.
+            self.shutdown_worker_pools()
             if self._sampler is not None:
                 self._sampler.stop()
             # 096: para el daemon y corre la pasada de reconciliación
@@ -761,14 +774,71 @@ class StagedPipeline:
         if self._prep_workers == 1:
             results = [worker(item) for item in items]
         else:
-            with ThreadPoolExecutor(
-                max_workers=self._prep_workers,
-                thread_name_prefix="cmcourier-prep",
-            ) as pool:
-                results = list(pool.map(worker, items))
+            # 119: pool persistente — pre-119 se creaba y destruía un
+            # executor por stage por chunk.
+            results = list(self._get_prep_pool().map(worker, items))
         survivors = [item for item, _ in results if item is not None]
         failed = sum(1 for _, counted in results if counted)
         return survivors, failed
+
+    # ------------------------------------------------- pools persistentes (119)
+
+    def _get_prep_pool(self) -> ThreadPoolExecutor:
+        with self._pools_lock:
+            if self._prep_pool is None:
+                self._prep_pool = ThreadPoolExecutor(
+                    max_workers=self._prep_workers,
+                    thread_name_prefix="cmcourier-prep",
+                )
+            return self._prep_pool
+
+    def _get_s5_pool(self) -> ThreadPoolExecutor:
+        with self._pools_lock:
+            if self._s5_pool is None:
+                self._s5_pool = ThreadPoolExecutor(
+                    max_workers=self._pool_ceiling(),
+                    thread_name_prefix="cmcourier-s5",
+                )
+            return self._s5_pool
+
+    def _get_s5_lane_pools(self) -> tuple[ThreadPoolExecutor, ThreadPoolExecutor]:
+        with self._pools_lock:
+            if self._s5_heavy_pool is None:
+                ceiling = self._pool_ceiling()
+                self._s5_heavy_pool = ThreadPoolExecutor(
+                    max_workers=ceiling,
+                    thread_name_prefix="cmcourier-s5-heavy",
+                )
+                self._s5_light_pool = ThreadPoolExecutor(
+                    max_workers=ceiling,
+                    thread_name_prefix="cmcourier-s5-light",
+                )
+            assert self._s5_light_pool is not None
+            return self._s5_heavy_pool, self._s5_light_pool
+
+    def shutdown_worker_pools(self) -> None:
+        """119: cierra (wait) y limpia los pools persistentes.
+
+        Idempotente; los orchestrators lo llaman en su ``finally``. Un
+        uso posterior recrea los pools — el pipeline sigue siendo
+        reutilizable."""
+        with self._pools_lock:
+            pools = [
+                p
+                for p in (
+                    self._prep_pool,
+                    self._s5_pool,
+                    self._s5_heavy_pool,
+                    self._s5_light_pool,
+                )
+                if p is not None
+            ]
+            self._prep_pool = None
+            self._s5_pool = None
+            self._s5_heavy_pool = None
+            self._s5_light_pool = None
+        for pool in pools:
+            pool.shutdown(wait=True)
 
     def _stage_s2(
         self,
@@ -1036,23 +1106,24 @@ class StagedPipeline:
         self._pool_stats.set_queue_depth(len(items))
         s5_done = 0
         failed = 0
-        with ThreadPoolExecutor(
-            max_workers=ceiling,
-            thread_name_prefix="cmcourier-s5",
-        ) as pool:
-            futures = {pool.submit(self._upload_one, item, batch_id, rec): item for item in items}
-            for fut in as_completed(futures):
-                outcome = fut.result()
-                if outcome == "done":
-                    s5_done += 1
-                    rec.record_upload_done()
-                elif outcome == "failed":
-                    # 104: el conteo de fallas (total + tipo + status) ya lo
-                    # hizo ``_upload_one`` con la excepción en mano.
-                    failed += 1
-                elif outcome == "skipped":
-                    rec.record_upload_skipped()
-                self._pool_stats.set_queue_depth(self._pool_stats.snapshot().queue_depth - 1)
+        # 119: pool persistente — el `as_completed` sobre el dict
+        # completo de futures espera a todos los items del chunk, así
+        # que el `with` (shutdown por chunk) no aportaba nada más que
+        # churn de threads.
+        pool = self._get_s5_pool()
+        futures = {pool.submit(self._upload_one, item, batch_id, rec): item for item in items}
+        for fut in as_completed(futures):
+            outcome = fut.result()
+            if outcome == "done":
+                s5_done += 1
+                rec.record_upload_done()
+            elif outcome == "failed":
+                # 104: el conteo de fallas (total + tipo + status) ya lo
+                # hizo ``_upload_one`` con la excepción en mano.
+                failed += 1
+            elif outcome == "skipped":
+                rec.record_upload_skipped()
+            self._pool_stats.set_queue_depth(self._pool_stats.snapshot().queue_depth - 1)
         return s5_done, failed
 
     def _partition_for_lanes(
@@ -1097,43 +1168,31 @@ class StagedPipeline:
         self._lane_controller.set_queue_depth("heavy", depths["heavy"])
         self._lane_controller.set_queue_depth("light", depths["light"])
         self._lane_controller.start()
-        ceiling = self._pool_ceiling()
         s5_done = 0
         failed = 0
         try:
-            with (
-                ThreadPoolExecutor(
-                    max_workers=ceiling,
-                    thread_name_prefix="cmcourier-s5-heavy",
-                ) as heavy_pool,
-                ThreadPoolExecutor(
-                    max_workers=ceiling,
-                    thread_name_prefix="cmcourier-s5-light",
-                ) as light_pool,
-            ):
-                futures: dict[Future[Literal["done", "failed", "skipped"]], Lane] = {}
-                for item in heavy_items:
-                    futures[heavy_pool.submit(self._upload_one, item, batch_id, rec, "heavy")] = (
-                        "heavy"
-                    )
-                for item in light_items:
-                    futures[light_pool.submit(self._upload_one, item, batch_id, rec, "light")] = (
-                        "light"
-                    )
-                for fut in as_completed(futures):
-                    lane = futures[fut]
-                    outcome = fut.result()
-                    if outcome == "done":
-                        s5_done += 1
-                        rec.record_upload_done()
-                    elif outcome == "failed":
-                        # 104: ``_upload_one`` ya contabilizó la falla por
-                        # tipo + status con la excepción en mano.
-                        failed += 1
-                    elif outcome == "skipped":
-                        rec.record_upload_skipped()
-                    depths[lane] = max(0, depths[lane] - 1)
-                    self._lane_controller.set_queue_depth(lane, depths[lane])
+            # 119: pools persistentes por lane — pre-119 se creaban y
+            # destruían dos executors de `ceiling` threads por chunk.
+            heavy_pool, light_pool = self._get_s5_lane_pools()
+            futures: dict[Future[Literal["done", "failed", "skipped"]], Lane] = {}
+            for item in heavy_items:
+                futures[heavy_pool.submit(self._upload_one, item, batch_id, rec, "heavy")] = "heavy"
+            for item in light_items:
+                futures[light_pool.submit(self._upload_one, item, batch_id, rec, "light")] = "light"
+            for fut in as_completed(futures):
+                lane = futures[fut]
+                outcome = fut.result()
+                if outcome == "done":
+                    s5_done += 1
+                    rec.record_upload_done()
+                elif outcome == "failed":
+                    # 104: ``_upload_one`` ya contabilizó la falla por
+                    # tipo + status con la excepción en mano.
+                    failed += 1
+                elif outcome == "skipped":
+                    rec.record_upload_skipped()
+                depths[lane] = max(0, depths[lane] - 1)
+                self._lane_controller.set_queue_depth(lane, depths[lane])
         finally:
             self._lane_controller.stop()
         return s5_done, failed

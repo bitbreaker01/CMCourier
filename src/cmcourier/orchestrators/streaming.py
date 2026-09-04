@@ -549,6 +549,14 @@ class StreamingOrchestrator:
                 for c in consumers:
                     c.join()
         finally:
+            # 119: inofensivo en streaming (los consumers son threads
+            # propios), pero el S4 vía prep y cualquier path compartido
+            # del pipeline pudo haber creado pools persistentes.
+            # ``getattr`` defensivo — paridad con el patrón del
+            # reconciler para los fakes de test.
+            shutdown_pools = getattr(self._pipeline, "shutdown_worker_pools", None)
+            if shutdown_pools is not None:
+                shutdown_pools()
             if periodic_recon is not None:
                 periodic_recon.stop()
             if self._lane_controller is not None:
