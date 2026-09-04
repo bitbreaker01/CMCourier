@@ -45,6 +45,7 @@ import logging
 import queue
 import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -751,10 +752,53 @@ class StreamingOrchestrator:
         heurística de rebalance dirigida por drenaje.
         """
         threshold = self._lanes_config.heavy_threshold_bytes
+        # 115: overflow acotado por lane. El put directo es no-bloqueante
+        # — pre-115 una cola heavy llena clavaba al dispatcher entero y
+        # los consumers light quedaban ociosos con trabajo en el bucket
+        # (head-of-line blocking entre lanes). El buffering extra está
+        # acotado por ``bucket_size`` items por lane (metadatos, no
+        # bytes de archivo).
+        max_overflow = max(1, self._bucket_size)
+        overflow: dict[Lane, deque[_StageItem]] = {"heavy": deque(), "light": deque()}
+        queues: dict[Lane, queue.Queue[_StageItem | object]] = {
+            "heavy": heavy_queue,
+            "light": light_queue,
+        }
+
+        def report_depth(lane: Lane) -> None:
+            if self._lane_controller is not None:
+                self._lane_controller.set_queue_depth(lane, queues[lane].qsize())
+
+        def flush_overflow() -> None:
+            for lane, buf in overflow.items():
+                moved = False
+                while buf:
+                    try:
+                        queues[lane].put_nowait(buf[0])
+                    except queue.Full:
+                        break
+                    buf.popleft()
+                    moved = True
+                if moved:
+                    report_depth(lane)
+
         while True:
-            item = bucket.get()
+            flush_overflow()
+            try:
+                item = bucket.get(timeout=0.25)
+            except queue.Empty:
+                # Sin items nuevos: seguir drenando el overflow mientras
+                # los consumers hacen lugar en las colas de lane.
+                continue
             try:
                 if item is _POISON:
+                    # 115: entregar TODO el overflow antes de las pills
+                    # (bloqueante está bien acá — los consumers siguen
+                    # vivos drenando). Ningún item se pierde.
+                    for lane, buf in overflow.items():
+                        while buf:
+                            queues[lane].put(buf.popleft())
+                        report_depth(lane)
                     for _ in range(heavy_consumer_count):
                         heavy_queue.put(_POISON)
                     for _ in range(light_consumer_count):
@@ -764,14 +808,20 @@ class StreamingOrchestrator:
                 size_bytes = (
                     stage_item.staged_file.size_bytes if stage_item.staged_file is not None else 0
                 )
-                if size_bytes >= threshold:
-                    heavy_queue.put(stage_item)
-                    if self._lane_controller is not None:
-                        self._lane_controller.set_queue_depth("heavy", heavy_queue.qsize())
-                else:
-                    light_queue.put(stage_item)
-                    if self._lane_controller is not None:
-                        self._lane_controller.set_queue_depth("light", light_queue.qsize())
+                lane_name: Lane = "heavy" if size_bytes >= threshold else "light"
+                overflow[lane_name].append(stage_item)
+                flush_overflow()
+                # Back-pressure acotada: recién cuando el overflow de la
+                # lane rebalsa, el dispatcher espera — pero sigue
+                # drenando el overflow de la OTRA lane en cada vuelta.
+                while len(overflow[lane_name]) > max_overflow:
+                    try:
+                        queues[lane_name].put(overflow[lane_name][0], timeout=0.25)
+                        overflow[lane_name].popleft()
+                        report_depth(lane_name)
+                    except queue.Full:
+                        pass
+                    flush_overflow()
                 # 067: hace tick a pool_stats para que la barra del
                 # tab UPLOAD avance.
                 self._publish_pending_count()

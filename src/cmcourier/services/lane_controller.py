@@ -95,6 +95,13 @@ class LaneController:
         # todavía no fue observado).
         self._heavy_first_empty_at: float | None = None
         self._light_first_empty_at: float | None = None
+        # 115: lane que cedió su capacidad en la última migración por
+        # drenaje. Cuando ``set_queue_depth`` le reporta trabajo nuevo,
+        # el split inicial se restituye inmediatamente — pre-115 la
+        # única vía de vuelta era que la OTRA lane se vaciara
+        # ``idle_threshold_s``, algo que con flujo continuo no pasa
+        # nunca (la lane drenada quedaba en capacidad 1 para siempre).
+        self._migrated_from: Lane | None = None
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -161,18 +168,41 @@ class LaneController:
         ``now - first_empty_at >= idle_threshold_s``.
         """
         self._stats_for(lane).set_queue_depth(depth)
+        restored: dict[str, int] | None = None
         with self._lock:
             if depth > 0:
                 if lane == "heavy":
                     self._heavy_first_empty_at = None
                 else:
                     self._light_first_empty_at = None
+                # 115: la lane drenada recibió trabajo → restituir el
+                # split inicial sobre el budget vigente, sin esperar
+                # ningún tick de rebalance.
+                if self._migrated_from == lane:
+                    restored = self._restore_split_locked()
             else:
                 now = self._clock()
                 if lane == "heavy" and self._heavy_first_empty_at is None:
                     self._heavy_first_empty_at = now
                 elif lane == "light" and self._light_first_empty_at is None:
                     self._light_first_empty_at = now
+        if restored is not None:
+            self._log.info(
+                "lane restitution: %s has work again",
+                lane,
+                extra={"event": "lane_restitution", "lane": lane, **restored},
+            )
+
+    def _restore_split_locked(self) -> dict[str, int]:
+        """115: vuelve al split inicial (ratio configurado sobre el
+        budget vigente del AIMD). Llamar con ``self._lock`` tomado."""
+        heavy_cap, light_cap = self._initial_split(self._total, self._heavy_initial_ratio)
+        self._heavy_sem.set_capacity(heavy_cap)
+        self._light_sem.set_capacity(light_cap)
+        self._heavy_stats.set_pool_size(heavy_cap)
+        self._light_stats.set_pool_size(light_cap)
+        self._migrated_from = None
+        return {"new_heavy": heavy_cap, "new_light": light_cap}
 
     # ----- acoplamiento con `AIMD` -----
 
@@ -251,6 +281,9 @@ class LaneController:
             self._light_sem.set_capacity(new_light)
             self._heavy_stats.set_pool_size(new_heavy)
             self._light_stats.set_pool_size(new_light)
+            # 115: recordar quién cedió — la restitución se dispara
+            # cuando esta lane vuelva a reportar trabajo.
+            self._migrated_from = migrated_from
             event = {
                 "event": "lane_rebalance",
                 "from": migrated_from,
