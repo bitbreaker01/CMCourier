@@ -16,10 +16,12 @@ que pre-060.
 Implementa el contrato completo de upload de S5:
 
 * Warmup de JSESSIONID — lazy, corre una vez por session lifetime.
-* Creación recursiva de carpetas con cache en memoria y semántica
-  idempotente para 409; las carpetas de sistema con prefijo ``$`` se saltean.
-* Upload `multipart` `streaming` vía la API ``files=`` / ``data=`` de httpx;
-  el archivo se lee de disco bajo demanda, nunca se bufferea entero.
+* Verificación read-only de carpetas (``verify_folder_exists``, la usa
+  el doctor) y recuperación idempotente de 409: si el documento ya
+  existe en la carpeta destino, se busca su objectId en vez de fallar.
+* Upload `multipart` `streaming` vía ``MultipartEncoder`` +
+  ``content=`` (076); el archivo se lee de disco bajo demanda, nunca se
+  bufferea entero.
 * :class:`BandwidthLimiter` opcional que envuelve el `stream` del archivo
   para redes corporativas con throttling.
 * Política de `retry`: 401 → re-warmup + un `retry`; 5xx → `back-off`
@@ -44,7 +46,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import IO, Any
@@ -77,6 +79,11 @@ _RESPONSE_BODY_TRUNCATION = 1024
 # thread de S5, y el chart de bandwidth (60 buckets de 1 s) no necesita
 # granularidad más fina; el completion acredita el remanente igual.
 _PROGRESS_THRESHOLD_BYTES = 8 * 1_048_576
+# 116: techo del timeout de CONNECT. Pre-116 ``httpx.Timeout(300)``
+# uniforme hacía que un host caído tardara 5 minutos en fallar el
+# handshake; read/write conservan el timeout configurado (los uploads
+# grandes sobre redes lentas sí lo necesitan).
+_CONNECT_TIMEOUT_S = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +145,13 @@ class TokenBucket:
     desactiva el throttling por completo (no se toma el `lock`).
     """
 
-    def __init__(self, mbps: float) -> None:
+    def __init__(
+        self,
+        mbps: float,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         # 081: ``mbps`` se interpreta como **megabits per second**
         # (convención estándar de networking — el nombre del field
         # ``cmis.max_bandwidth_mbps`` lo dice explícitamente). Convertimos
@@ -148,28 +161,49 @@ class TokenBucket:
         # = 400 Mbps, 8x más permisivo de lo que el operador pedía.
         self._enabled = mbps > 0
         self._rate = mbps * 125_000.0  # Mbps → bytes/seg
+        # 116: cap de burst de 1 segundo de presupuesto. Pre-116 los
+        # tokens se acumulaban sin techo durante las pausas (fase de
+        # PREP larga, hueco entre chunks) y la primera ráfaga salía sin
+        # throttling — el límite se violaba justo cuando más importa.
+        self._capacity = self._rate * 1.0
         self._tokens = 0.0
-        self._last_refill = time.monotonic()
+        self._clock = clock
+        self._sleep = sleep
+        self._last_refill = clock()
         self._lock = threading.Lock()
 
     def consume(self, n_bytes: int) -> None:
-        """Bloquea hasta tener ``n_bytes`` tokens disponibles, luego los descuenta."""
+        """Bloquea hasta haber pagado ``n_bytes`` tokens, drenando en cuotas.
+
+        116: con el cap de burst, un pedido mayor que ``_capacity`` no
+        puede satisfacerse de una — se consume lo disponible y se
+        duerme por el resto, en cuotas de a lo sumo un cap. La tasa
+        total resultante es exactamente ``_rate``.
+        """
         if not self._enabled or n_bytes <= 0:
             return
+        remaining = float(n_bytes)
         # Computamos el sleep fuera del `lock` para que otros `threads` puedan
         # refrescar su matemática de tokens mientras este espera. El `lock`
         # solo protege el estado (tokens, last_refill).
         while True:
             with self._lock:
-                now = time.monotonic()
+                now = self._clock()
                 elapsed = now - self._last_refill
-                self._tokens += elapsed * self._rate
+                self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
                 self._last_refill = now
-                if self._tokens >= n_bytes:
-                    self._tokens -= n_bytes
+                take = min(self._tokens, remaining)
+                self._tokens -= take
+                remaining -= take
+                # Tolerancia sub-byte: el residuo de float (p. ej. 5e-14
+                # bytes) no debe forzar otra vuelta — con sleeps
+                # infinitesimales el refill no progresa y el loop gira.
+                if remaining < 1.0:
                     return
-                deficit = (n_bytes - self._tokens) / self._rate
-            time.sleep(deficit)
+                # Piso de 1 ms: dormir menos que la granularidad del
+                # scheduler es puro spin.
+                deficit = max(min(remaining, self._capacity) / self._rate, 0.001)
+            self._sleep(deficit)
 
 
 class BandwidthLimiter:
@@ -180,9 +214,15 @@ class BandwidthLimiter:
         self._bucket = bucket
 
     def read(self, size: int = -1) -> bytes:
+        # 116: leer primero y cobrar por los bytes REALES — pre-116 se
+        # consumían ``chunk_size`` tokens antes de leer, y las lecturas
+        # cortas / el EOF pagaban de más (throughput real por debajo del
+        # configurado). El pacing sigue ocurriendo antes de devolver el
+        # chunk al encoder, así que el throttle es equivalente.
         chunk_size = size if size >= 0 else 1 << 20
-        self._bucket.consume(chunk_size)
-        return self._stream.read(chunk_size)
+        data = self._stream.read(chunk_size)
+        self._bucket.consume(len(data))
+        return data
 
     def seek(self, *args: Any, **kwargs: Any) -> int:
         return self._stream.seek(*args, **kwargs)
@@ -239,7 +279,12 @@ class CmisUploader(IUploader):
                 max_connections=pool_size,
                 max_keepalive_connections=pool_size,
             ),
-            timeout=httpx.Timeout(config.timeout_seconds),
+            # 116: connect capeado — read/write/pool con el valor
+            # configurado.
+            timeout=httpx.Timeout(
+                config.timeout_seconds,
+                connect=min(_CONNECT_TIMEOUT_S, float(config.timeout_seconds)),
+            ),
         )
         self._warm = False
         # 025: el `worker pool` de S5 invoca upload concurrentemente. El
@@ -256,6 +301,18 @@ class CmisUploader(IUploader):
         # los uploads concurrentes (no un techo por llamada que se
         # multiplica por la cantidad de `workers`).
         self._bandwidth_bucket = TokenBucket(mbps=config.max_bandwidth_mbps)
+
+    def _request_timeout(self) -> httpx.Timeout:
+        """116: timeout por request con connect capeado.
+
+        ``_timeout_s`` es el valor vivo que el AIMD ajusta a mitad de
+        batch — aplica a read/write/pool; el connect queda corto para
+        que un host caído falle en segundos, no en minutos.
+        """
+        return httpx.Timeout(
+            self._timeout_s,
+            connect=min(_CONNECT_TIMEOUT_S, self._timeout_s),
+        )
 
     # ----------------------------------------------------------- API pública
 
@@ -327,7 +384,7 @@ class CmisUploader(IUploader):
         resp = self._client.get(
             url,
             params={"cmisselector": "typeDefinition", "typeId": object_type_id},
-            timeout=self._timeout_s,
+            timeout=self._request_timeout(),
         )
         _network_log.info(
             "cmis_get",
@@ -372,7 +429,7 @@ class CmisUploader(IUploader):
         resp = self._client.get(
             url,
             params={"cmisselector": "object"},
-            timeout=self._timeout_s,
+            timeout=self._request_timeout(),
         )
         _network_log.info(
             "cmis_get",
@@ -570,7 +627,7 @@ class CmisUploader(IUploader):
         resp = self._client.get(
             folder_url,
             params={"cmisselector": "children", "maxItems": "5000"},
-            timeout=self._timeout_s,
+            timeout=self._request_timeout(),
         )
         _network_log.info(
             "cmis_get",
@@ -781,7 +838,7 @@ class CmisUploader(IUploader):
         resp = self._client.get(
             url,
             params={"cmisselector": "repositoryInfo"},
-            timeout=self._timeout_s,
+            timeout=self._request_timeout(),
         )
         _network_log.info(
             "cmis_get",
@@ -895,7 +952,7 @@ class CmisUploader(IUploader):
                         "Content-Type": monitored.content_type,
                         "Content-Length": str(monitored.len),
                     },
-                    timeout=self._timeout_s,
+                    timeout=self._request_timeout(),
                 )
             except httpx.RequestError as exc:
                 # httpx.RequestError cubre ConnectError, ReadError,
