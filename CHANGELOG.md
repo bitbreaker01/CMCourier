@@ -15,6 +15,58 @@ abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
+## [0.105.0] — 2026-09-04 — **Hallazgos altos de la auditoría de rendimiento**
+
+Siete specs que atacan los hallazgos de prioridad alta: el trabajo de
+coordinación quemando slots de upload, el TUI renderizando paneles que
+nadie mira, el logging por-MiB del hot path, los N+1 de pandas y del
+pre-flight AS400, el ruteo subóptimo de S4 y la inanición de lanes.
+
+### Fixed
+
+- **Spec 115 — lanes: restitución de capacidad.** Una lane drenada 15 s
+  migraba su capacidad y quedaba en 1 **para siempre** con flujo
+  continuo (la única vía de vuelta era que la otra lane se vaciara
+  15 s). Ahora el controller restituye el split inicial apenas la lane
+  drenada vuelve a reportar trabajo.
+- **Spec 115 — dispatcher de streaming sin head-of-line blocking.** El
+  `put` bloqueante a una cola de lane llena clavaba al dispatcher
+  entero — consumers light ociosos con trabajo en el bucket. Ruteo
+  no-bloqueante con overflow acotado por lane; el poison espera a los
+  overflows (ningún item se pierde).
+
+### Changed
+
+- **Spec 109 — S5: el slot del semáforo cubre solo el upload.** El
+  pre-flight de idempotencia (`is_stage_done` + `mark_stage_pending` +
+  `try_claim` AS400) corre ANTES del `acquire`. Los skips (ya subido,
+  claim perdido) ya no consumen presupuesto de concurrencia de upload.
+- **Spec 110 — TUI: renderiza solo el tab activo.** Pre-110 los cinco
+  tabs se formateaban en cada tick de 0.25 s — incluido DETAIL, que
+  con chunk seleccionado disparaba una query SQL 4 veces por segundo
+  para descartarse. Cambiar de tab o mover el cursor pinta al
+  instante; el DETAIL activo refresca a 1 Hz.
+- **Spec 111 — dieta de logging del hot path.** El threshold de
+  `cmis_upload_progress` sube de 1 MiB a 8 MiB (8× menos json.dumps +
+  escrituras a disco desde los workers de S5); los tres logs por
+  consulta del document cache bajan a DEBUG. `stage_complete` queda a
+  INFO — alimenta slow-ops y `diagnose`.
+- **Spec 112 — `TabularDataSource` con lookups indexados.**
+  `get_by_fields` pasaba una máscara booleana O(filas) por filtro, una
+  vez POR DOCUMENTO (S1/S3/local-scan). Ahora: índice hash lazy por
+  combinación de columnas (`groupby(...).indices`) → lookup O(1),
+  semántica idéntica al scan. La fase PREP deja de ser O(docs × filas).
+- **Spec 113 — pre-flight AS400 batcheado.** `preflight_sync` hacía un
+  round-trip ODBC por txn del batch (1000 SELECTs secuenciales de puro
+  arranque). Nuevo `read_states_by_txns` con `IN` chunkeado de a 1000:
+  ceil(N/1000) queries. También se elimina la doble computación muerta
+  de `sqlite_done`.
+- **Spec 114 — `s4_smart_routing` default `true`.** Con el process pool
+  activo por default (066), los PDF nativos (`shutil.copy2`) pagaban
+  pickle/IPC/spawn sin necesidad. Opt-out con `false` en el YAML.
+
+---
+
 ## [0.104.0] — 2026-09-04 — **Fixes críticos de la auditoría de rendimiento**
 
 Cuatro specs que eliminan los cinco hallazgos críticos de la auditoría
