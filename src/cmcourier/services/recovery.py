@@ -101,9 +101,7 @@ class As400Recovery:
             unrecoverable=unrecoverable,
         )
 
-    def _recover_one(
-        self, rec: UploadedRecord, *, apply: bool
-    ) -> RecoveryItem | str:
+    def _recover_one(self, rec: UploadedRecord, *, apply: bool) -> RecoveryItem | str:
         """Recupera un doc. Devuelve ``"recovered"``, ``"already_present"``
         o un :class:`RecoveryItem` (no recuperable)."""
         if self._as400.read_state_by_txn(trnnum=rec.txn_num) is not None:
