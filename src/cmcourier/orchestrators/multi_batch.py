@@ -541,11 +541,15 @@ class MultiBatchOrchestrator:
                 "multi-batch: prep failed",
                 extra={"chunk_idx": idx, "reason": type(exc).__name__},
             )
+            # 122: única lectura de ``_chunks_state`` que faltaba
+            # proteger — el thread de upload puede estar escribiéndolo.
+            with self._state_lock:
+                failed_batch_id = self._chunks_state.get(
+                    idx, ChunkState(chunk_idx=idx, batch_id="", status="FAILED")
+                ).batch_id
             self._update_chunk_state(
                 chunk_idx=idx,
-                batch_id=self._chunks_state.get(
-                    idx, ChunkState(chunk_idx=idx, batch_id="", status="FAILED")
-                ).batch_id,
+                batch_id=failed_batch_id,
                 status="FAILED",
             )
             with results_lock:
@@ -674,7 +678,15 @@ class MultiBatchOrchestrator:
             # el estado de cada `chunk` apenas se lo trae. Un iterador
             # vacío simplemente corre cero iteraciones → un
             # MultiBatchRunReport vacío.
+            # 122: paridad con _run_sequential — al cancelar, el
+            # productor deja de traer chunks nuevos (pre-122 seguía
+            # pagando el scaffolding por chunk aunque los per-doc
+            # abortaran). ``getattr`` porque los dobles de test del
+            # pipeline no definen cancel_token (mismo patrón que :446).
+            cancel_token = getattr(self._pipeline, "cancel_token", None)
             for idx, chunk in enumerate(chunks_iter):
+                if cancel_token is not None and cancel_token.is_cancelled():
+                    break
                 prepared = self._prep_one_chunk(
                     idx, chunk, failed=failed, results_lock=results_lock
                 )

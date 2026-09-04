@@ -302,7 +302,7 @@ class TUIDataProvider:
             auto_tune_observed_p95_ms=self._metrics.current_stage_p95(UPLOAD_STAGE),
             auto_tune_adjust_interval_s=bw_cfg.adjustment_interval_s,
             auto_tune_next_in_s=(self._auto_tune.seconds_to_next_tick if self._auto_tune else 0.0),
-            auto_tune_timeout_s=self._uploader._timeout_s,
+            auto_tune_timeout_s=self._uploader.current_timeout_s,
             auto_tune_timeout_min_s=bw_cfg.min_timeout_s,
             auto_tune_timeout_max_s=bw_cfg.max_timeout_s,
             auto_tune_last_action=self._last_action(),

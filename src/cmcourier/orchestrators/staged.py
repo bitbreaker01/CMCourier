@@ -428,9 +428,11 @@ class StagedPipeline:
                 if controller is not None:
                     controller.start()
                 # 038: pre-abre el `connection pool` TCP+`TLS`+`JSESSIONID`
-                # de S5 para que los primeros ``self._workers`` uploads
-                # no paguen cada uno el handshake en su critical path.
-                self._uploader.warm_connection_pool(self._workers)
+                # de S5 para que los primeros uploads no paguen cada uno
+                # el handshake en su critical path. 122: se calienta al
+                # techo AIMD (paridad con streaming) — relevante con
+                # ``http2: false``, donde cada worker abre su socket.
+                self._uploader.warm_connection_pool(self._pool_ceiling())
                 s5_done, s5_failed = self._stage_s5(items, resolved_batch_id)
             finally:
                 if controller is not None:
@@ -1123,7 +1125,7 @@ class StagedPipeline:
                 failed += 1
             elif outcome == "skipped":
                 rec.record_upload_skipped()
-            self._pool_stats.set_queue_depth(self._pool_stats.snapshot().queue_depth - 1)
+            self._pool_stats.decrement_queue_depth()
         return s5_done, failed
 
     def _partition_for_lanes(

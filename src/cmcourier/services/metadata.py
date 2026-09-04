@@ -176,6 +176,9 @@ class MetadataService:
     ) -> None:
         self._config = config
         self._sources_registry = sources_registry
+        # 122: los aliases son inmutables — pre-122 este dict se
+        # reconstruía UNA VEZ POR DOCUMENTO dentro de resolve().
+        self._aliases_lower = {k.lower(): v for k, v in config.field_aliases.items()}
         # Forma de la clave de cache:
         # (alias, key_column, key_value, value_column) -> value.
         self._csv_cache: dict[tuple[str, str, str, str], str] = {}
@@ -354,7 +357,7 @@ class MetadataService:
         `friendly`) después de que la resolución produjo valores
         indexados por nombre canónico.
         """
-        aliases_lower = {k.lower(): v for k, v in self._config.field_aliases.items()}
+        aliases_lower = self._aliases_lower
         canonical: list[str] = []
         canonical_to_friendly: dict[str, str] = {}
         for raw in raw_fields:

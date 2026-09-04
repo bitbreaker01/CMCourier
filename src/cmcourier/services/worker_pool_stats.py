@@ -82,6 +82,13 @@ class WorkerPoolStats:
         with self._lock:
             self._queue_depth = max(0, int(n))
 
+    def decrement_queue_depth(self) -> None:
+        """122: decremento atómico con piso en 0 — pre-122 el caller
+        hacía ``set_queue_depth(snapshot().queue_depth - 1)``: dos
+        locks y una dataclass frozen por documento."""
+        with self._lock:
+            self._queue_depth = max(0, self._queue_depth - 1)
+
     # ------------------------------------------------------- snapshot
 
     def snapshot(self) -> WorkerPoolStatsSnapshot:

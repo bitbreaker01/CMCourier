@@ -678,8 +678,11 @@ class StreamingOrchestrator:
                 bucket.put(survivor)
                 self._prep_window.record()
                 current = bucket.qsize()
-                if current > self._peak_qsize:
-                    self._peak_qsize = current
+                # 122: read-modify-write bajo lock — N producers
+                # concurrentes subestimaban el pico del tab BUCKET.
+                with self._prep_in_flight_lock:
+                    if current > self._peak_qsize:
+                        self._peak_qsize = current
                 # 067: reporta el conteo en vuelo en vivo a
                 # pool_stats para que la barra de progreso del tab
                 # UPLOAD muestre progreso real en lugar de

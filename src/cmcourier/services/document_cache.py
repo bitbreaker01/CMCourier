@@ -27,6 +27,7 @@ import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from types import MappingProxyType
 
 from cmcourier.domain.models import ResolvedMetadata
@@ -40,6 +41,12 @@ from cmcourier.domain.ports import (
 _log = logging.getLogger(__name__)
 
 
+@lru_cache(maxsize=1024)
+def _fields_hash_cached(fields: tuple[str, ...]) -> str:
+    joined = ",".join(sorted(fields))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
 def compute_fields_hash(fields: Iterable[str]) -> str:
     """Devuelve el `SHA-256` hex de la lista de campos ordenada y
     unida por comas.
@@ -48,9 +55,12 @@ def compute_fields_hash(fields: Iterable[str]) -> str:
     declaración en el CSV de mapping. Dos conjuntos distintos de
     campos DEBEN producir hashes distintos: esa es la garantía de
     seguridad de la cache frente a la evolución del mapping.
+
+    122: memoizado — se invocaba dos veces por documento (`try_get` +
+    `put`) sobre tuplas que se repiten toda la corrida (una por
+    `id_rvi`).
     """
-    joined = ",".join(sorted(fields))
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+    return _fields_hash_cached(tuple(fields))
 
 
 @dataclass(slots=True)
