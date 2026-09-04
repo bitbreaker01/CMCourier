@@ -1138,6 +1138,45 @@ class StagedPipeline:
             self._lane_controller.stop()
         return s5_done, failed
 
+    def _s5_preflight(
+        self,
+        item: _StageItem,
+        batch_id: str,
+        txn: str,
+    ) -> MigrationRecord | Literal["done", "skipped"]:
+        """109: pre-flight de idempotencia de S5, SIN slot del semáforo.
+
+        Devuelve el :class:`MigrationRecord` listo para el upload, o el
+        outcome terminal (``"done"`` si el doc ya está en ``S5_DONE``,
+        ``"skipped"`` si otro proceso ganó el claim distribuido).
+        """
+        assert item.mapping is not None
+        if self._tracking_store.is_stage_done(txn, batch_id, StageStatus.S5_DONE):
+            return "done"
+        record = self._build_record(item, batch_id, StageStatus.S5_PENDING)
+        self._tracking_store.mark_stage_pending(record, StageStatus.S5_PENDING)
+        # 034 fase 3: claim distribuido. Cuando el coordinador es
+        # None (path legacy), try_claim siempre es True. Cuando
+        # está activo, el coordinador va a AS400 NIARVILOG; si
+        # otro proceso ya es dueño de la fila (un competidor en
+        # Java u otra instancia de CMCourier), salteamos.
+        if self._coordinator is not None and not self._coordinator.try_claim(
+            record=record,
+            document=item.document,
+            mapping=item.mapping,
+            trigger=item.trigger,
+        ):
+            _log.info(
+                "pipeline: doc claimed by another process",
+                extra={
+                    "batch_id": batch_id,
+                    "txn_num": txn,
+                    "reason": "as400_claim_lost",
+                },
+            )
+            return "skipped"
+        return record
+
     def _upload_one(
         self,
         item: _StageItem,
@@ -1162,6 +1201,15 @@ class StagedPipeline:
         if self._cancel_token.is_cancelled():
             return "skipped"
         txn = item.document.txn_num
+        # 109: el pre-flight de idempotencia (query SQLite + claim AS400)
+        # corre ANTES de tomar el slot — el semáforo se reserva para el
+        # upload real. Un doc ya subido o un claim perdido retornan sin
+        # consumir presupuesto de concurrencia.
+        preflight = self._s5_preflight(item, batch_id, txn)
+        if not isinstance(preflight, MigrationRecord):
+            self._mark_completed(lane)
+            return preflight
+        record = preflight
         worker_name = threading.current_thread().name
 
         # 025 fase 2: respeta el cap del `semaphore` del auto-tune
@@ -1173,32 +1221,6 @@ class StagedPipeline:
             assert self._lane_controller is not None
             self._lane_controller.acquire(lane)
         try:
-            if self._tracking_store.is_stage_done(txn, batch_id, StageStatus.S5_DONE):
-                self._mark_completed(lane)
-                return "done"
-            record = self._build_record(item, batch_id, StageStatus.S5_PENDING)
-            self._tracking_store.mark_stage_pending(record, StageStatus.S5_PENDING)
-            # 034 fase 3: claim distribuido. Cuando el coordinador es
-            # None (path legacy), try_claim siempre es True. Cuando
-            # está activo, el coordinador va a AS400 NIARVILOG; si
-            # otro proceso ya es dueño de la fila (un competidor en
-            # Java u otra instancia de CMCourier), salteamos.
-            if self._coordinator is not None and not self._coordinator.try_claim(
-                record=record,
-                document=item.document,
-                mapping=item.mapping,
-                trigger=item.trigger,
-            ):
-                _log.info(
-                    "pipeline: doc claimed by another process",
-                    extra={
-                        "batch_id": batch_id,
-                        "txn_num": txn,
-                        "reason": "as400_claim_lost",
-                    },
-                )
-                self._mark_completed(lane)
-                return "skipped"
             with StageTimer(
                 recorder or self._metrics,
                 pipeline=self._pipeline_name,
