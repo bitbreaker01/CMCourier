@@ -15,6 +15,53 @@ abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
+## [0.106.0] — 2026-09-04 — **Hallazgos medios de la auditoría: backlog cerrado**
+
+Cuatro specs que cierran el backlog de la auditoría de rendimiento: la
+higiene del uploader, los N+1 restantes del sync AS400, y el fix
+estructural del churn de threads.
+
+### Fixed
+
+- **Spec 116 — el `TokenBucket` acumulaba tokens sin techo.** Tras una
+  pausa (fase de PREP larga), la primera ráfaga de uploads salía sin
+  throttling — el límite de red se violaba justo cuando más importa.
+  Cap de burst de 1 s de presupuesto, con drenaje en cuotas para
+  pedidos mayores que el cap. De paso: `BandwidthLimiter.read` ahora
+  cobra por los bytes REALMENTE leídos (las lecturas cortas y el EOF
+  pagaban de más), y se eliminó un spin de sleeps infinitesimales por
+  residuo de float.
+- **Spec 116 — docstring sincerado del uploader.** El módulo prometía
+  "creación recursiva de carpetas con cache en memoria" que nunca
+  existió.
+
+### Changed
+
+- **Spec 116 — timeouts granulares de httpx.** El connect se capea a
+  10 s (`min(10, timeout)`): un host caído falla en segundos, no en 5
+  minutos. Read/write conservan el timeout configurado (y el ajuste en
+  vivo del AIMD).
+- **Spec 117 — reconciler periódico batcheado.** Una pasada de 3000
+  items hacía ~9000 sentencias ODBC secuenciales (read + claim + mark
+  por item). Ahora: UNA lectura batcheada (`IN` chunkeado, 113) +
+  **un solo write guardado directo al estado terminal** por item
+  (`UPDATE ... WHERE STSCOD='N'` / INSERT terminal; el rowcount /
+  `IntegrityError` conservan la detección de race). ~3004 sentencias.
+  El import de subidas ajenas también se batcheó.
+- **Spec 118 — `sync recover` sin N+1.** El chequeo de existencia en
+  NIARVILOG (un SELECT por doc `S5_DONE` — el único trabajo por doc en
+  el caso común) pasa a la lectura batcheada: ceil(N/1000) queries.
+- **Spec 119 — pools de threads de vida larga.** Cada stage de prep
+  (S2/S3/S4) y cada chunk de S5 creaba y destruía su
+  `ThreadPoolExecutor` — ~80 000 ciclos de spawn/join en una corrida de
+  20M docs, y la causa raíz de la fuga de conexiones ODBC que 106
+  mitigó desde el adapter. El `StagedPipeline` ahora es dueño de pools
+  lazy persistentes (prep, S5, S5-heavy, S5-light) reutilizados por
+  todos los chunks, con `shutdown_worker_pools()` en el `finally` de
+  los tres orchestrators.
+
+---
+
 ## [0.105.0] — 2026-09-04 — **Hallazgos altos de la auditoría de rendimiento**
 
 Siete specs que atacan los hallazgos de prioridad alta: el trabajo de
