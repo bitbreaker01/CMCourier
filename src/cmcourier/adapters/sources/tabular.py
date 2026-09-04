@@ -19,6 +19,7 @@ from __future__ import annotations
 
 __all__ = ["TabularDataSource"]
 
+import threading
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,12 @@ class TabularDataSource(IDataSource):
             )
         self._closed = False
         self._path = path
+        # 112: índices hash lazy por combinación de columnas. El DataFrame
+        # es inmutable post-carga, así que un índice construido una vez
+        # vale para siempre. Clave: tupla ordenada de columnas; valor:
+        # el dict ``valor(es) → posiciones`` de ``groupby(...).indices``.
+        self._indexes: dict[tuple[str, ...], Mapping[Any, Any]] = {}
+        self._index_lock = threading.Lock()
 
     @staticmethod
     def _load_csv(path: Path, encoding: str) -> pd.DataFrame:
@@ -111,13 +118,41 @@ class TabularDataSource(IDataSource):
         yield  # pragma: no cover - inalcanzable; mantiene la función como generator
 
     def get_by_fields(self, filters: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """112: lookup O(1) contra un índice hash lazy por combinación de
+        columnas — pre-112 era una máscara booleana O(filas) por filtro,
+        una vez POR DOCUMENTO desde S1/S3/local-scan. Semántica idéntica
+        al scan: igualdad AND, NaN nunca matchea (``groupby`` descarta
+        claves NaN igual que ``==``), orden de filas original."""
         self._ensure_open()
-        df = self._df
-        for key, value in filters.items():
-            if key not in df.columns:
+        for key in filters:
+            if key not in self._df.columns:
                 raise KeyError(key)
-            df = df[df[key] == value]
-        return [_normalize_row(row) for row in df.to_dict(orient="records")]
+        if not filters:
+            return [_normalize_row(row) for row in self._df.to_dict(orient="records")]
+        cols = tuple(sorted(filters))
+        index = self._index_for(cols)
+        lookup = filters[cols[0]] if len(cols) == 1 else tuple(filters[c] for c in cols)
+        try:
+            positions = index.get(lookup)
+        except TypeError:
+            # Valor no hasheable — un filtro así jamás matchea celdas str.
+            positions = None
+        if positions is None or len(positions) == 0:
+            return []
+        matched = self._df.iloc[positions]
+        return [_normalize_row(row) for row in matched.to_dict(orient="records")]
+
+    def _index_for(self, cols: tuple[str, ...]) -> Mapping[Any, Any]:
+        with self._index_lock:
+            index = self._indexes.get(cols)
+            if index is None:
+                # ``sort=False`` preserva el orden de aparición;
+                # ``.indices`` devuelve posiciones enteras en orden
+                # original — el ``iloc`` posterior respeta el orden de
+                # filas del scan pre-112.
+                index = self._df.groupby(list(cols), sort=False).indices
+                self._indexes[cols] = index
+            return index
 
     def get_by_fields_in(
         self,
@@ -152,4 +187,5 @@ class TabularDataSource(IDataSource):
         if self._closed:
             return
         self._closed = True
+        self._indexes.clear()
         del self._df
