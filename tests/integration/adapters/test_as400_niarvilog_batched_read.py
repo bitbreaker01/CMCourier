@@ -50,6 +50,7 @@ class _ReadFakeCursor:
     def __init__(self, module: _ReadFakeModule) -> None:
         self._module = module
         self._rows: list[list[Any]] = []
+        self.rowcount = module.write_rowcount
 
     @property
     def description(self) -> list[tuple[str, ...]]:
@@ -58,8 +59,11 @@ class _ReadFakeCursor:
     def execute(self, sql: str, params: list[Any] | None = None) -> _ReadFakeCursor:
         params = list(params or [])
         self._module.executed.append((sql, params))
-        if sql.lstrip().upper().startswith("SELECT"):
+        upper = sql.lstrip().upper()
+        if upper.startswith("SELECT"):
             self._rows = [_row_for(str(p)) for p in params if str(p) in self._module.known_txns]
+        elif upper.startswith("INSERT") and self._module.raise_integrity_on_insert:
+            raise self._module.IntegrityError("duplicate")
         return self
 
     def fetchall(self) -> list[list[Any]]:
@@ -96,6 +100,8 @@ class _ReadFakeModule:
     def __init__(self, known_txns: set[str]) -> None:
         self.known_txns = known_txns
         self.executed: list[tuple[str, list[Any]]] = []
+        self.write_rowcount = 1
+        self.raise_integrity_on_insert = False
         self._lock = threading.Lock()
 
     def connect(self, cs: str) -> _ReadFakeConn:  # noqa: ARG002
@@ -139,4 +145,90 @@ class TestReadStatesByTxns:
         store, module = _make_store(monkeypatch, set())
         assert store.read_states_by_txns([]) == {}
         assert module.executed == []
+        store.close()
+
+
+class TestTerminalWrites117:
+    """117: propagación en un solo write guardado, sin paso por 'I'."""
+
+    def _doc_pack(self):  # type: ignore[no-untyped-def]
+        from tests.integration.adapters.test_as400_niarvilog import _make_record
+
+        record, document, mapping, trigger = _make_record(txn="0000042")
+        return record, document, mapping, trigger
+
+    def test_update_terminal_true_when_row_updated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        store, module = _make_store(monkeypatch, set())
+        _record, document, mapping, trigger = self._doc_pack()
+        ok = store.update_terminal_if_new(
+            document=document,
+            mapping=mapping,
+            trigger=trigger,
+            stscod="O",
+            cm_object_id="cm-42",
+        )
+        assert ok is True
+        sql, params = module.executed[-1]
+        assert "STSCOD = 'N'" in sql and "UPDATE" in sql
+        assert "cm-42" in params
+        store.close()
+
+    def test_update_terminal_false_on_race(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # rowcount 0 → otro proceso tocó la fila entre read y write.
+        store, module = _make_store(monkeypatch, set())
+        module.write_rowcount = 0
+        _record, document, mapping, trigger = self._doc_pack()
+        assert (
+            store.update_terminal_if_new(
+                document=document, mapping=mapping, trigger=trigger, stscod="O"
+            )
+            is False
+        )
+        store.close()
+
+    def test_insert_terminal_false_on_integrity_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store, module = _make_store(monkeypatch, set())
+        module.raise_integrity_on_insert = True
+        _record, document, mapping, trigger = self._doc_pack()
+        assert (
+            store.insert_terminal(document=document, mapping=mapping, trigger=trigger, stscod="O")
+            is False
+        )
+        store.close()
+
+    def test_reconcile_pass_uses_one_read_plus_one_write_per_item(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """E1: 3 items ausentes = 1 cleanup + 1 SELECT batcheado + 3
+        INSERTs — pre-117 eran ~3 sentencias POR item."""
+        from unittest.mock import MagicMock
+
+        from cmcourier.services.reconciler import As400Reconciler, PendingSyncItem
+        from tests.integration.adapters.test_as400_niarvilog import _make_record
+
+        store, module = _make_store(monkeypatch, set())
+        items = []
+        for i in range(3):
+            record, document, mapping, trigger = _make_record(txn=f"000010{i}")
+            items.append(
+                PendingSyncItem(
+                    record=record,
+                    document=document,
+                    mapping=mapping,
+                    trigger=trigger,
+                    outcome="uploaded",
+                    cm_object_id=f"cm-{i}",
+                )
+            )
+        rec = As400Reconciler(sqlite_store=MagicMock(), as400_store=store)
+        result = rec.run_pass(items)
+        assert len(result.synced_to_as400) == 3
+        selects = [s for s, _ in module.executed if s.lstrip().upper().startswith("SELECT")]
+        inserts = [s for s, _ in module.executed if s.lstrip().upper().startswith("INSERT")]
+        updates = [s for s, _ in module.executed if s.lstrip().upper().startswith("UPDATE")]
+        assert len(selects) == 1, "la lectura debe ser UNA, batcheada"
+        assert len(inserts) == 3
+        assert len(updates) == 1, "solo el cleanup de stale — sin claims intermedios"
         store.close()

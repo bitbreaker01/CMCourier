@@ -292,6 +292,92 @@ class As400NiarvilogStore:
         params = [error[:1024], *pk]
         self._execute_write(sql, params, "niarvilog_mark_failed")
 
+    def update_terminal_if_new(
+        self,
+        *,
+        document: RVABREPDocument,
+        mapping: CMMapping,
+        trigger: Trigger,
+        stscod: str,
+        cm_object_id: str = "",
+        error: str = "",
+    ) -> bool:
+        """117: propaga el estado terminal en UN solo UPDATE guardado.
+
+        Reemplaza al par ``try_claim`` (`'N'→'I'`) + ``mark_uploaded`` /
+        ``mark_failed`` del reconciler — el doc ya terminó, el paso por
+        `'I'` era puro round-trip. El guard ``STSCOD='N'`` conserva la
+        detección de race: ``rowcount == 0`` ⇒ otro proceso tocó la fila
+        entre nuestro read batcheado y este write → False (conflicto).
+        """
+        pk = _pk_from(document=document, trigger=trigger)
+        c = self._cols
+        sql = (
+            f"UPDATE {self._full_table()} "
+            f"SET {c.status} = ?, {c.idcm} = ?, {c.cm_type} = ?, "
+            f"{c.cm_object_id} = ?, {c.error_message} = ? "
+            f"WHERE {c.system_id} = ? AND {c.txn_num} = ? "
+            f"AND {c.doc_format} = ? AND {c.image_archive} = ? "
+            f"AND {c.status} = 'N'"
+        )
+        params: list[Any] = [
+            stscod,
+            mapping.id_corto,
+            mapping.cmis_type,
+            cm_object_id,
+            error[:1024],
+            *pk,
+        ]
+        rowcount = self._execute_write(sql, params, "niarvilog_update_terminal")
+        return rowcount >= 1
+
+    def insert_terminal(
+        self,
+        *,
+        document: RVABREPDocument,
+        mapping: CMMapping,
+        trigger: Trigger,
+        stscod: str,
+        cm_object_id: str = "",
+        error: str = "",
+    ) -> bool:
+        """117: INSERT directo con estado terminal para filas ausentes.
+
+        ``IntegrityError`` ⇒ otro proceso insertó la fila entre nuestro
+        read batcheado y este write → False (conflicto). Espejo de
+        ``_insert_new_claim`` pero con el estado final parametrizado.
+        """
+        c = self._cols
+        sql = (
+            f"INSERT INTO {self._full_table()} "
+            f"({c.system_id}, {c.txn_num}, {c.doc_format}, {c.image_archive}, "
+            f"{c.image_type}, {c.client_cif}, {c.client_num}, {c.status}, "
+            f"{c.idcm}, {c.cm_type}, {c.cm_object_id}, {c.retry_count}, "
+            f"{c.error_message}) "
+            f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)"
+        )
+        audit = trigger.audit_row()
+        cif_str = audit.get("cif") or ""
+        params: list[Any] = [
+            audit.get("system_id") or "",
+            document.txn_num,
+            document.index7,
+            document.file_name,
+            document.image_type,
+            audit.get("shortname") or "",
+            int(cif_str) if cif_str.isdigit() else 0,
+            stscod,
+            mapping.id_corto,
+            mapping.cmis_type,
+            cm_object_id,
+            error[:1024],
+        ]
+        try:
+            self._execute_write(sql, params, "niarvilog_insert_terminal")
+        except _pyodbc_integrity_error_type():
+            return False
+        return True
+
     def read_state(
         self,
         *,

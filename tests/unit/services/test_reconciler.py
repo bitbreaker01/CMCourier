@@ -147,23 +147,25 @@ class TestReconcilerPushToAs400:
         sqlite = MagicMock()
         as400 = MagicMock()
         as400.cleanup_stale_in_progress.return_value = 0
-        as400.read_state.return_value = None  # fila ausente
-        as400.try_claim.return_value = True
+        as400.read_states_by_txns.return_value = {}  # fila ausente
+        as400.insert_terminal.return_value = True
         rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
         result = rec.run_pass([_item(txn="0000001")])
 
         assert result.synced_to_as400 == ["0000001"]
         assert result.conflicts == []
-        as400.try_claim.assert_called_once()
-        as400.mark_uploaded.assert_called_once()
+        # 117: un solo write directo al estado terminal — sin claim previo.
+        as400.insert_terminal.assert_called_once()
+        assert as400.insert_terminal.call_args.kwargs["stscod"] == "O"
+        as400.update_terminal_if_new.assert_not_called()
 
     def test_failed_item_is_marked_failed(self) -> None:
         sqlite = MagicMock()
         as400 = MagicMock()
         as400.cleanup_stale_in_progress.return_value = 0
-        as400.read_state.return_value = None
-        as400.try_claim.return_value = True
+        as400.read_states_by_txns.return_value = {}
+        as400.insert_terminal.return_value = True
         rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
         result = rec.run_pass(
@@ -171,22 +173,23 @@ class TestReconcilerPushToAs400:
         )
 
         assert result.synced_to_as400 == ["0000001"]
-        as400.mark_failed.assert_called_once()
-        as400.mark_uploaded.assert_not_called()
+        assert as400.insert_terminal.call_args.kwargs["stscod"] == "F"
+        assert as400.insert_terminal.call_args.kwargs["error"] == "boom"
 
     def test_consistent_row_is_skipped(self) -> None:
         # AS400 ya tiene 'O' con NUESTRO object id → nada que sincronizar.
         sqlite = MagicMock()
         as400 = MagicMock()
         as400.cleanup_stale_in_progress.return_value = 0
-        as400.read_state.return_value = _row(stscod="O", objidn="cm-aaa")
+        as400.read_states_by_txns.return_value = {"0000001": _row(stscod="O", objidn="cm-aaa")}
         rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
         result = rec.run_pass([_item(txn="0000001", cm_object_id="cm-aaa")])
 
         assert result.synced_to_as400 == []
         assert result.conflicts == []
-        as400.try_claim.assert_not_called()
+        as400.insert_terminal.assert_not_called()
+        as400.update_terminal_if_new.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +203,7 @@ class TestReconcilerConflicts:
         sqlite = MagicMock()
         as400 = MagicMock()
         as400.cleanup_stale_in_progress.return_value = 0
-        as400.read_state.return_value = _row(stscod="O", objidn="cm-OTHER")
+        as400.read_states_by_txns.return_value = {"0000001": _row(stscod="O", objidn="cm-OTHER")}
         rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
         result = rec.run_pass([_item(txn="0000001", cm_object_id="cm-aaa")])
@@ -211,13 +214,13 @@ class TestReconcilerConflicts:
         assert c.txn_num == "0000001"
         assert c.as400_objidn == "cm-OTHER"
         assert c.local_object_id == "cm-aaa"
-        as400.mark_uploaded.assert_not_called()  # nunca pisamos un conflicto
+        as400.update_terminal_if_new.assert_not_called()  # nunca pisamos un conflicto
 
     def test_in_progress_row_is_a_conflict(self) -> None:
         sqlite = MagicMock()
         as400 = MagicMock()
         as400.cleanup_stale_in_progress.return_value = 0
-        as400.read_state.return_value = _row(stscod="I", objidn="")
+        as400.read_states_by_txns.return_value = {"0000001": _row(stscod="I", objidn="")}
         rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
         result = rec.run_pass([_item(txn="0000001")])
@@ -229,8 +232,8 @@ class TestReconcilerConflicts:
         sqlite = MagicMock()
         as400 = MagicMock()
         as400.cleanup_stale_in_progress.return_value = 0
-        as400.read_state.return_value = None
-        as400.try_claim.return_value = False  # otro proceso ganó la race
+        as400.read_states_by_txns.return_value = {}
+        as400.insert_terminal.return_value = False  # otro proceso ganó la race
         rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
         result = rec.run_pass([_item(txn="0000001")])
@@ -250,7 +253,9 @@ class TestReconcilerImportToLocal:
         sqlite.is_uploaded.return_value = False  # local no lo conoce
         as400 = MagicMock()
         as400.cleanup_stale_in_progress.return_value = 0
-        as400.read_state_by_txn.return_value = _row(txn="0009999", stscod="O", objidn="cm-zzz")
+        as400.read_states_by_txns.return_value = {
+            "0009999": _row(txn="0009999", stscod="O", objidn="cm-zzz")
+        }
         rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
         result = rec.run_pass([], import_scope={"0009999"})
@@ -280,7 +285,7 @@ def test_pass_emits_reconcile_log(caplog: pytest.LogCaptureFixture) -> None:
     sqlite = MagicMock()
     as400 = MagicMock()
     as400.cleanup_stale_in_progress.return_value = 0
-    as400.read_state.return_value = _row(stscod="O", objidn="cm-OTHER")
+    as400.read_states_by_txns.return_value = {"0000001": _row(stscod="O", objidn="cm-OTHER")}
     rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
     with caplog.at_level("INFO", logger="cmcourier.metrics.reconcile"):
@@ -352,9 +357,9 @@ class TestReconcilerResilience:
         sqlite = MagicMock()
         as400 = MagicMock()
         as400.cleanup_stale_in_progress.return_value = 0
-        as400.try_claim.return_value = True
-        # El 2do ítem explota en read_state; el 1ro y el 3ro están OK.
-        as400.read_state.side_effect = [None, RuntimeError("AS400 boom"), None]
+        as400.read_states_by_txns.return_value = {}
+        # El 2do ítem explota en el write; el 1ro y el 3ro están OK.
+        as400.insert_terminal.side_effect = [True, RuntimeError("AS400 boom"), True]
         rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
         items = [_item(txn="0000001"), _item(txn="0000002"), _item(txn="0000003")]
@@ -371,7 +376,7 @@ class TestReconcilerResilience:
         sqlite = MagicMock()
         as400 = MagicMock()
         as400.cleanup_stale_in_progress.side_effect = RuntimeError("AS400 down")
-        as400.read_state.side_effect = RuntimeError("AS400 down")
+        as400.read_states_by_txns.side_effect = RuntimeError("AS400 down")
         rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
         # No debe levantar — todos los ítems van a requeued.
@@ -383,8 +388,8 @@ class TestReconcilerResilience:
         sqlite = MagicMock()
         as400 = MagicMock()
         as400.cleanup_stale_in_progress.side_effect = RuntimeError("stale boom")
-        as400.read_state.return_value = None
-        as400.try_claim.return_value = True
+        as400.read_states_by_txns.return_value = {}
+        as400.insert_terminal.return_value = True
         rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
         result = rec.run_pass([_item(txn="0000001")])
@@ -395,6 +400,7 @@ class TestReconcilerResilience:
         sqlite = MagicMock()
         as400 = MagicMock()
         as400.cleanup_stale_in_progress.return_value = 0
+        as400.read_states_by_txns.return_value = {}
         rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
         stop = threading.Event()
@@ -409,7 +415,7 @@ class TestReconcilerResilience:
         sqlite = MagicMock()
         as400 = MagicMock()
         as400.cleanup_stale_in_progress.return_value = 0
-        as400.read_state.side_effect = RuntimeError("AS400 boom")
+        as400.read_states_by_txns.side_effect = RuntimeError("AS400 boom")
         rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
         buf = PendingSyncBuffer()

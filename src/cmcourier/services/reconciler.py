@@ -39,7 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
-from cmcourier.adapters.tracking.as400_niarvilog import As400NiarvilogStore
+from cmcourier.adapters.tracking.as400_niarvilog import As400NiarvilogStore, NiarvilogRow
 from cmcourier.adapters.tracking.sqlite import SQLiteTrackingStore
 from cmcourier.domain.models import CMMapping, MigrationRecord, RVABREPDocument, Trigger
 
@@ -149,13 +149,30 @@ class As400Reconciler:
         conflicts: list[ReconcileConflict] = []
         requeued: list[PendingSyncItem] = []
         failed = 0
+        # 117: UNA lectura batcheada (IN chunkeado, 113) para todo el
+        # batch — pre-117 era un SELECT por item. Si la lectura falla
+        # (AS400 caído), TODO el batch va a requeued (098: nunca se
+        # pierde un item).
+        states: dict[str, object] = {}
+        if items:
+            try:
+                states = dict(
+                    self._as400.read_states_by_txns([it.document.txn_num for it in items])
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.exception("reconcile: lectura batcheada falló — se re-encola el batch")
+                for item in items:
+                    failed += 1
+                    requeued.append(item)
+                    self._log_failure(item, exc)
+                items = []
         for idx, item in enumerate(items):
             if stop_event is not None and stop_event.is_set():
                 # Corte cooperativo — el resto del batch vuelve al buffer.
                 requeued.extend(items[idx:])
                 break
             try:
-                outcome = self._reconcile_item(item)
+                outcome = self._propagate_item(item, states.get(item.document.txn_num))
             except Exception as exc:  # noqa: BLE001
                 # Una falla per-ítem NO arrastra al resto del batch.
                 failed += 1
@@ -185,49 +202,61 @@ class As400Reconciler:
 
     # ------------------------------------------------------------- internos
 
-    def _reconcile_item(
-        self, item: PendingSyncItem
+    def _propagate_item(
+        self, item: PendingSyncItem, row: object
     ) -> ReconcileConflict | Literal["synced", "consistent"]:
-        """Propaga un doc local a AS400.
+        """117: propaga un doc local a AS400 con UN solo write.
 
-        Devuelve ``"synced"`` si se propagó, ``"consistent"`` si AS400 ya
-        estaba al día, o un :class:`ReconcileConflict` si AS400 tiene un
-        estado terminal divergente que no se debe pisar."""
-        siscod = item.trigger.audit_row().get("system_id") or ""
+        ``row`` viene de la lectura batcheada de ``run_pass`` (por
+        TRNNUM — convención del banco: máx. una fila por txn, 034 fase
+        4). Pre-117 esto era read + try_claim + mark_* — 3 round-trips
+        por item; el paso por `'I'` no aportaba nada (el doc ya
+        terminó). Devuelve ``"synced"``, ``"consistent"``, o un
+        :class:`ReconcileConflict` (estado divergente o race perdida —
+        nunca se pisa)."""
         local_oid = item.cm_object_id or ""
-        row = self._as400.read_state(
-            siscod=siscod,
-            trnnum=item.document.txn_num,
-            docfrm=item.document.index7,
-            imgarc=item.document.file_name,
-        )
+        state = row if isinstance(row, NiarvilogRow) else None
         # Estado terminal ya consistente con lo nuestro → nada que hacer.
         if (
-            row is not None
-            and row.stscod == "O"
+            state is not None
+            and state.stscod == "O"
             and item.outcome == "uploaded"
-            and row.objidn == local_oid
+            and state.objidn == local_oid
         ):
             return "consistent"
         # AS400 con estado terminal/in-progress que NO es el nuestro →
         # conflicto. No lo pisamos: resolución manual.
-        if row is not None and row.stscod in ("O", "I", "F"):
+        if state is not None and state.stscod in ("O", "I", "F"):
             return ReconcileConflict(
                 txn_num=item.document.txn_num,
                 local_outcome=item.outcome,
                 local_object_id=local_oid,
-                as400_stscod=row.stscod,
-                as400_objidn=row.objidn,
+                as400_stscod=state.stscod,
+                as400_objidn=state.objidn,
             )
-        # Fila ausente o en 'N' → reclamamos y propagamos el estado.
-        claimed = self._as400.try_claim(
-            record=item.record,
-            document=item.document,
-            mapping=item.mapping,
-            trigger=item.trigger,
-        )
-        if not claimed:
-            # Perdimos la race contra otro proceso entre el read y el claim.
+        stscod = "O" if item.outcome == "uploaded" else "F"
+        if state is not None:
+            # Fila en 'N' → UPDATE guardado directo al estado terminal.
+            synced = self._as400.update_terminal_if_new(
+                document=item.document,
+                mapping=item.mapping,
+                trigger=item.trigger,
+                stscod=stscod,
+                cm_object_id=local_oid,
+                error=item.error or "",
+            )
+        else:
+            # Fila ausente → INSERT directo con el estado terminal.
+            synced = self._as400.insert_terminal(
+                document=item.document,
+                mapping=item.mapping,
+                trigger=item.trigger,
+                stscod=stscod,
+                cm_object_id=local_oid,
+                error=item.error or "",
+            )
+        if not synced:
+            # Race perdida entre el read batcheado y el write.
             return ReconcileConflict(
                 txn_num=item.document.txn_num,
                 local_outcome=item.outcome,
@@ -235,35 +264,20 @@ class As400Reconciler:
                 as400_stscod="I",
                 as400_objidn="",
             )
-        if item.outcome == "uploaded":
-            self._as400.mark_uploaded(
-                record=item.record,
-                document=item.document,
-                mapping=item.mapping,
-                trigger=item.trigger,
-                cm_object_id=local_oid,
-            )
-        else:
-            self._as400.mark_failed(
-                record=item.record,
-                document=item.document,
-                mapping=item.mapping,
-                trigger=item.trigger,
-                error=item.error or "",
-            )
         return "synced"
 
     def _import_foreign_uploads(self, import_scope: set[str]) -> list[str]:
         """Importa a SQLite las filas ``O`` de AS400 que otro sistema subió.
 
-        Recorre el ``import_scope`` (txns que la corrida local conoce);
-        para cada txn que SQLite no marca como subido pero AS400 sí, copia
-        el estado a SQLite."""
+        117: la lectura del scope es batcheada (un ``IN`` chunkeado en
+        lugar de un SELECT por txn)."""
+        candidates = [txn for txn in sorted(import_scope) if not self._sqlite.is_uploaded(txn)]
+        if not candidates:
+            return []
+        rows = self._as400.read_states_by_txns(candidates)
         imported: list[str] = []
-        for txn in sorted(import_scope):
-            if self._sqlite.is_uploaded(txn):
-                continue
-            row = self._as400.read_state_by_txn(trnnum=txn)
+        for txn in candidates:
+            row = rows.get(txn)
             if row is None or row.stscod != "O":
                 continue
             self._sqlite.record_external_upload(
