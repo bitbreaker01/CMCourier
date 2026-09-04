@@ -38,7 +38,6 @@ from typing import Literal
 
 from cmcourier.adapters.tracking.as400_niarvilog import (
     As400NiarvilogStore,
-    NiarvilogRow,
 )
 from cmcourier.domain.models import (
     CMMapping,
@@ -293,18 +292,13 @@ class IdempotencyCoordinator:
         stale = self._as400.cleanup_stale_in_progress()
         imported: list[str] = []
         conflicts: list[str] = []
-        for txn in sorted(batch_scope):
-            row = self._safe_read(txn)
-            if row is None:
-                continue
-            sqlite_done = (
-                self._sqlite.is_stage_done(txn, "", StageStatus.S5_DONE)
-                if hasattr(self._sqlite, "is_stage_done")
-                else False
-            )
-            # Leer SQLite sin batch_id es ambiguo en la API actual;
-            # para el pre-flight v1 se cae a ``is_uploaded`` (estado
-            # terminal cross-`batch`).
+        # 113: una lectura batcheada (IN chunkeado) en lugar de un
+        # round-trip ODBC por txn del scope. Los txns sin fila NIARVILOG
+        # no aparecen en el dict → consistentes, sin acción.
+        as400_rows = self._as400.read_states_by_txns(sorted(batch_scope))
+        for txn, row in as400_rows.items():
+            # El pre-flight v1 usa ``is_uploaded`` (estado terminal
+            # cross-`batch`) — leer por batch_id acá es ambiguo.
             sqlite_done = self._sqlite.is_uploaded(txn)
             if row.stscod == "O" and not sqlite_done:
                 imported.append(txn)
@@ -325,15 +319,3 @@ class IdempotencyCoordinator:
                 "--prefer-as400|--prefer-local` (or --all)."
             )
         return report
-
-    # ----- helpers ---------------------------------------------------
-
-    def _safe_read(self, txn: str) -> NiarvilogRow | None:
-        """Lookup pre-flight únicamente por TRNNUM (034 fase 4).
-
-        Usa el helper ``read_state_by_txn`` del store. Por convención
-        operativa del banco, cada txn_num tiene como máximo una fila
-        en NIARVILOG (la del IMGARC de la primera página).
-        """
-        assert self._as400 is not None
-        return self._as400.read_state_by_txn(trnnum=txn)

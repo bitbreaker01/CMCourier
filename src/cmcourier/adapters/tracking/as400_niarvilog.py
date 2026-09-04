@@ -78,6 +78,10 @@ class As400UnreachableError(As400CoordinationError):
 
 _MAX_BACKOFF_S = 300.0  # 5 minutos
 
+# 113: tamaño de chunk del ``IN`` de las lecturas batcheadas (paridad
+# con ``As400DataSource._IN_CHUNK_SIZE``).
+_READ_IN_CHUNK_SIZE = 1000
+
 
 @dataclass(frozen=True, slots=True)
 class NiarvilogRow:
@@ -326,6 +330,31 @@ class As400NiarvilogStore:
         if not rows:
             return None
         return self._row_from_dict(rows[0])
+
+    def read_states_by_txns(self, trnnums: list[str]) -> dict[str, NiarvilogRow]:
+        """113: lookup batcheado por TRNNUM — ``IN`` chunkeado de a
+        :data:`_READ_IN_CHUNK_SIZE`.
+
+        Un round-trip por chunk en lugar de uno por txn (el pre-flight
+        de sync hacía 1000 SELECTs secuenciales al arrancar cada batch).
+        Semántica por txn idéntica a :meth:`read_state_by_txn`: la
+        primera fila que matchea gana (convención del banco: máx. una
+        fila por txn); los txns sin fila no aparecen en el dict.
+        """
+        c = self._cols
+        result: dict[str, NiarvilogRow] = {}
+        for start in range(0, len(trnnums), _READ_IN_CHUNK_SIZE):
+            chunk = trnnums[start : start + _READ_IN_CHUNK_SIZE]
+            placeholders = ", ".join("?" * len(chunk))
+            sql = (
+                f"SELECT {c.select_list()} FROM {self._full_table()} "
+                f"WHERE {c.txn_num} IN ({placeholders})"
+            )
+            rows = self._execute_read(sql, list(chunk), "niarvilog_read_states_by_txns")
+            for raw in rows:
+                row = self._row_from_dict(raw)
+                result.setdefault(row.trnnum, row)
+        return result
 
     def mark_uploaded_by_txn(self, *, trnnum: str, cm_object_id: str) -> int:
         """Helper de fase 4 para ``sync resolve --prefer-local``.
