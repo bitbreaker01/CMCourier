@@ -72,9 +72,11 @@ _WINDOWS_ABORT_MARKER = "10053"
 _MAX_BACKOFF_S = 60.0
 _RESPONSE_BODY_TRUNCATION = 1024
 # 077: threshold mínimo de bytes acumulados antes de emitir un
-# ``cmis_upload_progress``. 1 MB filtra el ruido de uploads chicos sin
-# perder resolución útil en uploads grandes.
-_PROGRESS_THRESHOLD_BYTES = 1_048_576
+# ``cmis_upload_progress``. 111: subido de 1 MiB a 8 MiB — cada evento
+# paga json.dumps + escritura a disco + dos handlers desde el worker
+# thread de S5, y el chart de bandwidth (60 buckets de 1 s) no necesita
+# granularidad más fina; el completion acredita el remanente igual.
+_PROGRESS_THRESHOLD_BYTES = 8 * 1_048_576
 
 
 # ---------------------------------------------------------------------------

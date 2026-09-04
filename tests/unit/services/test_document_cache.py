@@ -243,7 +243,7 @@ class TestOperatorOps:
 class TestLogEvents:
     def test_miss_event_fields(self, caplog: pytest.LogCaptureFixture) -> None:
         svc, _, _ = _service()
-        with caplog.at_level("INFO", logger="cmcourier.services.document_cache"):
+        with caplog.at_level("DEBUG", logger="cmcourier.services.document_cache"):
             svc.try_get(txn_num="TXN1", fields=["X"])
         rec = next(r for r in caplog.records if getattr(r, "event", None) == "document_cache_miss")
         assert rec.txn_num == "TXN1"
@@ -259,7 +259,7 @@ class TestLogEvents:
             trigger_cif=None,
         )
         clock[0] += timedelta(seconds=5)
-        with caplog.at_level("INFO", logger="cmcourier.services.document_cache"):
+        with caplog.at_level("DEBUG", logger="cmcourier.services.document_cache"):
             svc.try_get(txn_num="TXN1", fields=["X"])
         rec = next(r for r in caplog.records if getattr(r, "event", None) == "document_cache_hit")
         assert rec.txn_num == "TXN1"

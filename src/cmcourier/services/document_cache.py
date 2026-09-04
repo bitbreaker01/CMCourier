@@ -105,7 +105,7 @@ class DocumentCacheService:
         if entry is None:
             with self._lock:
                 self._counters.misses_absent += 1
-            _log.info(
+            _log.debug(
                 "document_cache miss",
                 extra={
                     "event": "document_cache_miss",
@@ -119,7 +119,7 @@ class DocumentCacheService:
         if age > self._ttl:
             with self._lock:
                 self._counters.misses_expired += 1
-            _log.info(
+            _log.debug(
                 "document_cache miss",
                 extra={
                     "event": "document_cache_miss",
@@ -132,7 +132,7 @@ class DocumentCacheService:
             return None
         with self._lock:
             self._counters.hits += 1
-        _log.info(
+        _log.debug(
             "document_cache hit",
             extra={
                 "event": "document_cache_hit",
