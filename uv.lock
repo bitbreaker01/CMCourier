@@ -150,7 +150,7 @@ wheels = [
 
 [[package]]
 name = "cmcourier"
-version = "0.100.0"
+version = "0.104.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

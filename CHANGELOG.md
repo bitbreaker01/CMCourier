@@ -15,6 +15,64 @@ abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
+## [0.104.0] — 2026-09-04 — **Fixes críticos de la auditoría de rendimiento**
+
+Cuatro specs que eliminan los cinco hallazgos críticos de la auditoría
+de rendimiento end-to-end: un cuelgue de 300 s por documento en el
+retry de 401, dos bombas de concurrencia ODBC, el lock global de
+lecturas de SQLite y las métricas sin techo que dejaban ciego al AIMD.
+
+### Fixed
+
+- **Spec 105 — el retry de 401 no rebobinaba el stream.** Un 401 en el
+  primer intento (sesión CMIS vencida) reintentaba con el file handle
+  en EOF: `Content-Length` completo, file part vacío, y el server
+  esperando el resto del body hasta el read timeout — **300 s de
+  cuelgue por documento**, justo cuando expiran las sesiones de todos
+  los workers a la vez. El rebobinado ahora cubre también el path de
+  re-autenticación (que sigue sin consumir presupuesto de retries).
+- **Spec 106 — `As400DataSource` compartía UNA conexión pyodbc entre
+  threads sin lock.** pyodbc declara `threadsafety = 1` (conexiones no
+  compartibles); con `prep_workers > 1` los cursores concurrentes de
+  S1/S3 caían sobre la misma conexión. Ahora cada thread tiene la suya.
+- **Spec 106 — fuga de conexiones ODBC en `As400NiarvilogStore`.** Los
+  `ThreadPoolExecutor` de S5 se reciclan por chunk y las conexiones de
+  los threads muertos quedaban abiertas hasta el final de la corrida —
+  cientos de jobs QZDASOINIT acumulados en el iSeries. El pool nuevo
+  las poda cuando un thread nuevo conecta.
+- **Spec 108 — race en el dict de buckets de métricas.** Un stage nuevo
+  registrándose durante un `stages_snapshot()` del TUI tiraba
+  `RuntimeError: dictionary changed size during iteration`.
+
+### Changed
+
+- **Spec 106 — `ThreadLocalConnectionPool`**
+  (`adapters/connection_pool.py`): helper compartido para el patrón
+  conexión-por-thread con registro global, `reset_current()` para
+  retries y poda de threads muertos. Lo adoptan `As400DataSource`,
+  `As400NiarvilogStore` y el tracking store de SQLite.
+- **Spec 107 — lecturas concurrentes del tracking store.** El
+  `_reader_lock` global que serializaba **6 lecturas por documento**
+  (más el polling del TUI a 4 Hz) se reemplaza por conexiones de
+  lectura por thread — WAL permite lectores concurrentes con
+  conexiones separadas. Índice nuevo `idx_migration_log_batch`: las
+  queries que filtran solo por `batch_id` (tab DETAIL,
+  `get_batch_details`, `retry_failed`, resume scope) pasan de full
+  table scan a index lookup; las DBs existentes lo adquieren
+  automáticamente al reabrirse. El SQL de `is_stage_done` se precomputa
+  por stage.
+- **Spec 108 — métricas de stage acotadas.** `_StageBucket` pasa de una
+  lista sin techo (O(total_docs) por bucket en modo streaming — leak de
+  memoria, y ordenada completa ~13 veces por segundo por el TUI
+  sosteniendo el lock del hot path) a una **ventana deslizante** de
+  2048 muestras con summary cacheado. Los percentiles reflejan el
+  comportamiento reciente — el AIMD vuelve a reaccionar a degradaciones
+  de CMIS en segundos en vez de quedar clavado en el p95 histórico.
+  `count` y `sum_ms` siguen siendo acumulativos (`batch_summary`,
+  `analyze` y `diagnose` no cambian de semántica).
+
+---
+
 ## [0.103.0] — 2026-05-22 — **Banco de pruebas de stress: contenido sintético, deadline y desglose de errores**
 
 Tres specs hermanos para correr el plan de stress contra el destino
