@@ -85,6 +85,11 @@ class CMCourierTUI(App[None]):
         # refresca cada tick para que las acciones del cursor clampeen bien.
         self._selected_chunk_idx: int | None = None
         self._last_chunk_count = 0
+        # 110: contador de ticks para la cadencia reducida del DETAIL, y
+        # flag que fuerza su re-render inmediato (cursor movido / tab
+        # recién activado).
+        self._tick = 0
+        self._detail_dirty = True
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -111,8 +116,15 @@ class CMCourierTUI(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self._refresh_panels()
+        # 110: el mount pinta TODOS los tabs una vez (estado inicial);
+        # de ahí en más, cada tick renderiza solo el activo.
+        self._render_all_panels()
         self.set_interval(_REFRESH_INTERVAL_S, self._refresh_panels)
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """110: cambiar de tab (tecla o click) pinta el panel al instante."""
+        self._detail_dirty = True
+        self._refresh_panels()
 
     def quit_needs_confirmation(self) -> bool:
         """097: True si ``"q"`` debe abrir el modal de confirmación.
@@ -172,6 +184,7 @@ class CMCourierTUI(App[None]):
             self._selected_chunk_idx = 0
         else:
             self._selected_chunk_idx = max(0, self._selected_chunk_idx - 1)
+        self._render_detail(self._provider.snapshot())
 
     def action_select_next_chunk(self) -> None:
         """052: mueve el cursor de `chunk` un paso hacia el último `chunk`."""
@@ -181,6 +194,7 @@ class CMCourierTUI(App[None]):
             self._selected_chunk_idx = 0
         else:
             self._selected_chunk_idx = min(self._last_chunk_count - 1, self._selected_chunk_idx + 1)
+        self._render_detail(self._provider.snapshot())
 
     def _resolve_detail(
         self, snap: TUISnapshot
@@ -203,19 +217,42 @@ class CMCourierTUI(App[None]):
         return chunk, self._provider.docs_for_batch(str(chunk.get("batch_id", "")))
 
     def _refresh_panels(self) -> None:
+        """110: el tick periódico renderiza SOLO el tab activo (más el
+        status bar y el subtítulo, que son globales). El DETAIL, aun
+        activo, refresca a cadencia reducida (1 de cada 4 ticks) salvo
+        que el cursor lo haya ensuciado — es un drill-down, no un gauge."""
+        snap = self._provider.snapshot()
+        self._tick += 1
+        self._last_chunk_count = len(snap.chunks_state)
+        active = self.query_one(TabbedContent).active
+        if active == "prep":
+            self.query_one("#prep_body", Static).update(render_prep(snap))
+        elif active == "upload":
+            self.query_one("#upload_body", Static).update(render_upload(snap))
+        elif active == "chunks":
+            self.query_one("#chunks_body", Static).update(render_chunks(snap))
+        elif active == "bucket":
+            self.query_one("#bucket_body", Static).update(render_bucket(snap))
+        elif active == "detail" and (self._detail_dirty or self._tick % 4 == 1):
+            self._render_detail(snap)
+        self._render_status(snap)
+
+    def _render_all_panels(self) -> None:
+        """110: pintura inicial de todos los tabs en el mount."""
         snap = self._provider.snapshot()
         self._last_chunk_count = len(snap.chunks_state)
-        prep_body = self.query_one("#prep_body", Static)
-        upload_body = self.query_one("#upload_body", Static)
-        chunks_body = self.query_one("#chunks_body", Static)
-        bucket_body = self.query_one("#bucket_body", Static)
-        detail_body = self.query_one("#detail_body", Static)
-        prep_body.update(render_prep(snap))
-        upload_body.update(render_upload(snap))
-        chunks_body.update(render_chunks(snap))
-        bucket_body.update(render_bucket(snap))
-        detail_body.update(render_detail(*self._resolve_detail(snap)))
+        self.query_one("#prep_body", Static).update(render_prep(snap))
+        self.query_one("#upload_body", Static).update(render_upload(snap))
+        self.query_one("#chunks_body", Static).update(render_chunks(snap))
+        self.query_one("#bucket_body", Static).update(render_bucket(snap))
+        self._render_detail(snap)
+        self._render_status(snap)
 
+    def _render_detail(self, snap: TUISnapshot) -> None:
+        self.query_one("#detail_body", Static).update(render_detail(*self._resolve_detail(snap)))
+        self._detail_dirty = False
+
+    def _render_status(self, snap: TUISnapshot) -> None:
         status = self.query_one("#status_bar", Static)
         total = int(snap.elapsed_s)
         hours = total // 3600
