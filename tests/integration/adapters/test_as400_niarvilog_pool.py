@@ -204,3 +204,41 @@ def test_retry_resets_only_the_calling_threads_connection(
     assert module.conns[0].closed is True  # reseteada por el retry
     assert module.conns[1].closed is False  # la del retry, viva
     store.close()
+
+
+def test_dead_worker_connections_are_pruned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """106: los ThreadPoolExecutor de S5 se reciclan por chunk. Las
+    conexiones de los threads muertos del chunk anterior deben cerrarse
+    cuando los threads del chunk nuevo abren las suyas — sin esto se
+    acumulan cientos de jobs QZDASOINIT en el iSeries."""
+    store, module = _make_pool_store(monkeypatch)
+
+    def wave(n: int, offset: int) -> None:
+        # Doble barrera: ningún thread de la ola muere hasta que todos
+        # reclamaron — así la poda solo puede ocurrir ENTRE olas.
+        start = threading.Barrier(n)
+        done = threading.Barrier(n)
+
+        def claim(i: int) -> None:
+            record, document, mapping, trigger = _make_record(txn=f"00000{offset + i}")
+            start.wait()
+            store.try_claim(record=record, document=document, mapping=mapping, trigger=trigger)
+            done.wait()
+
+        threads = [threading.Thread(target=claim, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    wave(4, 0)
+    first_wave = list(module.conns)
+    assert all(not c.closed for c in first_wave)
+
+    wave(4, 4)
+
+    assert all(c.closed for c in first_wave), (
+        "las conexiones de threads muertos quedaron abiertas (fuga 106)"
+    )
+    assert all(not c.closed for c in module.conns[4:])
+    store.close()

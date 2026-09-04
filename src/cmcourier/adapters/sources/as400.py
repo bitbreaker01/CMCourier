@@ -4,10 +4,10 @@ Import lazy de ``pyodbc`` dentro de :meth:`_connect` para que importar este
 módulo en entornos sin headers de unixODBC no rompa (el error se manifiesta
 en la primera llamada real).
 
-El driver ODBC de AS400 NO es thread-safe; un cambio futuro va a sumar
-conexiones con ``threading.local()`` cuando aterrice el `worker pool` del
-orquestador. 014 entrega UNA sola conexión por instancia de
-:class:`As400DataSource`.
+El driver ODBC de AS400 NO es thread-safe a nivel conexión
+(``threadsafety = 1``). 106: cada thread cachea su propia conexión vía
+:class:`ThreadLocalConnectionPool`; las conexiones de threads muertos se podan
+cuando un thread nuevo abre la suya.
 
 Todas las excepciones :class:`pyodbc.Error` se envuelven en
 :class:`cmcourier.domain.exceptions.IndexingError`. Los códigos SQLSTATE se
@@ -29,6 +29,7 @@ import time
 from collections.abc import Iterator, Mapping
 from typing import Any
 
+from cmcourier.adapters.connection_pool import ThreadLocalConnectionPool
 from cmcourier.domain.exceptions import ConfigurationError, IndexingError
 from cmcourier.domain.ports import IDataSource
 
@@ -81,7 +82,9 @@ class As400DataSource(IDataSource):
         self._username = username
         self._password = password
         self._source_expr = f"({query}) AS T" if query else table
-        self._conn: Any = None
+        # 106: conexión por thread — pyodbc no permite compartir una
+        # conexión entre threads (S1/S3 la golpean desde prep_workers).
+        self._pool = ThreadLocalConnectionPool(self._open_connection)
         self._closed = False
 
     # ------------------------------------------------------------------ puertos
@@ -190,28 +193,23 @@ class As400DataSource(IDataSource):
         if self._closed:
             return
         self._closed = True
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except _pyodbc_error_type():
-                _log.exception("AS400 close failed")
-            self._conn = None
+        self._pool.close_all()
 
     # ------------------------------------------------------------------ internos
 
     def _connect(self) -> Any:
-        if self._conn is not None:
-            return self._conn
+        return self._pool.acquire()
+
+    def _open_connection(self) -> Any:
         _import_pyodbc()
         try:
-            self._conn = pyodbc.connect(self._build_connection_string())
+            return pyodbc.connect(self._build_connection_string())
         except _pyodbc_error_type() as exc:
             raise IndexingError(
                 "AS400 connection failed",
                 host=self._host,
                 sqlstate=_extract_sqlstate(exc),
             ) from exc
-        return self._conn
 
     def _build_connection_string(self) -> str:
         return (

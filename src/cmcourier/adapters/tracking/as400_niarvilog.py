@@ -38,15 +38,14 @@ __all__ = [
     "NiarvilogRow",
 ]
 
-import contextlib
 import logging
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, TypeVar
 
+from cmcourier.adapters.connection_pool import ThreadLocalConnectionPool
 from cmcourier.config.schema import As400ConnectionConfig
 from cmcourier.domain.models import (
     CMMapping,
@@ -197,16 +196,12 @@ class As400NiarvilogStore:
         self._stale_minutes = stale_in_progress_minutes
         self._retry_attempts = max(1, int(retry_attempts))
         self._retry_base_delay_s = max(0.001, float(retry_base_delay_s))
-        # 095: connection pool por-worker. Pre-095 era una única conexión
-        # ``self._conn`` compartida por todos los worker threads de S5 —
-        # una conexión ODBC serializa statements, así que la porción AS400
-        # de los N workers se encolaba. Ahora cada thread cachea su propia
-        # conexión en ``_local``; ``_all_conns`` registra todas las
-        # abiertas para que ``close()`` pueda cerrarlas (``threading.local``
-        # no expone las conexiones de otros threads).
-        self._local = threading.local()
-        self._all_conns: list[Any] = []
-        self._conns_lock = threading.Lock()
+        # 095: connection pool por-worker — cada thread cachea su propia
+        # conexión (una conexión ODBC serializa statements). 106: el pool
+        # compartido además poda las conexiones de threads muertos — los
+        # ThreadPoolExecutor de S5 se reciclan por chunk y sus conexiones
+        # quedaban huérfanas hasta el close() final.
+        self._pool = ThreadLocalConnectionPool(self._open_connection)
         self._closed = False
 
     # ----------------------------------------------------------- API pública
@@ -417,15 +412,7 @@ class As400NiarvilogStore:
         if self._closed:
             return
         self._closed = True
-        with self._conns_lock:
-            conns = list(self._all_conns)
-            self._all_conns.clear()
-        for conn in conns:
-            try:
-                conn.close()
-            except Exception:  # noqa: BLE001
-                _log.exception("AS400 close failed")
-        self._local = threading.local()
+        self._pool.close_all()
 
     # ----------------------------------------------------------- internos
 
@@ -599,32 +586,19 @@ class As400NiarvilogStore:
     def _reset_connection(self) -> None:
         """095: resetea SOLO la conexión del thread que está reintentando.
         Las conexiones de los demás workers quedan intactas."""
-        conn = getattr(self._local, "conn", None)
-        if conn is None:
-            return
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001
-            _log.debug("AS400 connection close failed during retry reset", exc_info=True)
-        self._local.conn = None
-        with self._conns_lock, contextlib.suppress(ValueError):
-            self._all_conns.remove(conn)
+        self._pool.reset_current()
 
     def _connect(self) -> Any:
         """095: devuelve la conexión thread-local del worker actual,
         abriéndola lazy la primera vez que este thread la necesita."""
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
-            return conn
+        return self._pool.acquire()
+
+    def _open_connection(self) -> Any:
         _import_pyodbc()
         try:
-            conn = pyodbc.connect(self._build_connection_string())
+            return pyodbc.connect(self._build_connection_string())
         except _pyodbc_error_type() as exc:
             raise As400CoordinationError(f"NIARVILOG connect failed: {exc}") from exc
-        self._local.conn = conn
-        with self._conns_lock:
-            self._all_conns.append(conn)
-        return conn
 
     def _build_connection_string(self) -> str:
         # 087: ``CommitMode=0`` (= ``*NONE``) desactiva commitment control.
