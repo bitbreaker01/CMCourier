@@ -820,6 +820,10 @@ class CmisUploader(IUploader):
         # intento previo (httpx lo lee entero en el POST). Hacemos seek a 0
         # antes de cada `retry` — pero solo al file handle subyacente, ya
         # que BandwidthLimiter le reenvía el seek().
+        # 105: el rebobinado debe cubrir también el reintento por 401, que
+        # no incrementa `real_attempts` — sin él, el file part del segundo
+        # POST sale vacío con Content-Length completo y el server espera
+        # el resto del body hasta el read timeout.
         stream = file_field[1]
         # 077: contador de bytes reportados como progress events parciales.
         # Vive afuera del loop así está accesible en el branch de
@@ -831,7 +835,7 @@ class CmisUploader(IUploader):
             if need_warmup:
                 self._warmup_session()
             try:
-                if real_attempts > 0:
+                if real_attempts > 0 or auth_retried:
                     stream.seek(0)
                 # 076: `MultipartEncoder` arma el body como un iterator
                 # lazy — los chunks van del disco directo al socket TCP
