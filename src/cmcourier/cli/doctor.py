@@ -28,6 +28,8 @@ __all__ = [
     "CheckResult",
     "CheckStatus",
     "DoctorReport",
+    "check_as400",
+    "check_cmis",
     "run_doctor",
 ]
 
@@ -151,6 +153,17 @@ def _selected(name: str, selected: str) -> bool:
     if selected == "all":
         return True
     return name in _CHECK_GROUPS.get(selected, frozenset())
+
+
+def check_cmis(config: PipelineConfig, secrets: Secrets) -> CheckResult:
+    """123: chequeo puntual de conectividad CMIS para el botón
+    "probar conexión" de la consola. Delgado sobre el check existente."""
+    return _check_cmis_connectivity(config, secrets)
+
+
+def check_as400(config: PipelineConfig, secrets: Secrets) -> CheckResult:
+    """123: chequeo puntual de conectividad AS400 (ídem `check_cmis`)."""
+    return _check_as400_connectivity(config, secrets)
 
 
 def run_doctor(

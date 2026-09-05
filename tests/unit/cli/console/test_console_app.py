@@ -1,0 +1,226 @@
+"""Tests pilot de la ConsoleApp (123) — shell, navegación, credenciales, doctor."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+from textual.widgets import Input, Static, TabbedContent
+
+import cmcourier.cli.console.app as app_module
+from cmcourier.cli.console.app import ConfirmScreen, ConsoleApp
+from cmcourier.cli.console.doctor_pane import DoctorPane
+from cmcourier.cli.doctor import CheckResult, CheckStatus, DoctorReport
+from cmcourier.config.loader import load_config
+
+pytestmark = pytest.mark.unit
+
+_TESTS_ROOT = Path(__file__).parent.parent.parent.parent
+_PIPE = _TESTS_ROOT / "fixtures" / "pipeline"
+_SVC = _TESTS_ROOT / "fixtures" / "services"
+_ASM = _TESTS_ROOT / "fixtures" / "assembly"
+
+
+def _make_config(tmp_path: Path, *, environment: str = "staging"):
+    triggers = tmp_path / "triggers.csv"
+    triggers.write_text("ShortName,CIF,SystemID\nTESTCLIENT01,123456,1\n")
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text(f"""\
+environment: {environment}
+trigger:
+  csv_path: {triggers}
+indexing:
+  source:
+    kind: csv
+    csv_path: {_PIPE / "rvabrep.csv"}
+  columns:
+    shortname_column: shortname
+    system_id_column: system_id
+    delete_code_column: delete_code
+    txn_num_column: txn_num
+    index2_column: index2
+    index3_column: index3
+    index4_column: index4
+    index5_column: index5
+    index6_column: index6
+    index7_column: index7
+    image_type_column: image_type
+    image_path_column: image_path
+    file_name_column: file_name
+    creation_date_column: creation_date
+    last_view_date_column: last_view_date
+    total_pages_column: total_pages
+mapping:
+  csv_path: {_SVC / "modelo_documental.csv"}
+metadata:
+  field_aliases: {{}}
+  field_sources: {{}}
+assembly:
+  source_root: {_ASM}
+  temp_dir: {tmp_path / "stg"}
+cmis:
+  base_url: http://cm.test/cmis
+  repo_id: repo
+tracking:
+  db_path: {tmp_path / "tracking.db"}
+observability:
+  log_dir: {tmp_path / "logs"}
+""")
+    return load_config(yaml_path), yaml_path
+
+
+def _fake_report() -> DoctorReport:
+    return DoctorReport(
+        results=(
+            CheckResult(name="a", status=CheckStatus.PASS, message="bien"),
+            CheckResult(name="b", status=CheckStatus.WARN, message="ojo", details={"k": "v"}),
+        ),
+        elapsed_seconds=0.2,
+    )
+
+
+class TestShell:
+    def test_number_keys_switch_tabs(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                assert app.query_one(TabbedContent).active == "inicio"
+                await pilot.press("2")
+                assert app.query_one(TabbedContent).active == "credenciales"
+                await pilot.press("4")
+                assert app.query_one(TabbedContent).active == "doctor"
+
+        asyncio.run(_run())
+
+    def test_fkeys_work_even_with_input_focus(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await pilot.press("2")
+                app.query_one("#user-cmis", Input).focus()
+                await pilot.press("4")  # el Input se la traga
+                assert app.query_one(TabbedContent).active == "credenciales"
+                await pilot.press("f4")  # priority=True la rescata
+                assert app.query_one(TabbedContent).active == "doctor"
+
+        asyncio.run(_run())
+
+    def test_prd_environment_shows_red_badge(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path, environment="prd")
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test():
+                badge = app.query_one("#env-badge", Static)
+                assert "PRODUCCIÓN" in str(badge.renderable)
+                assert badge.has_class("prd")
+
+        asyncio.run(_run())
+
+    def test_quit_asks_confirmation(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await pilot.press("q")
+                assert isinstance(app.screen, ConfirmScreen)
+                await pilot.press("escape")  # opción segura
+                assert not isinstance(app.screen, ConfirmScreen)
+
+        asyncio.run(_run())
+
+
+class TestCredsFlow:
+    def test_edit_password_invalidates_tested_connection(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                app.state.record_conn_result("cmis", ok=True, message="ok")
+                await pilot.press("2")
+                inp = app.query_one("#pass-cmis", Input)
+                inp.focus()
+                await pilot.press("x")
+                assert app.state.conn["cmis"].status == "idle"
+
+        asyncio.run(_run())
+
+    def test_test_button_runs_check_and_marks_ok(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _run() -> None:
+            monkeypatch.setattr(
+                app_module,
+                "run_single_check",
+                lambda which, console: (
+                    CheckResult(name=which, status=CheckStatus.PASS, message="conectado"),
+                    42.0,
+                ),
+            )
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await pilot.press("2")
+                app.query_one("#user-cmis", Input).value = "admin"
+                app.query_one("#pass-cmis", Input).value = "admin"
+                app.query_one("#test-cmis").focus()
+                await pilot.press("enter")
+                await pilot.pause()
+                await asyncio.sleep(0.05)
+                await pilot.pause()
+                assert app.state.conn["cmis"].status == "ok"
+
+        asyncio.run(_run())
+
+
+class TestDoctorFlow:
+    def test_d_runs_doctor_and_summarizes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _run() -> None:
+            monkeypatch.setattr(
+                app_module, "run_doctor", lambda cfg, secrets, selected: _fake_report()
+            )
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await pilot.press("4")
+                await pilot.press("d")
+                await pilot.pause()
+                await asyncio.sleep(0.05)
+                await pilot.pause()
+                assert app.state.doctor_verdict() == "aprobado"
+                summary = str(app.query_one("#doc-summary", Static).renderable)
+                assert "1 ok" in summary and "1 warn" in summary
+
+        asyncio.run(_run())
+
+    def test_credential_change_stales_doctor_banner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _run() -> None:
+            monkeypatch.setattr(
+                app_module, "run_doctor", lambda cfg, secrets, selected: _fake_report()
+            )
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await pilot.press("4")
+                await pilot.press("d")
+                await asyncio.sleep(0.05)
+                await pilot.pause()
+                app.state.creds.cmis_password = "old"
+                await pilot.press("2")
+                inp = app.query_one("#pass-cmis", Input)
+                inp.focus()
+                await pilot.press("y")
+                assert app.state.doctor_stale
+                await pilot.press("f4")
+                app.query_one(DoctorPane).render_results()
+                await pilot.pause()
+                stale = app.query_one("#doc-stale", Static)
+                assert stale.display
+
+        asyncio.run(_run())

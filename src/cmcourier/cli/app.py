@@ -509,6 +509,42 @@ def doctor_command(config_path: Path, selected_check: str, log_level: str) -> No
 
 
 # ---------------------------------------------------------------------------
+# console (123)
+# ---------------------------------------------------------------------------
+
+
+@main.command(name="console")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Path to the pipeline YAML config file.",
+)
+@click.option(
+    "--log-level", type=click.Choice(_LOG_LEVELS, case_sensitive=False), default="WARNING"
+)
+def console_command(config_path: Path, log_level: str) -> None:
+    """Abre la consola de operación interactiva (credenciales, doctor,
+    launcher, monitor y batches en una sola TUI)."""
+    configure_logging(log_level)
+    try:
+        config = load_config(config_path)
+    except ConfigurationError as exc:
+        click.echo(f"ConfigurationError: {exc}", err=True)
+        sys.exit(2)
+    configure_observability(config.observability, log_level, tui_active=True)
+    from cmcourier.cli._tui_runner import tty_available  # noqa: PLC0415
+
+    if not tty_available():
+        click.echo("ConfigurationError: console requiere una TTY", err=True)
+        sys.exit(2)
+    from cmcourier.cli.console.app import ConsoleApp  # noqa: PLC0415 — import pesado, lazy
+
+    ConsoleApp(config=config, config_path=config_path).run()
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 # (helpers internos del entry point)

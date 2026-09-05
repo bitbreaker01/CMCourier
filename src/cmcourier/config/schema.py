@@ -858,4 +858,8 @@ class PipelineConfig(BaseModel):
     tracking: TrackingConfig
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
+    # 123: etiqueta de entorno para la consola de operación. "prd" activa
+    # el interlock de lanzamiento (confirmación tipeada) y el badge rojo
+    # permanente. Los comandos headless existentes la ignoran.
+    environment: Literal["staging", "prd"] = "staging"
     batch_size: int = Field(default=1000, ge=1)
