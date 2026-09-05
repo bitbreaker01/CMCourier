@@ -116,19 +116,22 @@ if [[ "${TYPEDEF_CODE}" != "200" ]]; then
   echo "      The dictionary cache may need a restart of the alfresco container"
   echo "      to flush. Run:  docker compose -f alfresco-compose.yml restart alfresco"
 else
-  python3 -c '
+  # heredoc en vez de -c '...': el f-string necesita comillas adentro y
+  # cualquier variante rompía el quoting de bash (SyntaxError que, con
+  # set -e, abortaba el script aunque el registro hubiera salido bien).
+  python3 - /tmp/cmm-typedef.$$.json <<'PYEOF'
 import json, sys
 d = json.load(open(sys.argv[1]))
 props = d.get("propertyDefinitions", {})
 cmc = sorted(k for k in props if k.startswith("cmcourier:"))
-print(f"  type id      : {d.get(\"id\")}")
-print(f"  parent       : {d.get(\"parentId\")}")
-print(f"  queryable    : {d.get(\"queryable\")}")
+print(f"  type id      : {d.get('id')}")
+print(f"  parent       : {d.get('parentId')}")
+print(f"  queryable    : {d.get('queryable')}")
 print(f"  cmcourier:*  : {len(cmc)} properties:")
 for k in cmc:
     p = props[k]
-    print(f"    - {k:35} type={p.get(\"propertyType\"):8} required={p.get(\"required\")}")
-' /tmp/cmm-typedef.$$.json
+    print(f"    - {k:35} type={p.get('propertyType'):8} required={p.get('required')}")
+PYEOF
 fi
 rm -f /tmp/cmm-typedef.$$.json
 
