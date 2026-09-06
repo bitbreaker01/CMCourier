@@ -465,6 +465,25 @@ class SQLiteTrackingStore(ITrackingStore):
             ),
         )
 
+    def batch_audit(self, batch_id: str) -> dict[str, str]:
+        """124/125: lee las columnas de auditoría de un batch (para la
+        consola). Devuelve solo las columnas con valor no-nulo."""
+        cols = ", ".join(_AUDIT_COLUMNS)
+        try:
+            row = (
+                self._read_pool.acquire()
+                .execute(
+                    f"SELECT {cols} FROM migration_batch WHERE batch_id = ?",
+                    (batch_id,),
+                )
+                .fetchone()
+            )
+        except sqlite3.Error as exc:
+            raise TrackingError("batch_audit failed", batch_id=batch_id) from exc
+        if row is None:
+            return {}
+        return {name: value for name, value in zip(_AUDIT_COLUMNS, row, strict=True) if value}
+
     def set_batch_outcome(self, batch_id: str, outcome: str) -> None:
         """124: cómo terminó la corrida — completed | cancelled | failed."""
         self._enqueue(

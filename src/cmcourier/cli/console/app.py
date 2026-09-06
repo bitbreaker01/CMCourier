@@ -27,9 +27,11 @@ from textual.widgets import Button, Footer, Input, Select, Static, TabbedContent
 
 from cmcourier.adapters.tracking.sqlite import SQLiteTrackingStore
 from cmcourier.cli.commands._lock import LockHeldError
+from cmcourier.cli.console.batches_pane import BatchesPane
 from cmcourier.cli.console.config_pane import ConfigPane
 from cmcourier.cli.console.creds_pane import CredsPane, run_single_check
 from cmcourier.cli.console.doctor_pane import DoctorPane
+from cmcourier.cli.console.monitor_pane import MonitorPane
 from cmcourier.cli.console.run_pane import RunPane
 from cmcourier.cli.console.runner import ConsoleRunManager, LaunchSpec
 from cmcourier.cli.console.state import ConsoleState
@@ -208,9 +210,9 @@ class ConsoleApp(App[None]):
             with TabPane("5·CORRER", id="correr"):
                 yield RunPane(self)
             with TabPane("6·MONITOR", id="monitor"):
-                yield Static("MONITOR llega en la Fase 3.", classes="placeholder")
+                yield MonitorPane(self)
             with TabPane("7·BATCHES", id="batches"):
-                yield Static("BATCHES llega en la Fase 3.", classes="placeholder")
+                yield BatchesPane(self)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -254,6 +256,10 @@ class ConsoleApp(App[None]):
             self.q("RunPane", RunPane).refresh_summary()
         elif active == "inicio":
             self._render_inicio()
+        elif active == "batches":
+            self.q("BatchesPane", BatchesPane).reload()
+        elif active == "monitor" and self.run_active:
+            self.q("MonitorPane", MonitorPane).refresh_monitor()
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
@@ -306,11 +312,17 @@ class ConsoleApp(App[None]):
         )
 
     def on_key(self, event: events.Key) -> None:
-        """Rutea ↑↓/Enter al panel DOCTOR cuando el foco no está en un widget de entrada."""
-        if self.q("#tabs", TabbedContent).active != "doctor":
-            return
+        """Rutea teclas locales a DOCTOR / BATCHES cuando el foco no está
+        en un widget de entrada."""
+        active = self.q("#tabs", TabbedContent).active
         if isinstance(self.focused, (Input, Select, Button)):
             return
+        if active == "doctor":
+            self._doctor_keys(event)
+        elif active == "batches":
+            self._batches_keys(event)
+
+    def _doctor_keys(self, event: events.Key) -> None:
         pane = self.q("DoctorPane", DoctorPane)
         if event.key == "down":
             pane.move_selection(1)
@@ -321,6 +333,24 @@ class ConsoleApp(App[None]):
         else:
             return
         event.stop()
+
+    def _batches_keys(self, event: events.Key) -> None:
+        pane = self.q("BatchesPane", BatchesPane)
+        if event.key == "enter":
+            pane.show_detail()
+        elif event.key in ("R", "r"):
+            pane.retry_selected()
+        elif event.key in ("E", "e"):
+            pane.export_selected()
+        else:
+            return
+        event.stop()
+
+    def route_resume(self, batch_id: str) -> None:
+        """125: tras un retry, saltar al launcher en modo reanudar."""
+        run_pane = self.q("RunPane", RunPane)
+        self.action_switch_tab("correr")
+        run_pane.preselect_resume(batch_id)
 
     # ------------------------------------------------------------ helpers
 
@@ -477,29 +507,30 @@ class ConsoleApp(App[None]):
         except ConfigurationError as exc:
             self.notify(f"ConfigurationError: {exc}", severity="error")
             return
-        self._render_monitor_min("▶ corrida lanzada — construyendo…")
         self.action_switch_tab("monitor")
         self.refresh_status()
 
     def on_run_finished(self, manager: ConsoleRunManager) -> None:
         outcome = manager.outcome()
+        report = manager.report
+        done = sum(r.s5_done for r in report.chunks) if report else 0
+        failed = sum(r.s5_failed for r in report.chunks) if report else 0
         if manager.exception is not None:
             self.notify(f"La corrida terminó con excepción: {manager.exception}", severity="error")
         else:
-            report = manager.report
-            done = sum(r.s5_done for r in report.chunks) if report else 0
-            failed = sum(r.s5_failed for r in report.chunks) if report else 0
             sev: Literal["warning", "information"] = (
                 "warning" if (outcome == "cancelled" or failed) else "information"
             )
             self.notify(f"Corrida {outcome}: {done} subidos · {failed} fallidos", severity=sev)
-        self._render_monitor_min(f"■ corrida {outcome} — detalle completo del monitor en F3")
+        with contextlib.suppress(NoMatches):
+            monitor = self.q("MonitorPane", MonitorPane)
+            monitor.refresh_monitor()
+            summary = f"■ corrida {outcome} · {done} subidos · {failed} fallidos"
+            if failed:
+                summary += " · reintentá desde [7] BATCHES"
+            monitor.show_summary(summary)
         self.q("RunPane", RunPane).refresh_summary()
         self.refresh_status()
-
-    def _render_monitor_min(self, text: str) -> None:
-        pane = self.q("#monitor Static", Static)
-        pane.update(text)
 
     def on_pii_override(self, unmask: bool | None) -> None:
         effective = self.config.observability.unmask_pii if unmask is None else unmask

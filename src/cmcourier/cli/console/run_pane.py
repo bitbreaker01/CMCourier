@@ -197,3 +197,21 @@ class RunPane(Vertical):
 
     def on_select_changed(self, _: Select.Changed) -> None:
         self.refresh_summary()
+
+    def preselect_resume(self, batch_id: str) -> None:
+        """125: activar modo reanudar con este batch preseleccionado
+        (tras un retry desde [7]). Solo tiene efecto si el modo efectivo
+        es batched."""
+        if self.effective_mode() != "batched":
+            self.console.notify(
+                "El batch quedó con docs en PENDING, pero el YAML corre en "
+                "streaming — para retomarlo, corré con mode: batched",
+                severity="warning",
+            )
+            return
+        self.query_one("#run-mode", Select).value = "resume"
+        self.refresh_summary()  # recarga las opciones reanudables
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            self.query_one("#run-batch", Select).value = batch_id
