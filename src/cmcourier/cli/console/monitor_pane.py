@@ -40,7 +40,7 @@ class MonitorPane(Vertical):
     def compose(self) -> ComposeResult:
         yield Static("No hay corrida activa. Lanzá desde [5] CORRER.", id="mon-header")
         yield Static("", id="mon-summary")
-        yield VerticalScroll(Static("", id="mon-body"))
+        yield VerticalScroll(Static("", id="mon-body", markup=False))
 
     def on_mount(self) -> None:
         self.query_one("#mon-summary", Static).display = False

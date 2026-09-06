@@ -48,7 +48,7 @@ class BatchesPane(Vertical):
         yield Input(placeholder="filtrar por id, operador o entorno…", id="bt-filter")
         table: DataTable[str] = DataTable(id="bt-table", cursor_type="row", zebra_stripes=True)
         yield table
-        yield Static("", id="bt-detail")
+        yield Static("", id="bt-detail", markup=False)
 
     def on_mount(self) -> None:
         table = self.query_one("#bt-table", DataTable)
@@ -114,7 +114,7 @@ class BatchesPane(Vertical):
         audit = store.batch_audit(info.batch_id) if hasattr(store, "batch_audit") else {}
         panel = self.query_one("#bt-detail", Static)
         panel.display = True
-        lines = [f"[b]{info.batch_id}[/b]"]
+        lines = [info.batch_id]
         if audit:
             lines.append(
                 "auditoría: "

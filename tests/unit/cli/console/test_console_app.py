@@ -224,3 +224,27 @@ class TestDoctorFlow:
                 assert stale.display
 
         asyncio.run(_run())
+
+
+class TestMarkupSafety:
+    """Regresión: los mensajes de error de CMIS/AS400 traen JSON con
+    corchetes que Textual leería como markup y rompería el render
+    (cazado por el smoke-test real contra Alfresco)."""
+
+    def test_error_body_with_brackets_does_not_crash_render(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "2")
+                nasty = '{"status": {"code": 500}, "message": "rawPassword [mandatory]"}'
+                app.state.record_conn_result("cmis", ok=False, message=nasty)
+                from cmcourier.cli.console.creds_pane import CredsPane
+
+                app.query_one(CredsPane)._render_conn("cmis")  # noqa: SLF001
+                await pilot.pause()  # el render no debe explotar
+                from textual.widgets import Static
+
+                assert nasty in str(app.query_one("#msg-cmis", Static).renderable)
+
+        asyncio.run(_run())

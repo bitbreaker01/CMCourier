@@ -89,7 +89,9 @@ class CredsPane(Vertical):
                 classes="frow",
             )
         )
-        card.compose_add_child(Static("", classes="msg", id=f"msg-{which}"))
+        # markup=False: los mensajes traen cuerpos de error de CMIS/AS400
+        # con corchetes y JSON que Textual leería como markup y rompería.
+        card.compose_add_child(Static("", classes="msg", id=f"msg-{which}", markup=False))
         return card
 
     # ------------------------------------------------------------ eventos

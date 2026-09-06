@@ -146,11 +146,12 @@ class DoctorPane(Vertical):
             row = Static(
                 f" {icon}  {r.name:<28} {r.status.value:<5} {r.message}",
                 classes=f"check-row {cls}" + (" selected" if i == self.selected else ""),
+                markup=False,
             )
             box.mount(row)
             if r.name in self.open and r.details:
                 detail = "\n".join(f"{k}={v}" for k, v in sorted(r.details.items()))
-                box.mount(Static(detail, classes="check-detail"))
+                box.mount(Static(detail, classes="check-detail", markup=False))
         self._render_summary(report)
 
     def _render_summary(self, report: DoctorReport) -> None:
