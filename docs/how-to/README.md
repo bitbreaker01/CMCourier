@@ -60,6 +60,7 @@ Guías más densas, cada una atada a una feature concreta del sistema.
 | [`cmis-target-preflight.md`](cmis-target-preflight.md) | Pre-flight CMIS folders + properties (038) |
 | [`staging-dry-run.md`](staging-dry-run.md) | Dry-run con datos reales |
 | [`local-staging-simulation.md`](local-staging-simulation.md) | Alfresco + Docker para simular CMIS |
+| [`probar-la-consola.md`](probar-la-consola.md) | Probar la consola interactiva `cmcourier console` en local (123-125) |
 | [`validation-checklist.md`](validation-checklist.md) | Checklist E2E cross-platform |
 
 ---

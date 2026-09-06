@@ -15,6 +15,49 @@ abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
+## [0.108.0] — 2026-09-06 — **Consola de operación interactiva (`cmcourier console`)**
+
+La TUI dejó de ser solo un monitor: ahora `cmcourier console --config X`
+abre una consola de 7 pantallas donde el operador carga credenciales,
+corre el doctor, ajusta parámetros, lanza y monitorea — todo con
+teclado. Diseño congelado con dos pasadas de review UX adversarial e
+implementado en 3 fases (specs 123-125).
+
+### Added
+
+- **Spec 123 — shell + credenciales + doctor.** Comando `console`;
+  navegación de 7 tabs con bindings F1-F7 inmunes al foco; badge de
+  entorno (campo nuevo `environment: staging|prd` en el YAML);
+  credenciales de sesión SOLO en memoria (nunca al YAML) con TTL de
+  45 min e interlock de 3 intentos contra el lockout del perfil AS400;
+  doctor interactivo por grupos (los reales de `--check`) con estado
+  *stale* cuando cambian credenciales u overrides.
+- **Spec 124 — launcher + overrides + lock + auditoría.** Overrides de
+  sesión con modelo draft/applied (un borrador sin guardar nunca llega
+  a una corrida); launcher por `trigger.kind` con cadena de guardas
+  (credenciales frescas → doctor → confirmación tipeada "PRD" →
+  corridas `in_progress` en el tracking); lock de config sostenido
+  durante la corrida; auditoría persistida por batch (operador,
+  estación, hash de config, overrides, veredicto del doctor, outcome)
+  vía migración idempotente de `migration_batch`.
+- **Spec 125 — monitor + batches.** Monitor en vivo reusando los
+  renderers de `tui/` (refresca solo el tab visible), con desglose de
+  fallos por tipo y cuello de botella; cancelación con `x` (drain) que
+  se queda en la consola para mostrar el resumen; BATCHES operable con
+  `DataTable` navegable por teclado (detalle, retry con ruteo a
+  reanudar, export) y columnas de auditoría.
+
+### Fixed
+
+- Consola: `Static` con `markup=False` para los mensajes de error de
+  CMIS/AS400 (traen JSON con corchetes que Textual leería como markup);
+  cambiar de tab suelta el foco de los `Input` (si no, la vista no
+  mudaba); el timer del reloj tolera el teardown.
+- `scripts/staging/register-model.sh`: la verificación final abortaba
+  por un `SyntaxError` de quoting (heredoc en su lugar).
+
+---
+
 ## [0.107.0] — 2026-09-04 — **Papel de lija: la auditoría queda saldada**
 
 Tres specs con los micro-hallazgos restantes. Con esto, todos los

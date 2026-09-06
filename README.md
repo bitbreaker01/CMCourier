@@ -2,7 +2,7 @@
 
 > Migración de documentos bancarios de **IBM RVI / AS400** a **IBM Content Manager** vía **CMIS REST**. Idempotente, observable, parallelizable.
 
-**Versión actual**: `0.107.0` — pipeline de punta a punta: modos `batched` y `streaming`, AIMD + heavy/light lanes, sincronización distribuida con AS400 (`claim` / `periodic`) + herramienta de recuperación, TUI live de 5 tabs, instalador offline para servidores air-gapped, y banco de pruebas de stress (contenido sintético on-the-fly, `--max-duration` y desglose de errores por tipo).
+**Versión actual**: `0.108.0` — pipeline de punta a punta: modos `batched` y `streaming`, AIMD + heavy/light lanes, sincronización distribuida con AS400 (`claim` / `periodic`) + herramienta de recuperación, TUI live de 5 tabs, instalador offline para servidores air-gapped, y banco de pruebas de stress (contenido sintético on-the-fly, `--max-duration` y desglose de errores por tipo).
 
 ---
 
@@ -146,7 +146,7 @@ El `.zip` resultante incluye CMCourier, todas las dependencias y un
 ```bash
 pytest -m unit              # solo unit tests (rápidos)
 cmcourier --help            # confirma que el CLI está instalado
-cmcourier --version         # debe imprimir 0.107.0
+cmcourier --version         # debe imprimir 0.108.0
 ```
 
 ### Variables de entorno (cuando corras migraciones reales)
