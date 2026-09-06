@@ -13,6 +13,7 @@ from cmcourier.cli.console.app import ConfirmScreen, ConsoleApp
 from cmcourier.cli.console.doctor_pane import DoctorPane
 from cmcourier.cli.doctor import CheckResult, CheckStatus, DoctorReport
 from cmcourier.config.loader import load_config
+from tests.unit.cli.console.conftest import goto, wait_for
 
 pytestmark = pytest.mark.unit
 
@@ -87,9 +88,9 @@ class TestShell:
             app = ConsoleApp(config=config, config_path=path)
             async with app.run_test() as pilot:
                 assert app.query_one(TabbedContent).active == "inicio"
-                await pilot.press("2")
+                await goto(pilot, app, "2")
                 assert app.query_one(TabbedContent).active == "credenciales"
-                await pilot.press("4")
+                await goto(pilot, app, "4")
                 assert app.query_one(TabbedContent).active == "doctor"
 
         asyncio.run(_run())
@@ -99,12 +100,12 @@ class TestShell:
             config, path = _make_config(tmp_path)
             app = ConsoleApp(config=config, config_path=path)
             async with app.run_test() as pilot:
-                await pilot.press("2")
+                await goto(pilot, app, "2")
                 app.query_one("#user-cmis", Input).focus()
-                await pilot.press("4")  # el Input se la traga
+                await pilot.press("4")  # el Input se la traga — a propósito, SIN goto
+                await pilot.pause()
                 assert app.query_one(TabbedContent).active == "credenciales"
-                await pilot.press("f4")  # priority=True la rescata
-                assert app.query_one(TabbedContent).active == "doctor"
+                await goto(pilot, app, "f4")  # priority=True la rescata
 
         asyncio.run(_run())
 
@@ -139,7 +140,7 @@ class TestCredsFlow:
             app = ConsoleApp(config=config, config_path=path)
             async with app.run_test() as pilot:
                 app.state.record_conn_result("cmis", ok=True, message="ok")
-                await pilot.press("2")
+                await goto(pilot, app, "2")
                 inp = app.query_one("#pass-cmis", Input)
                 inp.focus()
                 await pilot.press("x")
@@ -162,15 +163,14 @@ class TestCredsFlow:
             config, path = _make_config(tmp_path)
             app = ConsoleApp(config=config, config_path=path)
             async with app.run_test() as pilot:
-                await pilot.press("2")
+                await goto(pilot, app, "2")
                 app.query_one("#user-cmis", Input).value = "admin"
                 app.query_one("#pass-cmis", Input).value = "admin"
                 app.query_one("#test-cmis").focus()
                 await pilot.press("enter")
-                await pilot.pause()
-                await asyncio.sleep(0.05)
-                await pilot.pause()
-                assert app.state.conn["cmis"].status == "ok"
+                await pilot.pause()  # deja que el handler registre el worker
+                await app.workers.wait_for_complete()
+                assert await wait_for(pilot, lambda: app.state.conn["cmis"].status == "ok")
 
         asyncio.run(_run())
 
@@ -186,12 +186,11 @@ class TestDoctorFlow:
             config, path = _make_config(tmp_path)
             app = ConsoleApp(config=config, config_path=path)
             async with app.run_test() as pilot:
-                await pilot.press("4")
+                await goto(pilot, app, "4")
                 await pilot.press("d")
                 await pilot.pause()
-                await asyncio.sleep(0.05)
-                await pilot.pause()
-                assert app.state.doctor_verdict() == "aprobado"
+                await app.workers.wait_for_complete()
+                assert await wait_for(pilot, lambda: app.state.doctor_verdict() == "aprobado")
                 summary = str(app.query_one("#doc-summary", Static).renderable)
                 assert "1 ok" in summary and "1 warn" in summary
 
@@ -207,17 +206,18 @@ class TestDoctorFlow:
             config, path = _make_config(tmp_path)
             app = ConsoleApp(config=config, config_path=path)
             async with app.run_test() as pilot:
-                await pilot.press("4")
+                await goto(pilot, app, "4")
                 await pilot.press("d")
-                await asyncio.sleep(0.05)
                 await pilot.pause()
+                await app.workers.wait_for_complete()
+                assert await wait_for(pilot, lambda: app.state.doctor_report is not None)
                 app.state.creds.cmis_password = "old"
-                await pilot.press("2")
+                await goto(pilot, app, "2")
                 inp = app.query_one("#pass-cmis", Input)
                 inp.focus()
                 await pilot.press("y")
-                assert app.state.doctor_stale
-                await pilot.press("f4")
+                assert await wait_for(pilot, lambda: app.state.doctor_stale)
+                await goto(pilot, app, "f4")
                 app.query_one(DoctorPane).render_results()
                 await pilot.pause()
                 stale = app.query_one("#doc-stale", Static)

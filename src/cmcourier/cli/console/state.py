@@ -19,6 +19,7 @@ import os
 import time
 from dataclasses import dataclass, field
 
+from cmcourier.cli.console.overrides import SessionOverrides
 from cmcourier.cli.doctor import DoctorReport
 from cmcourier.config.loader import Secrets
 
@@ -97,6 +98,14 @@ class ConsoleState:
     doctor_report: DoctorReport | None = None
     doctor_group: str = "all"
     doctor_stale_reason: str = ""
+    # 124: overrides APLICADOS (los que lee el launcher). El draft vive
+    # en la pantalla CONFIG y jamás llega a una corrida sin promover.
+    overrides: SessionOverrides = field(default_factory=SessionOverrides)
+
+    def promote_overrides(self, draft: SessionOverrides) -> None:
+        """Valida y promueve el draft. El doctor queda stale."""
+        self.overrides = draft.validated()
+        self.mark_doctor_stale("cambiaron los overrides de sesión")
 
     # ------------------------------------------------- credenciales
 

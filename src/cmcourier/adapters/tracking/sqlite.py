@@ -136,6 +136,22 @@ CREATE INDEX IF NOT EXISTS idx_document_cache_cached_at
 ON document_cache (cached_at)
 """
 
+# 124: columnas de auditoría de migration_batch (C3 del informe UX v2):
+# quién lanzó, desde dónde, con qué config/overrides, con qué veredicto
+# del doctor y cómo terminó la corrida. Nullable — las filas legacy y
+# los comandos headless que no auditan quedan en NULL. La migración es
+# idempotente vía PRAGMA table_info + ALTER TABLE.
+_AUDIT_COLUMNS: tuple[str, ...] = (
+    "operator",
+    "station",
+    "pipeline_kind",
+    "environment",
+    "config_hash",
+    "overrides_json",
+    "doctor_verdict",
+    "outcome",
+)
+
 
 # ---------------------------------------------------------------------------
 # PRAGMAs
@@ -315,6 +331,11 @@ class SQLiteTrackingStore(ITrackingStore):
         conn.execute(_CREATE_IDX_BATCH)
         conn.execute(_CREATE_DOCUMENT_CACHE)
         conn.execute(_CREATE_IDX_DOCUMENT_CACHE_AGE)
+        # 124: migración idempotente de las columnas de auditoría.
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(migration_batch)")}
+        for col in _AUDIT_COLUMNS:
+            if col not in existing:
+                conn.execute(f"ALTER TABLE migration_batch ADD COLUMN {col} TEXT")
         conn.commit()
 
     def _open_read_connection(self) -> sqlite3.Connection:
@@ -414,6 +435,42 @@ class SQLiteTrackingStore(ITrackingStore):
         except sqlite3.Error as exc:
             raise TrackingError("start_batch failed", batch_id=batch_id) from exc
         return batch_id
+
+    def record_batch_audit(
+        self,
+        batch_id: str,
+        *,
+        operator: str,
+        station: str,
+        pipeline_kind: str,
+        environment: str,
+        config_hash: str,
+        overrides_json: str,
+        doctor_verdict: str,
+    ) -> None:
+        """124: escribe la auditoría de lanzamiento del batch (encolada)."""
+        self._enqueue(
+            "UPDATE migration_batch SET operator = ?, station = ?, pipeline_kind = ?, "
+            "environment = ?, config_hash = ?, overrides_json = ?, doctor_verdict = ? "
+            "WHERE batch_id = ?",
+            (
+                operator,
+                station,
+                pipeline_kind,
+                environment,
+                config_hash,
+                overrides_json,
+                doctor_verdict,
+                batch_id,
+            ),
+        )
+
+    def set_batch_outcome(self, batch_id: str, outcome: str) -> None:
+        """124: cómo terminó la corrida — completed | cancelled | failed."""
+        self._enqueue(
+            "UPDATE migration_batch SET outcome = ? WHERE batch_id = ?",
+            (outcome, batch_id),
+        )
 
     def complete_batch(self, batch_id: str) -> None:
         self._enqueue(
