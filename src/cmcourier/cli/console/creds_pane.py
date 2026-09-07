@@ -1,16 +1,19 @@
-"""Panel CREDENCIALES de la consola (123).
+"""Panel CREDENCIALES de la consola (123; tarjetas por alias desde 131).
 
 Contrato UX (mock v2 + informes adversariales):
 * credenciales solo en memoria; editar invalida la prueba;
 * "probar conexión" en worker thread (no bloquea la UI);
-* AS400 con contador de intentos y confirmación antes del 3° (lockout
-  del perfil en el iSeries);
+* una tarjeta por conexión que la config EFECTIVA usa (registro 129:
+  ``<alias> · <kind> · <host>`` + los sitios que la usan) más CMIS, que
+  siempre existe;
+* las tarjetas ``as400`` llevan contador de intentos y confirmación antes
+  del 3° (lockout del perfil en el iSeries); cmis/mssql no;
 * toggle mostrar/ocultar contraseña.
 """
 
 from __future__ import annotations
 
-__all__ = ["CredsPane"]
+__all__ = ["CredsPane", "run_single_check"]
 
 import time
 from typing import TYPE_CHECKING
@@ -20,22 +23,32 @@ from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import Button, Input, Label, Static
 
 from cmcourier.cli.console.overrides import apply_overrides
-from cmcourier.cli.console.state import AS400_MAX_TRIES
-from cmcourier.cli.doctor import CheckResult, CheckStatus, check_as400, check_cmis
+from cmcourier.cli.console.state import AS400_MAX_TRIES, CMIS_ALIAS, ConnInfo, connection_infos
+from cmcourier.cli.doctor import CheckResult, CheckStatus, check_cmis, check_connection
 
 if TYPE_CHECKING:
     from cmcourier.cli.console.app import ConsoleApp
 
+_INPUT_ROLES = ("user", "pass")
+
+
+def _alias_of(widget_id: str) -> str | None:
+    """``user-<alias>`` / ``pass-<alias>`` → alias (los alias no llevan guiones)."""
+    role, sep, alias = widget_id.partition("-")
+    return alias if sep and role in _INPUT_ROLES and alias else None
+
 
 class CredsPane(Vertical):
-    """Formulario CMIS + AS400 con prueba de conexión en vivo."""
+    """Formulario CMIS + una tarjeta por alias, con prueba de conexión en vivo."""
 
     DEFAULT_CSS = """
     CredsPane { padding: 1 2; }
     CredsPane .intro { color: $text-muted; margin-bottom: 1; }
+    CredsPane .hint { color: $text-muted; margin-bottom: 1; }
     CredsPane Grid { grid-size: 2; grid-gutter: 1 2; height: auto; }
     CredsPane .card { border: solid $surface-lighten-2; padding: 1 2; height: auto; }
     CredsPane .card-title { text-style: bold; }
+    CredsPane .card-sites { color: $text-muted; }
     CredsPane .chip-ok { color: $success; }
     CredsPane .chip-err { color: $error; }
     CredsPane .chip-run { color: $accent; }
@@ -57,61 +70,100 @@ class CredsPane(Vertical):
             "se descartan al salir. Editar un campo invalida la prueba anterior.",
             classes="intro",
         )
-        with Grid():
-            yield self._card("cmis", "CMIS · Alfresco")
-            yield self._card("as400", "AS400 · RVABREP")
+        yield Static("", classes="hint", id="creds-hint")
+        yield Grid(*(self._card(info) for info in self._infos()), id="creds-grid")
 
-    def _card(self, which: str, title: str) -> Vertical:
-        creds = self.console.state.creds
-        user = creds.cmis_username if which == "cmis" else creds.as400_username
-        card = Vertical(classes="card", id=f"card-{which}")
+    def on_mount(self) -> None:
+        self._render_hint()
+        self.render_all()
+
+    # ------------------------------------------------------------ tarjetas
+
+    def _infos(self) -> list[ConnInfo]:
+        cmis = ConnInfo(alias=CMIS_ALIAS, kind="cmis", host="", sites=("destino",))
+        return [cmis, *connection_infos(self.console.effective_config())]
+
+    async def rebuild_cards(self) -> None:
+        """Al entrar a la pestaña: si los overrides (127) cambiaron qué
+        conexiones hacen falta, recompone la grilla; si no, sólo re-renderiza."""
+        if not self.console.state.rebuild_conn(self.console.effective_config()):
+            self.render_all()
+            return
+        grid = self.query_one("#creds-grid", Grid)
+        await grid.remove_children()
+        await grid.mount_all([self._card(info) for info in self._infos()])
+        self._render_hint()
+        self.render_all()
+        self.console.refresh_status()
+
+    def _render_hint(self) -> None:
+        n = len(self.console.state.conn) - 1
+        self.query_one("#creds-hint", Static).update(
+            "Esta config usa solo CMIS — no tiene conexiones AS400 ni SQL Server."
+            if n == 0
+            else f"{n} conexión{'es' if n > 1 else ''} del registro además de CMIS."
+        )
+
+    def render_all(self) -> None:
+        for alias in self.console.state.conn:
+            self._render_conn(alias)
+
+    def _card(self, info: ConnInfo) -> Vertical:
+        alias = info.alias
+        card = Vertical(classes="card", id=f"card-{alias}")
+        title = "CMIS · Alfresco" if alias == CMIS_ALIAS else info.title
         card.compose_add_child(
             Horizontal(
-                Static(title, classes="card-title"),
-                Static("  ●", classes="chip-idle", id=f"chip-{which}"),
-                Static(" sin probar", classes="chip-idle", id=f"chiplbl-{which}"),
+                Static(title, classes="card-title", id=f"title-{alias}"),
+                Static("  ●", classes="chip-idle", id=f"chip-{alias}"),
+                Static(" sin probar", classes="chip-idle", id=f"chiplbl-{alias}"),
                 classes="frow",
             )
         )
+        if alias != CMIS_ALIAS:
+            card.compose_add_child(
+                Static(
+                    f"usada por: {' · '.join(info.sites)}",
+                    classes="card-sites",
+                    id=f"sites-{alias}",
+                )
+            )
+        cred = self.console.state.creds.get(alias)
         card.compose_add_child(Label("usuario"))
-        card.compose_add_child(Input(value=user, id=f"user-{which}"))
+        card.compose_add_child(Input(value=cred.username, id=f"user-{alias}"))
         card.compose_add_child(Label("contraseña"))
         card.compose_add_child(
             Horizontal(
-                Input(password=True, id=f"pass-{which}"),
-                Button("ver", id=f"reveal-{which}"),
+                Input(value=cred.password, password=True, id=f"pass-{alias}"),
+                Button("ver", id=f"reveal-{alias}"),
                 classes="frow",
             )
         )
-        card.compose_add_child(
-            Horizontal(
-                Static("", classes="tries", id=f"tries-{which}"),
-                Button("probar conexión", variant="primary", id=f"test-{which}"),
-                classes="frow",
-            )
-        )
+        row = Horizontal(classes="frow")
+        if info.kind == "as400":
+            row.compose_add_child(Static("", classes="tries", id=f"tries-{alias}"))
+        row.compose_add_child(Button("probar conexión", variant="primary", id=f"test-{alias}"))
+        card.compose_add_child(row)
         # markup=False: los mensajes traen cuerpos de error de CMIS/AS400
         # con corchetes y JSON que Textual leería como markup y rompería.
-        card.compose_add_child(Static("", classes="msg", id=f"msg-{which}", markup=False))
+        card.compose_add_child(Static("", classes="msg", id=f"msg-{alias}", markup=False))
         return card
 
     # ------------------------------------------------------------ eventos
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        wid = event.input.id or ""
-        which = "cmis" if wid.endswith("cmis") else "as400" if wid.endswith("as400") else None
-        if which is None:
+        alias = _alias_of(event.input.id or "")
+        if alias is None:
             return
-        self._store_inputs(which)
-        self.console.state.invalidate_conn(which)
-        self._render_conn(which)
+        self._store_inputs(alias)
+        self.console.state.invalidate_conn(alias)
+        self._render_conn(alias)
         self.console.refresh_status()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        wid = event.input.id or ""
-        which = "cmis" if wid.endswith("cmis") else "as400" if wid.endswith("as400") else None
-        if which:
-            self.request_test(which)
+        alias = _alias_of(event.input.id or "")
+        if alias:
+            self.request_test(alias)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""
@@ -124,12 +176,12 @@ class CredsPane(Vertical):
 
     # ------------------------------------------------------------ prueba
 
-    def request_test(self, which: str) -> None:
+    def request_test(self, alias: str) -> None:
         state = self.console.state
-        self._store_inputs(which)
-        if which == "as400" and state.as400_needs_lockout_confirm():
+        self._store_inputs(alias)
+        if state.as400_needs_lockout_confirm(alias):
             self.console.confirm(
-                title="Tercer intento contra el iSeries",
+                title=f"Tercer intento contra el iSeries ({alias})",
                 body=(
                     f"Ya fallaron {AS400_MAX_TRIES - 1} intentos. Un tercer fallo BLOQUEA "
                     "el perfil en el AS400 (ticket a Seguridad para desbloquear).\n"
@@ -138,81 +190,77 @@ class CredsPane(Vertical):
                 yes="probar igual",
                 no="volver a verificar",
                 danger=True,
-                cb=lambda ok: self._start_test(which) if ok else None,
+                cb=lambda ok: self._start_test(alias) if ok else None,
             )
             return
-        self._start_test(which)
+        self._start_test(alias)
 
-    def _store_inputs(self, which: str) -> None:
-        creds = self.console.state.creds
-        user = self.query_one(f"#user-{which}", Input).value.strip()
-        pwd = self.query_one(f"#pass-{which}", Input).value
-        if which == "cmis":
-            creds.cmis_username, creds.cmis_password = user, pwd
-        else:
-            creds.as400_username, creds.as400_password = user, pwd
+    def _store_inputs(self, alias: str) -> None:
+        user = self.query_one(f"#user-{alias}", Input).value
+        pwd = self.query_one(f"#pass-{alias}", Input).value
+        self.console.state.creds.set(alias, user, pwd)
 
-    def _start_test(self, which: str) -> None:
+    def _start_test(self, alias: str) -> None:
         state = self.console.state
-        creds = state.creds
-        complete = creds.cmis_complete() if which == "cmis" else creds.as400_complete()
-        if not complete:
+        if not state.creds.complete(alias):
             state.record_conn_result(
-                which, ok=False, message="Credencial vacía — completá usuario y contraseña."
+                alias, ok=False, message="Credencial vacía — completá usuario y contraseña."
             )
-            if which == "as400":
-                state.conn["as400"].attempts -= 1  # el vacío no gasta intento de lockout
-            self._render_conn(which)
+            if state.conn[alias].attempts:
+                state.conn[alias].attempts -= 1  # el vacío no gasta intento de lockout
+            self._render_conn(alias)
             return
-        state.conn[which].status = "testing"
-        self._render_conn(which)
-        self.console.run_check_worker(which, self._apply_result)
+        state.conn[alias].status = "testing"
+        self._render_conn(alias)
+        self.console.run_check_worker(alias, self._apply_result)
 
-    def _apply_result(self, which: str, result: CheckResult, elapsed_ms: float) -> None:
+    def _apply_result(self, alias: str, result: CheckResult, elapsed_ms: float) -> None:
         ok = result.status is CheckStatus.PASS
-        msg = result.message if ok else f"{result.message}"
+        msg = f"{result.message} · {elapsed_ms:.0f} ms" if ok else result.message
+        self.console.state.record_conn_result(alias, ok=ok, message=msg)
         if ok:
-            msg = f"{msg} · {elapsed_ms:.0f} ms"
-        self.console.state.record_conn_result(which, ok=ok, message=msg)
-        if ok and which == "as400":
-            self.console.state.reset_as400_attempts()
-        self._render_conn(which)
+            self.console.state.reset_attempts(alias)
+        self._render_conn(alias)
         self.console.refresh_status()
         self.console.notify(
-            f"Conexión {which.upper()} {'OK' if ok else 'falló'}",
+            f"Conexión {alias} {'OK' if ok else 'falló'}",
             severity="information" if ok else "error",
         )
 
     # ------------------------------------------------------------ render
 
-    def _render_conn(self, which: str) -> None:
-        c = self.console.state.conn[which]
+    def _render_conn(self, alias: str) -> None:
+        c = self.console.state.conn.get(alias)
+        if c is None or not self.query(f"#chip-{alias}"):
+            return  # la tarjeta ya no existe (config efectiva cambió)
         cls = {"ok": "chip-ok", "err": "chip-err", "testing": "chip-run"}.get(c.status, "chip-idle")
         label = {
             "ok": f" ok · {c.age_label(now=time.time())}",
             "err": " falló",
             "testing": " probando…",
         }.get(c.status, " sin probar")
-        chip = self.query_one(f"#chip-{which}", Static)
+        chip = self.query_one(f"#chip-{alias}", Static)
         chip.set_classes(cls)
-        lbl = self.query_one(f"#chiplbl-{which}", Static)
+        lbl = self.query_one(f"#chiplbl-{alias}", Static)
         lbl.set_classes(cls)
         lbl.update(label)
-        self.query_one(f"#msg-{which}", Static).update(c.message)
-        if which == "as400":
-            tries = self.query_one("#tries-as400", Static)
-            tries.update(
+        self.query_one(f"#msg-{alias}", Static).update(c.message)
+        if c.kind == "as400":
+            self.query_one(f"#tries-{alias}", Static).update(
                 f"intento {c.attempts} de {AS400_MAX_TRIES} — al 3° el perfil se bloquea"
                 if c.attempts
                 else ""
             )
 
 
-def run_single_check(which: str, console: ConsoleApp) -> tuple[CheckResult, float]:
-    """Cuerpo del worker: corre el check real y mide latencia."""
+def run_single_check(alias: str, console: ConsoleApp) -> tuple[CheckResult, float]:
+    """Cuerpo del worker: corre el check real de UNA conexión y mide latencia."""
     start = time.monotonic()
     secrets = console.state.creds.to_secrets()
-    fn = check_cmis if which == "cmis" else check_as400
     # 127: misma config efectiva que el doctor y la corrida.
-    result = fn(apply_overrides(console.config, console.state.overrides), secrets)
+    effective = apply_overrides(console.config, console.state.overrides)
+    if alias == CMIS_ALIAS:
+        result = check_cmis(effective, secrets)
+    else:
+        result = check_connection(effective, secrets, alias)
     return result, (time.monotonic() - start) * 1000.0

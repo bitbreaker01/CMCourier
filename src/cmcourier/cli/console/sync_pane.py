@@ -121,7 +121,12 @@ class SyncPane(VerticalScroll):
             avail.update(f"✔ sync habilitado · {sync_cfg.library}.{sync_cfg.table}")
             avail.remove_class("off")
         else:
-            hint = "  → cargalas en [2] CREDENCIALES" if "credentials" in reason else ""
+            hint = ""
+            if "credentials" in reason:
+                # 131: la tarjeta se llama como el alias del sync, no "AS400".
+                ref = self.console.config.connection_ref("tracking.as400_sync")
+                card = f" (tarjeta {ref.alias})" if ref is not None else ""
+                hint = f"  → cargalas en [2] CREDENCIALES{card}"
             avail.update(f"✘ {reason}{hint}")
             avail.add_class("off")
         self._sync_buttons()

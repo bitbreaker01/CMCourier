@@ -35,8 +35,9 @@ class _FakeManager:
 
 
 def _ready_state(app: ConsoleApp) -> None:
+    # 131: la config CSV de estos tests no usa conexiones del registro —
+    # sólo CMIS entra en el guard de credenciales.
     app.state.record_conn_result("cmis", ok=True, message="ok")
-    app.state.record_conn_result("as400", ok=True, message="ok")
     app.state.set_doctor_report(
         DoctorReport(
             results=(CheckResult(name="a", status=CheckStatus.PASS, message="ok"),),
@@ -73,7 +74,6 @@ class TestLaunchGuards:
             app.run_manager = fake  # type: ignore[assignment]
             async with app.run_test() as pilot:
                 app.state.record_conn_result("cmis", ok=True, message="ok")
-                app.state.record_conn_result("as400", ok=True, message="ok")
                 await goto(pilot, app, "5")
                 await pilot.press("r")
                 await pilot.pause()

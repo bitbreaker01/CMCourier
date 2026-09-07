@@ -16,6 +16,7 @@ from cmcourier.cli.doctor import (
     CheckStatus,
     _check_as400_connectivity,  # type: ignore[attr-defined]
     _check_mssql_connectivity,  # type: ignore[attr-defined]
+    check_connection,
     group_of,
 )
 from cmcourier.config.loader import Credential, Secrets
@@ -113,3 +114,34 @@ class TestMssqlConnectivityCheck:
         assert captured["mssql"] == [("SELECT 1", [])]
         assert "clientes_sql" not in as400.details
         assert "as400" not in mssql.details
+
+
+class TestCheckConnection:
+    """131 — chequeo puntual por ALIAS para el botón "probar" de la consola."""
+
+    def test_probes_only_the_named_alias(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured = _patch_sources(monkeypatch)
+        config = _StubConfig(
+            refs=(_as400_ref("as400", "indexing"), _mssql_ref("clientes_sql", "metadata:clientes"))
+        )
+        secrets = _secrets(as400=("u", "p"), clientes_sql=("u", "p"))
+        result = check_connection(config, secrets, "clientes_sql")  # type: ignore[arg-type]
+        assert result.status == CheckStatus.PASS
+        assert result.name == "connection:clientes_sql"
+        assert "sql.test" in result.message
+        assert captured["as400"] == []
+        assert captured["mssql"] == [("SELECT 1", [])]
+
+    def test_fails_naming_env_vars_when_credentials_missing(self) -> None:
+        config = _StubConfig(refs=(_mssql_ref("clientes_sql", "metadata:clientes"),))
+        result = check_connection(config, secrets=_secrets(), alias="clientes_sql")  # type: ignore[arg-type]
+        assert result.status == CheckStatus.FAIL
+        assert "CLIENTES_SQL_USERNAME" in result.message
+
+    def test_unknown_alias_fails_without_probing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured = _patch_sources(monkeypatch)
+        config = _StubConfig(refs=(_mssql_ref("clientes_sql", "metadata:clientes"),))
+        result = check_connection(config, _secrets(), "fantasma")  # type: ignore[arg-type]
+        assert result.status == CheckStatus.FAIL
+        assert "fantasma" in result.message
+        assert captured == {"mssql": [], "as400": []}

@@ -85,8 +85,14 @@ avanzás (credenciales → doctor → lanzar).
    del campo → el chip vuelve a "sin probar" y, si ya habías corrido el
    doctor, queda marcado como desactualizado.
 
-> AS400 acá aparece como **no requerida** (la fuente de este YAML es CSV
-> mirror). La consola lo deriva del YAML, no del tipo de pipeline.
+> Con este YAML ves **una sola tarjeta** (CMIS) y la pista "esta config usa
+> solo CMIS": la fuente es CSV mirror y no hay conexiones del registro. Las
+> tarjetas se derivan de las conexiones que el YAML **usa** (131) — una por
+> alias, título `<alias> · <kind> · <host>` y debajo los sitios que la usan
+> (`indexing`, `metadata:clientes`, `tracking`). Ver la sección 5 para verla
+> con SQL Server. Sólo las tarjetas `as400` llevan el contador de intentos
+> (lockout del perfil al 3°); las env vars de precarga son
+> `<ALIAS>_USERNAME` / `<ALIAS>_PASSWORD` (`AS400_*` para una conexión inline).
 
 ### `4` DOCTOR
 1. El selector tiene tres niveles: **`all`** (todos los checks), **un
@@ -222,9 +228,20 @@ uv run cmcourier doctor --config sample/config-local-mssql.yaml --check mssql_co
 uv run cmcourier doctor --config sample/config-local-mssql.yaml --check metadata_sources
 
 # 5) la consola con este YAML — en [2] CREDENCIALES aparece la tarjeta
-#    `clientes_sql · mssql · 127.0.0.1` además de CMIS
+#    `clientes_sql · mssql · 127.0.0.1` (usada por: metadata:clientes) además
+#    de CMIS, pre-cargada desde CLIENTES_SQL_* si las exportaste
 uv run cmcourier console --config sample/config-local-mssql.yaml
 ```
+
+En la consola:
+
+- **INICIO** lista `cmis` y `clientes_sql` con su estado; el primer paso
+  no se tilda hasta que **ambas** estén probadas (y `[5]` dice
+  `credenciales ✘` hasta entonces).
+- En `[2]`, probá `clientes_sql` con una clave mala: el chip queda en
+  `falló` con el error real del driver y **sin** contador de intentos (eso
+  es sólo AS400). Corregila y probá de nuevo → `ok · NN ms`.
+- La barra superior muestra un ✔/✘ por conexión (`cmis ✔ · clientes_sql ✔`).
 
 Qué mirar:
 
@@ -271,9 +288,8 @@ docker compose -f alfresco-compose.yml -f alfresco-compose.local.yml down -v   #
   (requiere que el AIMD respete un `min(user_cap, aimd_cap)`).
 - **ETA por ventana** en el monitor: usa el throughput acumulado del
   provider actual.
-- **Más conexiones / credenciales con alias** (p. ej. un SQL Server o
-  una DB2 extra para metadata) y **editar y guardar el YAML completo**
-  desde la consola: son las próximas iteraciones; hoy los overrides son
-  de sesión y las fuentes son las que declara el YAML.
+- **Editar y guardar el YAML completo** desde la consola: próxima
+  iteración; hoy los overrides son de sesión y las fuentes (y sus
+  conexiones) son las que declara el YAML.
 
 El resto del mock v2 (ver el artifact de diseño) está implementado.

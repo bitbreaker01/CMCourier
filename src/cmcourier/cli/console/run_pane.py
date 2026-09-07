@@ -246,10 +246,10 @@ class RunPane(VerticalScroll):
         self.query_one("#row-total").display = not (is_resume or single)
         if is_resume:
             self._load_resumables()
-        need_as400 = console.as400_required()
-        creds_ok = console.state.creds_ready(as400_required=need_as400)
+        required = eff.required_aliases()
+        creds_ok = console.state.creds_ready(required=required)
         self.query_one("#run-summary", Static).update(
-            "\n".join(self._summary_lines(eff, creds_ok, need_as400, resume_allowed))
+            "\n".join(self._summary_lines(eff, creds_ok, required, resume_allowed))
         )
         guards = []
         if self._trigger_error:
@@ -264,7 +264,7 @@ class RunPane(VerticalScroll):
         self.query_one("#run-guard", Static).update("\n".join(guards))
 
     def _summary_lines(
-        self, eff: PipelineConfig, creds_ok: bool, need_as400: bool, resume_allowed: bool
+        self, eff: PipelineConfig, creds_ok: bool, required: tuple[str, ...], resume_allowed: bool
     ) -> list[str]:
         console = self.console
         kind = eff.trigger.kind
@@ -288,7 +288,7 @@ class RunPane(VerticalScroll):
             f"prep workers  {eff.processing.prep_workers}",
             f"overrides     {console.state.overrides.summary()}",
             f"credenciales  {'✔ listas' if creds_ok else '✘ faltan o vencidas'}"
-            + ("" if need_as400 else " (AS400 no requerida)"),
+            + (f" (cmis + {', '.join(required)})" if required else " (solo CMIS)"),
             f"doctor        {console.state.doctor_verdict()}",
         ]
 

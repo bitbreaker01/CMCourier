@@ -29,8 +29,8 @@ __all__ = [
     "CheckResult",
     "CheckStatus",
     "DoctorReport",
-    "check_as400",
     "check_cmis",
+    "check_connection",
     "group_of",
     "run_doctor",
 ]
@@ -202,9 +202,28 @@ def check_cmis(config: PipelineConfig, secrets: Secrets) -> CheckResult:
     return _check_cmis_connectivity(config, secrets)
 
 
-def check_as400(config: PipelineConfig, secrets: Secrets) -> CheckResult:
-    """123: chequeo puntual de conectividad AS400 (ídem `check_cmis`)."""
-    return _check_as400_connectivity(config, secrets)
+def check_connection(config: PipelineConfig, secrets: Secrets, alias: str) -> CheckResult:
+    """131: chequeo puntual de UNA conexión del registro (129) por alias, para
+    el botón "probar" de cada tarjeta de la consola. Mismo probe que el
+    check de conectividad de su kind."""
+    name = f"connection:{alias}"
+    ref = next((r for r in config.connection_refs() if r.alias == alias), None)
+    if ref is None:
+        return CheckResult(
+            name=name,
+            status=CheckStatus.FAIL,
+            message=f"connection alias {alias!r} is not used by this config",
+        )
+    outcome = _probe_connection(ref, secrets)
+    if outcome != "PASS":
+        return CheckResult(
+            name=name, status=CheckStatus.FAIL, message=outcome.removeprefix("FAIL: ")
+        )
+    return CheckResult(
+        name=name,
+        status=CheckStatus.PASS,
+        message=f"{ref.kind} reachable at {ref.spec.host} ({alias})",
+    )
 
 
 def run_doctor(

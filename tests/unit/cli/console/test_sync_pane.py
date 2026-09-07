@@ -31,9 +31,10 @@ def _with_sync(config: PipelineConfig) -> PipelineConfig:
 
 
 def _as400_creds() -> SessionCredentials:
-    return SessionCredentials(
-        cmis_username="c", cmis_password="c", as400_username="u", as400_password="p"
-    )
+    creds = SessionCredentials()
+    creds.set("cmis", "c", "c")
+    creds.set("as400", "u", "p")  # alias implícito de la conexión inline (129)
+    return creds
 
 
 class TestAvailability:

@@ -196,7 +196,7 @@ class ConsoleApp(App[None]):
         super().__init__()
         self.config = config
         self.config_path = config_path
-        self.state = ConsoleState()
+        self.state = ConsoleState.for_config(config)
         self.run_manager = ConsoleRunManager(self)
         self._batches_store: SQLiteTrackingStore | None = None
 
@@ -283,6 +283,9 @@ class ConsoleApp(App[None]):
         elif active == "sync":
             # 128: las credenciales pueden haber cambiado en [2].
             self.q("SyncPane", SyncPane).refresh_availability()
+        elif active == "credenciales":
+            # 131: los overrides (127) pueden cambiar qué conexiones hacen falta.
+            self.call_later(self.q("CredsPane", CredsPane).rebuild_cards)
         elif active == "monitor" and self.run_active:
             self.q("MonitorPane", MonitorPane).refresh_monitor()
 
@@ -403,19 +406,18 @@ class ConsoleApp(App[None]):
 
         self.push_screen(screen, _done)
 
-    def as400_required(self) -> bool:
-        """AS400 hace falta si alguna fuente/función configurada lo usa.
+    def effective_config(self) -> PipelineConfig:
+        """127: yaml + overrides de sesión aplicados — lo que realmente corre."""
+        return apply_overrides(self.config, self.state.overrides)
 
-        A7 (informe UX v2): la derivación sale del YAML — indexing,
-        fuentes de metadata y el sync NIARVILOG son ejes independientes
-        del `trigger.kind`.
+    def required_aliases(self) -> tuple[str, ...]:
+        """131: aliases de conexión que la config EFECTIVA usa (registro 129).
+
+        A7 (informe UX v2): la derivación sale del YAML — indexing, fuentes
+        de metadata y el sync NIARVILOG son ejes independientes del
+        `trigger.kind`; ``connection_refs()`` es la única fuente de verdad.
         """
-        if getattr(self.config.indexing.source, "kind", "") == "as400":
-            return True
-        if getattr(self.config.tracking.as400_sync, "enabled", False):
-            return True
-        sources = getattr(self.config.metadata, "sources", ()) or ()
-        return any(getattr(s, "kind", "") == "as400" for s in sources)
+        return self.effective_config().required_aliases()
 
     # ------------------------------------------------------------ launch (124)
 
@@ -457,7 +459,7 @@ class ConsoleApp(App[None]):
         spec = self.q("RunPane", RunPane).build_spec()
         if spec is None:
             return
-        if not self.state.creds_ready(as400_required=self.as400_required()):
+        if not self.state.creds_ready(required=self.required_aliases()):
             self.notify("Sin credenciales frescas de sesión — cargalas en [2]", severity="error")
             self.action_switch_tab("credenciales")
             return
@@ -614,10 +616,9 @@ class ConsoleApp(App[None]):
     def refresh_status(self) -> None:
         st = self.state
         conn_bits = []
-        for which in ("cmis", "as400"):
-            s = st.conn[which].status
-            mark = {"ok": "✔", "err": "✘", "testing": "…"}.get(s, "·")
-            conn_bits.append(f"{which} {mark}")
+        for alias, conn in st.conn.items():
+            mark = {"ok": "✔", "err": "✘", "testing": "…"}.get(conn.status, "·")
+            conn_bits.append(f"{alias} {mark}")
         run_bit = " · ▶ corriendo" if self.run_active else ""
         self.q("#top-status", Static).update(
             f"  {' · '.join(conn_bits)} · doctor: {st.doctor_verdict()}{run_bit}"
@@ -629,7 +630,7 @@ class ConsoleApp(App[None]):
     def _render_inicio(self) -> None:
         st = self.state
         env = "⚠ PRODUCCIÓN" if self.config.environment == "prd" else "staging"
-        steps = st.next_steps(as400_required=self.as400_required())
+        steps = st.next_steps(required=self.required_aliases())
         markup = Content.from_markup
         kind = getattr(self.config.trigger, "kind", "?")
         lines = [
@@ -649,11 +650,18 @@ class ConsoleApp(App[None]):
             # Los mensajes de conexión son cuerpos de error EXTERNOS (`[IBM][...]`,
             # JSON): van como Content plano — `textual.markup.escape` NO cubre tags
             # en mayúscula y el parser sí los traga (bug de Textual 5.3).
-            Content(f"  CMIS   {st.conn['cmis'].status:<8} {st.conn['cmis'].message[:70]}"),
-            Content(
-                f"  AS400  {st.conn['as400'].status:<8} "
-                + ("(no requerida para esta config) " if not self.as400_required() else "")
-                + st.conn["as400"].message[:60]
-            ),
+            *self._inicio_connection_lines(),
         ]
         self.q("#inicio-body", Static).update(Content("\n").join(lines))
+
+    def _inicio_connection_lines(self) -> list[Content]:
+        """131: una línea por conexión (cmis + cada alias de la config efectiva)."""
+        st = self.state
+        width = max(len(alias) for alias in st.conn)
+        lines = []
+        for alias, conn in st.conn.items():
+            bits = [b for b in ("" if alias == "cmis" else conn.kind, conn.message[:60]) if b]
+            lines.append(Content(f"  {alias:<{width}}  {conn.status:<8} {' · '.join(bits)}"))
+        if len(st.conn) == 1:
+            lines.append(Content("  (esta config no usa conexiones AS400 ni SQL Server)"))
+        return lines

@@ -1,12 +1,19 @@
-"""Tests del estado de sesión de la consola (123)."""
+"""Tests del estado de sesión de la consola (123) — por alias desde 131."""
 
 from __future__ import annotations
 
 import pytest
 
-from cmcourier.cli.console.state import AS400_MAX_TRIES, ConsoleState, SessionCredentials
+from cmcourier.cli.console.state import (
+    AS400_MAX_TRIES,
+    ConnInfo,
+    ConsoleState,
+    SessionCredentials,
+    connection_infos,
+)
 from cmcourier.cli.doctor import CheckResult, CheckStatus, DoctorReport
 from cmcourier.config.loader import Credential
+from cmcourier.config.schema import As400ConnectionConfig, ConnectionRef, MssqlConnectionConfig
 
 pytestmark = pytest.mark.unit
 
@@ -20,21 +27,103 @@ def _report(*statuses: CheckStatus) -> DoctorReport:
     )
 
 
+def _as400_ref(alias: str, site: str, host: str = "as400.test") -> ConnectionRef:
+    spec = As400ConnectionConfig(host=host, port=446, database="RVILIB")
+    return ConnectionRef(alias=alias, kind="as400", spec=spec, site=site)
+
+
+def _mssql_ref(alias: str, site: str, host: str = "127.0.0.1") -> ConnectionRef:
+    spec = MssqlConnectionConfig(host=host, database="cmcourier")
+    return ConnectionRef(alias=alias, kind="mssql", spec=spec, site=site)
+
+
+class _Cfg:
+    def __init__(self, *refs: ConnectionRef) -> None:
+        self._refs = refs
+
+    def connection_refs(self) -> tuple[ConnectionRef, ...]:
+        return self._refs
+
+
 class TestSessionCredentials:
-    def test_from_env_prefills(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_from_env_prefills_cmis_and_requested_aliases(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """131 E4: ``from_env(aliases)`` lee ``<ALIAS>_*`` de cada alias pedido."""
         monkeypatch.setenv("CMIS_USERNAME", "admin ")
         monkeypatch.setenv("CMIS_PASSWORD", "s3cr3t")
+        monkeypatch.setenv("CLIENTES_SQL_USERNAME", "sa")
+        monkeypatch.setenv("CLIENTES_SQL_PASSWORD", "pw")
         monkeypatch.delenv("AS400_USERNAME", raising=False)
-        creds = SessionCredentials.from_env()
-        assert creds.cmis_username == "admin"
-        assert creds.cmis_complete()
-        assert not creds.as400_complete()
+        monkeypatch.delenv("AS400_PASSWORD", raising=False)
+        creds = SessionCredentials.from_env(["clientes_sql", "as400"])
+        assert creds.get("cmis") == Credential("admin", "s3cr3t")
+        assert creds.complete("cmis")
+        assert creds.complete("clientes_sql")
+        assert not creds.complete("as400")
+        assert creds.to_secrets().get("clientes_sql") == Credential("sa", "pw")
 
-    def test_to_secrets_maps_fields(self) -> None:
-        creds = SessionCredentials("u", "p", "au", "ap")
-        s = creds.to_secrets()
-        assert (s.cmis_username, s.cmis_password) == ("u", "p")
-        assert s.require("as400") == Credential("au", "ap")
+    def test_set_get_and_unknown_alias_is_empty(self) -> None:
+        creds = SessionCredentials()
+        assert creds.get("nadie") == Credential("", "")
+        assert not creds.complete("nadie")
+        creds.set("rvi", "u", "p")
+        assert creds.complete("rvi")
+        assert creds.to_secrets().require("rvi") == Credential("u", "p")
+
+    def test_to_secrets_always_carries_cmis(self) -> None:
+        secrets = SessionCredentials().to_secrets()
+        assert secrets.cmis == Credential("", "")
+
+
+class TestConnectionInfos:
+    def test_dedupes_by_alias_and_collects_sites(self) -> None:
+        """131 E2: una sola tarjeta `as400` con subtítulo `indexing · tracking`."""
+        cfg = _Cfg(_as400_ref("as400", "indexing"), _as400_ref("as400", "tracking.as400_sync"))
+        infos = connection_infos(cfg)  # type: ignore[arg-type]
+        assert infos == [
+            ConnInfo(alias="as400", kind="as400", host="as400.test", sites=("indexing", "tracking"))
+        ]
+
+    def test_preserves_order_and_kinds(self) -> None:
+        cfg = _Cfg(_as400_ref("rvi", "indexing"), _mssql_ref("clientes_sql", "metadata:clientes"))
+        infos = connection_infos(cfg)  # type: ignore[arg-type]
+        assert [(i.alias, i.kind, i.host) for i in infos] == [
+            ("rvi", "as400", "as400.test"),
+            ("clientes_sql", "mssql", "127.0.0.1"),
+        ]
+        assert infos[1].sites == ("metadata:clientes",)
+        assert infos[1].title == "clientes_sql · mssql · 127.0.0.1"
+
+
+class TestForConfig:
+    def test_conn_map_is_cmis_plus_aliases(self) -> None:
+        cfg = _Cfg(_mssql_ref("clientes_sql", "metadata:clientes"))
+        st = ConsoleState.for_config(cfg, creds=SessionCredentials())  # type: ignore[arg-type]
+        assert list(st.conn) == ["cmis", "clientes_sql"]
+        assert st.conn["clientes_sql"].kind == "mssql"
+        assert st.conn["cmis"].kind == "cmis"
+
+    def test_rebuild_keeps_surviving_states(self) -> None:
+        """127 puede cambiar las conexiones por override: las tarjetas se recomponen
+        sin perder lo ya probado."""
+        st = ConsoleState.for_config(
+            _Cfg(_as400_ref("rvi", "indexing")),  # type: ignore[arg-type]
+            creds=SessionCredentials(),
+        )
+        st.record_conn_result("rvi", ok=True, message="ok")
+        changed = st.rebuild_conn(
+            _Cfg(
+                _mssql_ref("clientes_sql", "metadata:clientes"),
+                _as400_ref("rvi", "tracking.as400_sync"),
+            )
+        )  # type: ignore[arg-type]
+        assert changed
+        assert list(st.conn) == ["cmis", "clientes_sql", "rvi"]
+        assert st.conn["rvi"].status == "ok"
+        assert not st.rebuild_conn(
+            _Cfg(_mssql_ref("clientes_sql", "metadata:clientes"), _as400_ref("rvi", "indexing"))
+        )  # type: ignore[arg-type]
 
 
 class TestConnLifecycle:
@@ -50,21 +139,30 @@ class TestConnLifecycle:
         assert st.doctor_verdict() == "desactualizado"
 
     def test_as400_attempts_and_lockout_gate(self) -> None:
-        st = ConsoleState(creds=SessionCredentials())
-        assert not st.as400_needs_lockout_confirm()
-        st.record_conn_result("as400", ok=False, message="401")
-        assert st.conn["as400"].attempts == 1
-        st.record_conn_result("as400", ok=False, message="401")
-        assert st.conn["as400"].attempts == AS400_MAX_TRIES - 1
-        assert st.as400_needs_lockout_confirm()
-        st.record_conn_result("as400", ok=True, message="ok")
-        st.reset_as400_attempts()
-        assert st.conn["as400"].attempts == 0
+        st = ConsoleState.for_config(
+            _Cfg(_as400_ref("rvi", "indexing")), creds=SessionCredentials()
+        )  # type: ignore[arg-type]
+        assert not st.as400_needs_lockout_confirm("rvi")
+        st.record_conn_result("rvi", ok=False, message="401")
+        assert st.conn["rvi"].attempts == 1
+        st.record_conn_result("rvi", ok=False, message="401")
+        assert st.conn["rvi"].attempts == AS400_MAX_TRIES - 1
+        assert st.as400_needs_lockout_confirm("rvi")
+        st.record_conn_result("rvi", ok=True, message="ok")
+        st.reset_attempts("rvi")
+        assert st.conn["rvi"].attempts == 0
 
-    def test_cmis_failures_do_not_count_attempts(self) -> None:
-        st = ConsoleState(creds=SessionCredentials())
-        st.record_conn_result("cmis", ok=False, message="401")
+    def test_only_as400_kind_counts_attempts(self) -> None:
+        """131 E2: cmis y mssql NUNCA acumulan intentos ni piden confirmación."""
+        st = ConsoleState.for_config(
+            _Cfg(_mssql_ref("clientes_sql", "metadata:clientes")), creds=SessionCredentials()
+        )  # type: ignore[arg-type]
+        for _ in range(3):
+            st.record_conn_result("cmis", ok=False, message="401")
+            st.record_conn_result("clientes_sql", ok=False, message="18456")
         assert st.conn["cmis"].attempts == 0
+        assert st.conn["clientes_sql"].attempts == 0
+        assert not st.as400_needs_lockout_confirm("clientes_sql")
 
 
 class TestDoctorVerdict:
@@ -78,8 +176,13 @@ class TestDoctorVerdict:
         st.set_doctor_report(_report(CheckStatus.PASS), group="connections")
         assert st.doctor_verdict() == "parcial (connections)"
 
-    def test_next_steps_respects_as400_requirement(self) -> None:
-        st = ConsoleState(creds=SessionCredentials())
+    def test_next_steps_requires_every_alias(self) -> None:
+        """131 E1: con `clientes_sql` requerida, cmis sola no tilda el primer paso."""
+        st = ConsoleState.for_config(
+            _Cfg(_mssql_ref("clientes_sql", "metadata:clientes")), creds=SessionCredentials()
+        )  # type: ignore[arg-type]
         st.record_conn_result("cmis", ok=True, message="ok")
-        assert st.next_steps(as400_required=True)[0][0] is False
-        assert st.next_steps(as400_required=False)[0][0] is True
+        assert st.next_steps(required=("clientes_sql",))[0][0] is False
+        assert st.next_steps(required=())[0][0] is True
+        st.record_conn_result("clientes_sql", ok=True, message="ok")
+        assert st.creds_ready(required=("clientes_sql",))
