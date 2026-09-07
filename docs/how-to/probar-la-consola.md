@@ -118,6 +118,21 @@ avanzás (credenciales → doctor → lanzar).
    y el doctor queda desactualizado.
 4. Probá un valor inválido (`workers` = 999) + `a` → error de validación.
    Nada llega a una corrida sin pasar por esa validación.
+5. **`w`** (o el botón "escribir en el YAML") persiste lo APLICADO en el
+   archivo (135). Confirmación en rojo con la ruta y los valores; se
+   crea `config.yaml.bak-<fecha>` al lado y se reemplaza el archivo de
+   forma atómica. Después: los `(yaml) …` de la pantalla muestran los
+   valores nuevos, los overrides de sesión se limpian (ya viven en el
+   YAML) y el doctor queda desactualizado. Verificá con `bat
+   staging/config.yaml`: sólo cambió la línea, comentarios incluidos.
+   - Con el borrador sin guardar (`a`), `w` avisa y no abre el modal.
+   - El pipeline elegido en `5` NO se escribe: es una elección por
+     corrida, no de configuración.
+   - Si el YAML usa formas que el parche no sabe tocar (`cmis: {…}` en
+     flow style, anchors, claves duplicadas), la consola lo detecta
+     ANTES de escribir — recarga el resultado y lo compara con lo que
+     debería quedar — y se niega: "editá el archivo a mano". El archivo
+     queda intacto y no hay backup a medias.
 
 ### `5` CORRER (lanzar)
 1. El **pipeline** se elige acá, no hace falta editar el YAML: el
@@ -324,8 +339,10 @@ docker compose -f alfresco-compose.yml -f alfresco-compose.local.yml down -v   #
 
 ## Qué NO hace todavía (por diseño de la v1)
 
-- **Editar y guardar el YAML completo** desde la consola: próxima
-  iteración; hoy los overrides son de sesión y las fuentes (y sus
-  conexiones) son las que declara el YAML.
+- **Editar el YAML libremente** desde la consola: `w` escribe SÓLO los
+  siete escalares de `3` (135). Lo estructural — fuentes, conexiones,
+  mapping, tracking — sigue siendo del archivo. Un editor completo
+  necesitaría round-trip con comentarios (`ruamel.yaml`): dependencia
+  nueva y quoting propio, para algo que hoy no hace falta.
 
 El resto del mock v2 (ver el artifact de diseño) está implementado.

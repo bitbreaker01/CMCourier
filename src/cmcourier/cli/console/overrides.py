@@ -59,6 +59,10 @@ class SessionOverrides:
     def is_empty(self) -> bool:
         return self.trigger is None and not self._scalar_items()
 
+    def has_scalars(self) -> bool:
+        """135: hay algo de [3] para escribir al YAML (el trigger no cuenta)."""
+        return bool(self._scalar_items())
+
     def summary(self) -> str:
         parts = [f"{k}={v}" for k, v in self._scalar_items()]
         if self.trigger is not None:

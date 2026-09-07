@@ -1,0 +1,138 @@
+"""Escribir los overrides de [3] al YAML (135).
+
+Parche textual + verificación semántica: lo que NO se toca queda
+byte-idéntico, y si el resultado no carga EXACTAMENTE como
+``apply_overrides(config, ov)``, el archivo original no se modifica.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from cmcourier.cli.console.overrides import SessionOverrides, apply_overrides
+from cmcourier.cli.console.persist import PersistError, persist_overrides
+from cmcourier.config.loader import load_config
+from tests.unit.cli.console.test_console_app import _make_config
+
+pytestmark = pytest.mark.unit
+
+
+def _yaml_with(yaml_path: Path, extra: str) -> None:
+    """Agrega ``extra`` dentro del bloque ``cmis`` del fixture."""
+    text = yaml_path.read_text()
+    anchor = "  repo_id: repo\n"
+    assert anchor in text
+    yaml_path.write_text(text.replace(anchor, anchor + extra))
+
+
+class TestPatch:
+    def test_replaces_value_and_keeps_inline_comment(self, tmp_path: Path) -> None:
+        """E1: la línea cambia el valor, conserva el comentario, el resto es idéntico."""
+        config, yaml_path = _make_config(tmp_path)
+        _yaml_with(yaml_path, "  workers: 4  # ojo con prd\n")
+        config = load_config(yaml_path)
+        before = yaml_path.read_text()
+
+        result = persist_overrides(yaml_path, config, SessionOverrides(workers=8))
+
+        after = yaml_path.read_text()
+        assert "  workers: 8  # ojo con prd\n" in after
+        restored = after.replace("  workers: 8  # ojo con prd\n", "  workers: 4  # ojo con prd\n")
+        assert restored == before
+        assert load_config(yaml_path).cmis.workers == 8
+        assert result.config.cmis.workers == 8
+        assert result.changed == {"cmis.workers": 8}
+
+    def test_appends_missing_key_to_existing_block(self, tmp_path: Path) -> None:
+        """El bloque cmis existe pero no tiene workers → se agrega al final del bloque."""
+        config, yaml_path = _make_config(tmp_path)
+        persist_overrides(yaml_path, config, SessionOverrides(workers=8))
+        text = yaml_path.read_text()
+        assert "  repo_id: repo\n  workers: 8\n" in text
+        assert load_config(yaml_path).cmis.workers == 8
+
+    def test_appends_missing_block_at_end(self, tmp_path: Path) -> None:
+        """E2: no hay bloque processing → se agrega entero al final."""
+        config, yaml_path = _make_config(tmp_path)
+        persist_overrides(yaml_path, config, SessionOverrides(mode="streaming", bucket_size=50))
+        text = yaml_path.read_text()
+        assert text.endswith("processing:\n  mode: streaming\n  streaming:\n    bucket_size: 50\n")
+        loaded = load_config(yaml_path)
+        assert loaded.processing.mode == "streaming"
+        assert loaded.processing.streaming.bucket_size == 50
+
+    def test_all_seven_scalars_round_trip(self, tmp_path: Path) -> None:
+        config, yaml_path = _make_config(tmp_path)
+        ov = SessionOverrides(
+            mode="streaming",
+            prep_workers=3,
+            bucket_size=25,
+            workers=6,
+            auto_tune_enabled=True,
+            max_bandwidth_mbps=12.5,
+            unmask_pii=True,
+        )
+        result = persist_overrides(yaml_path, config, ov)
+        assert load_config(yaml_path) == apply_overrides(config, ov)
+        assert set(result.changed) == {
+            "processing.mode",
+            "processing.prep_workers",
+            "processing.streaming.bucket_size",
+            "cmis.workers",
+            "cmis.auto_tune.enabled",
+            "cmis.max_bandwidth_mbps",
+            "observability.unmask_pii",
+        }
+
+    def test_trigger_override_is_not_persisted(self, tmp_path: Path) -> None:
+        from cmcourier.config.schema import LocalScanTriggerConfig
+
+        config, yaml_path = _make_config(tmp_path)
+        trigger = LocalScanTriggerConfig(kind="local_scan", scan_path=tmp_path)
+        ov = SessionOverrides(workers=2, trigger=trigger)
+        persist_overrides(yaml_path, config, ov)
+        assert "local_scan" not in yaml_path.read_text()
+        assert load_config(yaml_path).trigger.kind == "csv"
+
+    def test_empty_overrides_is_an_error(self, tmp_path: Path) -> None:
+        config, yaml_path = _make_config(tmp_path)
+        with pytest.raises(PersistError, match="nada"):
+            persist_overrides(yaml_path, config, SessionOverrides())
+
+
+class TestSafety:
+    def test_creates_timestamped_backup(self, tmp_path: Path) -> None:
+        config, yaml_path = _make_config(tmp_path)
+        before = yaml_path.read_text()
+        result = persist_overrides(yaml_path, config, SessionOverrides(workers=8))
+        assert result.backup_path.name.startswith("config.yaml.bak-")
+        assert result.backup_path.read_text() == before
+
+    def test_flow_style_block_refuses_to_write(self, tmp_path: Path) -> None:
+        """E3: no sabemos parchear `cmis: {…}` → error, archivo intacto, sin backup."""
+        config, yaml_path = _make_config(tmp_path)
+        text = yaml_path.read_text().replace(
+            "cmis:\n  base_url: http://cm.test/cmis\n  repo_id: repo\n",
+            "cmis: {base_url: http://cm.test/cmis, repo_id: repo}\n",
+        )
+        yaml_path.write_text(text)
+        config = load_config(yaml_path)
+
+        with pytest.raises(PersistError):
+            persist_overrides(yaml_path, config, SessionOverrides(workers=8))
+
+        assert yaml_path.read_text() == text
+        assert not list(tmp_path.glob("config.yaml.bak-*"))
+        assert not list(tmp_path.glob(".config.yaml.*"))
+
+    def test_duplicate_key_refuses_to_write(self, tmp_path: Path) -> None:
+        """PyYAML se queda con la última: parcheamos la primera → mismatch → cerrado."""
+        config, yaml_path = _make_config(tmp_path)
+        _yaml_with(yaml_path, "  workers: 4\n  workers: 5\n")
+        config = load_config(yaml_path)
+        text = yaml_path.read_text()
+        with pytest.raises(PersistError):
+            persist_overrides(yaml_path, config, SessionOverrides(workers=8))
+        assert yaml_path.read_text() == text

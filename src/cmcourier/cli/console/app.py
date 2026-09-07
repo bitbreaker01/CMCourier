@@ -34,6 +34,7 @@ from cmcourier.cli.console.creds_pane import CredsPane, run_single_check
 from cmcourier.cli.console.doctor_pane import DoctorPane
 from cmcourier.cli.console.monitor_pane import MonitorPane
 from cmcourier.cli.console.overrides import apply_overrides
+from cmcourier.cli.console.persist import PersistError, persist_overrides
 from cmcourier.cli.console.run_pane import RunPane
 from cmcourier.cli.console.runner import ConsoleRunManager, LaunchSpec
 from cmcourier.cli.console.state import ConsoleState
@@ -135,7 +136,7 @@ class HelpScreen(ModalScreen[None]):
   q             salir (confirma si hay corrida)   Esc  cerrar modal / soltar foco
 
 [b $accent]POR PANTALLA[/]
-  [2] ↵ probar conexión del formulario     [3] a  guardar overrides
+  [2] ↵ probar conexión del formulario     [3] a guardar overrides · w escribirlos al YAML
   [4] d correr la selección · ↑↓ navegar · ↵ expandir
   [5] r lanzar                             [6] x cancelar (drain) · p pausar · r reanudar
                                                +/- techo manual de workers (en caliente)
@@ -188,6 +189,7 @@ class ConsoleApp(App[None]):
         Binding("q", "quit_confirm", "salir"),
         Binding("d", "doctor_run", "doctor", show=False),
         Binding("a", "apply_overrides", "guardar overrides", show=False),
+        Binding("w", "persist_overrides", "escribir al YAML", show=False),
         Binding("r", "launch", "lanzar", show=False),
         Binding("x", "cancel_run", "cancelar corrida", show=False),
         Binding("p", "pause_run", "pausar corrida", show=False),
@@ -325,6 +327,57 @@ class ConsoleApp(App[None]):
     def action_apply_overrides(self) -> None:
         if self.q("#tabs", TabbedContent).active == "config":
             self.q("ConfigPane", ConfigPane).apply_draft()
+
+    def action_persist_overrides(self) -> None:
+        if self.q("#tabs", TabbedContent).active == "config":
+            self.persist_overrides()
+
+    def persist_overrides(self) -> None:
+        """135: escribe los overrides APLICADOS al YAML — con confirmación.
+
+        Sólo lo aplicado con `a`: un borrador sucio no llega al disco.
+        El trigger (127) no se persiste. Una corrida activa no cambia.
+        """
+        pane = self.q("ConfigPane", ConfigPane)
+        if pane.draft_dirty():
+            self.notify("Primero guardá el borrador con a — después w", severity="error")
+            return
+        applied = self.state.overrides
+        if not applied.has_scalars():
+            self.notify("No hay nada aplicado para escribir al YAML", severity="warning")
+            return
+
+        def _done(ok: bool) -> None:
+            if not ok:
+                return
+            try:
+                result = persist_overrides(self.config_path, self.config, applied)
+            except (PersistError, OSError) as exc:
+                self.notify(f"No se escribió el YAML: {exc}", severity="error", timeout=8)
+                return
+            self.config = result.config
+            self.state.overrides = applied.cleared()
+            self.state.mark_doctor_stale("cambió el YAML")
+            pane.refresh_yaml_values()
+            self.on_pii_override(None)
+            self.refresh_status()
+            self.notify(
+                f"YAML actualizado ({len(result.changed)} claves) · backup en {result.backup_path}",
+                timeout=8,
+            )
+
+        self.confirm(
+            title="Escribir los overrides en el YAML",
+            body=(
+                f"{self.config_path}\n\n{applied.summary()}\n\n"
+                "Se hace un backup config.yaml.bak-<fecha> y se reemplaza el archivo. "
+                "Los overrides de sesión se limpian (ya viven en el YAML)."
+            ),
+            yes="escribir",
+            no="cancelar",
+            danger=True,
+            cb=_done,
+        )
 
     def action_launch(self) -> None:
         active = self.q("#tabs", TabbedContent).active

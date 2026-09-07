@@ -95,6 +95,31 @@ class ConfigPane(Vertical):
         with Horizontal(classes="btns"):
             yield Button("descartar overrides", id="cfg-reset")
             yield Button("guardar para la próxima corrida (a)", variant="primary", id="cfg-apply")
+            yield Button("escribir en el YAML (w)", variant="warning", id="cfg-persist")
+
+    def refresh_yaml_values(self) -> None:
+        """135: tras escribir el YAML, los ``(yaml) …`` reflejan el archivo nuevo."""
+        cfg = self.console.config
+        for wid, value in (
+            ("ov-prep", cfg.processing.prep_workers),
+            ("ov-bucket", cfg.processing.streaming.bucket_size),
+            ("ov-workers", cfg.cmis.workers),
+            ("ov-bw", cfg.cmis.max_bandwidth_mbps),
+        ):
+            inp = self.query_one(f"#{wid}", Input)
+            inp.placeholder = f"(yaml) {value}"
+            inp.value = ""
+        selects: list[tuple[str, object, tuple[str, ...]]] = [
+            ("ov-mode", cfg.processing.mode, ("batched", "streaming")),
+            ("ov-aimd", cfg.cmis.auto_tune.enabled, ("true", "false")),
+            ("ov-pii", cfg.observability.unmask_pii, ("true", "false")),
+        ]
+        for wid, yaml_value, choices in selects:
+            sel = self.query_one(f"#{wid}", Select)
+            sel.set_options([(f"(yaml) {yaml_value}", ""), *((c, c) for c in choices)])
+            sel.value = ""
+        self.query_one("#pii-warn", Static).update("")
+        self._render_status()
 
     def _row_input(self, label: str, wid: str, yaml_value: str) -> Horizontal:
         row = Horizontal(classes="cfgrow")
@@ -187,6 +212,8 @@ class ConfigPane(Vertical):
             self.apply_draft()
         elif event.button.id == "cfg-reset":
             self.reset_draft()
+        elif event.button.id == "cfg-persist":
+            self.console.persist_overrides()
 
     def on_input_changed(self, _: Input.Changed) -> None:
         self._render_status()
