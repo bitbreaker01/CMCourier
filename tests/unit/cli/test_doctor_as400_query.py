@@ -1,4 +1,5 @@
-"""Tests unitarios para los queries que ``cmcourier doctor`` envía a AS400 (073)."""
+"""Tests unitarios para los queries que ``cmcourier doctor`` envía a AS400 (073)
+y para la prueba por conexión del registro (129)."""
 
 from __future__ import annotations
 
@@ -13,37 +14,40 @@ from cmcourier.cli.doctor import (
     CheckStatus,
     _check_as400_connectivity,  # type: ignore[attr-defined]
 )
-from cmcourier.config.loader import Secrets
-from cmcourier.config.schema import As400ConnectionConfig, As400RvabrepSource
+from cmcourier.config.loader import Credential, Secrets
+from cmcourier.config.schema import As400ConnectionConfig, ConnectionRef
 
 pytestmark = pytest.mark.unit
 
 
 @dataclass
 class _StubConfig:
-    """Stub minimal para ``_check_as400_connectivity`` — solo necesita ``indexing.source``."""
+    """Stub minimal: ``_check_as400_connectivity`` sólo mira ``connection_refs()``."""
 
-    indexing: Any
+    refs: tuple[ConnectionRef, ...]
 
-
-@dataclass
-class _StubIndexing:
-    source: Any
+    def connection_refs(self) -> tuple[ConnectionRef, ...]:
+        return self.refs
 
 
-def _make_config_with_as400_source(query: str = "SELECT * FROM RVILIB.RVABREP") -> _StubConfig:
-    conn = As400ConnectionConfig(host="as400.test", port=446, database="RVILIB")
-    source = As400RvabrepSource(kind="as400", connection=conn, query=query)
-    return _StubConfig(indexing=_StubIndexing(source=source))
+def _ref(alias: str, site: str, host: str = "as400.test") -> ConnectionRef:
+    spec = As400ConnectionConfig(host=host, port=446, database="RVILIB")
+    return ConnectionRef(alias=alias, kind="as400", spec=spec, site=site)
 
 
-def _secrets() -> Secrets:
-    return Secrets(
-        cmis_username="cmis",
-        cmis_password="cmis",
-        as400_username="dbuser",
-        as400_password="dbpass",
-    )
+def _secrets(**aliases: tuple[str, str]) -> Secrets:
+    creds = {"cmis": Credential("cmis", "cmis")}
+    creds.update({alias: Credential(*pair) for alias, pair in aliases.items()})
+    return Secrets(creds)
+
+
+def _patch_source(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, list[Any]]]:
+    captured: list[tuple[str, list[Any]]] = []
+    fake_source = MagicMock()
+    fake_source.query = MagicMock(side_effect=lambda sql, params: captured.append((sql, params)))
+    fake_source.close = MagicMock()
+    monkeypatch.setattr(doctor_module, "As400DataSource", lambda **kwargs: fake_source)
+    return captured
 
 
 class TestAs400ConnectivityQuery:
@@ -54,42 +58,48 @@ class TestAs400ConnectivityQuery:
     """
 
     def test_health_check_uses_sysdummy1(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        captured: list[tuple[str, list[Any]]] = []
-        fake_source = MagicMock()
-        fake_source.query = MagicMock(
-            side_effect=lambda sql, params: captured.append((sql, params))
-        )
-        fake_source.close = MagicMock()
-
-        def fake_ctor(**kwargs: Any) -> MagicMock:
-            return fake_source
-
-        monkeypatch.setattr(doctor_module, "As400DataSource", fake_ctor)
-        config = _make_config_with_as400_source()
-        result = _check_as400_connectivity(config, _secrets())  # type: ignore[arg-type]
+        captured = _patch_source(monkeypatch)
+        config = _StubConfig(refs=(_ref("as400", "indexing"),))
+        result = _check_as400_connectivity(config, _secrets(as400=("dbuser", "dbpass")))  # type: ignore[arg-type]
 
         assert result.status == CheckStatus.PASS
         assert captured == [("SELECT 1 FROM SYSIBM.SYSDUMMY1", [])]
 
-    def test_skips_when_source_is_not_as400(self) -> None:
-        # Si ``indexing.source`` no es AS400, el check debe skipear sin
-        # tocar pyodbc.
-        @dataclass
-        class _FakeCsvSource:
-            kind: str = "csv"
-
-        cfg = _StubConfig(indexing=_StubIndexing(source=_FakeCsvSource()))
-        result = _check_as400_connectivity(cfg, _secrets())  # type: ignore[arg-type]
+    def test_skips_when_no_as400_connection(self) -> None:
+        # Sin conexiones AS400 el check debe skipear sin tocar pyodbc.
+        result = _check_as400_connectivity(_StubConfig(refs=()), _secrets())  # type: ignore[arg-type]
         assert result.status == CheckStatus.SKIP
 
     def test_fails_when_credentials_missing(self) -> None:
-        config = _make_config_with_as400_source()
-        no_creds = Secrets(
-            cmis_username="cmis",
-            cmis_password="cmis",
-            as400_username="",
-            as400_password="",
-        )
-        result = _check_as400_connectivity(config, no_creds)  # type: ignore[arg-type]
+        config = _StubConfig(refs=(_ref("as400", "indexing"),))
+        result = _check_as400_connectivity(config, _secrets())  # type: ignore[arg-type]
         assert result.status == CheckStatus.FAIL
         assert "credentials" in result.message.lower()
+        assert "AS400_USERNAME" in result.message
+
+
+class TestAs400ConnectivityPerConnection:
+    """129 E5 — se prueba CADA conexión as400 (por alias + sitio)."""
+
+    def test_second_connection_without_credentials_fails_naming_site(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_source(monkeypatch)
+        config = _StubConfig(
+            refs=(_ref("rvi", "indexing"), _ref("personas", "metadata:clientes", host="h2"))
+        )
+        result = _check_as400_connectivity(config, _secrets(rvi=("u", "p")))  # type: ignore[arg-type]
+        assert result.status == CheckStatus.FAIL
+        assert "metadata:clientes" in result.message
+        assert "PERSONAS_USERNAME" in result.message
+        assert result.details["rvi"].startswith("PASS")
+        assert result.details["personas"].startswith("FAIL")
+
+    def test_same_alias_and_spec_probed_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured = _patch_source(monkeypatch)
+        config = _StubConfig(refs=(_ref("as400", "indexing"), _ref("as400", "tracking.as400_sync")))
+        result = _check_as400_connectivity(config, _secrets(as400=("u", "p")))  # type: ignore[arg-type]
+        assert result.status == CheckStatus.PASS
+        assert len(captured) == 1
+        assert "indexing" in result.details["as400"]
+        assert "tracking.as400_sync" in result.details["as400"]

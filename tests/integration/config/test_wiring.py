@@ -9,7 +9,7 @@ import httpx
 import pytest
 import respx
 
-from cmcourier.config.loader import Secrets, load_config
+from cmcourier.config.loader import Credential, Secrets, load_config
 from cmcourier.config.wiring import build_pipeline
 from cmcourier.domain.exceptions import ConfigurationError
 from cmcourier.orchestrators.staged import StagedPipeline
@@ -97,7 +97,7 @@ def _write_yaml(tmp_path: Path, *, triggers_path: Path | None = None) -> Path:
 
 
 def _secrets() -> Secrets:
-    return Secrets(cmis_username="tester", cmis_password="secret-not-real")
+    return Secrets({"cmis": Credential("tester", "secret-not-real")})
 
 
 def _register_cmis_for_doc(txn: str) -> None:
@@ -158,10 +158,10 @@ class TestBuildPipeline:
         yaml_path.write_text(text)
         config = load_config(yaml_path)
         secrets = Secrets(
-            cmis_username="tester",
-            cmis_password="secret-not-real",
-            as400_username="as400tester",
-            as400_password="as400secret",
+            {
+                "cmis": Credential("tester", "secret-not-real"),
+                "as400": Credential("as400tester", "as400secret"),
+            }
         )
         pipeline = build_pipeline(config, secrets)
         # Inspect MetadataService's registered sources.
@@ -188,7 +188,10 @@ class TestBuildPipeline:
         # _secrets() returns AS400 creds empty.
         with pytest.raises(ConfigurationError) as ei:
             build_pipeline(config, _secrets())
-        assert ei.value.context["alias"] == "customers"
+        # 129: `alias` es el de la CONEXIÓN (implícito `as400` para inline) y
+        # `site` dice qué sitio la necesitaba.
+        assert ei.value.context["alias"] == "as400"
+        assert ei.value.context["site"] == "metadata:customers"
         assert "AS400_USERNAME" in ei.value.context["missing_vars"]
 
     def test_as400_metadata_source_with_query_builds(self, tmp_path: Path) -> None:
@@ -210,10 +213,10 @@ class TestBuildPipeline:
         yaml_path.write_text(text)
         config = load_config(yaml_path)
         secrets = Secrets(
-            cmis_username="tester",
-            cmis_password="secret-not-real",
-            as400_username="as400tester",
-            as400_password="as400secret",
+            {
+                "cmis": Credential("tester", "secret-not-real"),
+                "as400": Credential("as400tester", "as400secret"),
+            }
         )
         pipeline = build_pipeline(config, secrets)
         registry = pipeline._metadata_service._sources_registry  # type: ignore[attr-defined]
@@ -329,7 +332,7 @@ class TestBuildRvabrepSource048:
 
         yaml_path = _write_yaml(tmp_path)
         config = load_config(yaml_path)
-        src = _build_rvabrep_source(config.indexing, _secrets())
+        src = _build_rvabrep_source(config, _secrets())
         try:
             assert isinstance(src, TabularDataSource)
         finally:
@@ -358,13 +361,8 @@ class TestBuildRvabrepSource048:
         )
         yaml_path.write_text(text)
         config = load_config(yaml_path)
-        secrets = Secrets(
-            cmis_username="t",
-            cmis_password="x",
-            as400_username="a400",
-            as400_password="a400pw",
-        )
-        src = _build_rvabrep_source(config.indexing, secrets)
+        secrets = Secrets({"cmis": Credential("t", "x"), "as400": Credential("a400", "a400pw")})
+        src = _build_rvabrep_source(config, secrets)
         try:
             assert isinstance(src, As400DataSource)
         finally:
@@ -391,7 +389,7 @@ class TestBuildRvabrepSource048:
         config = load_config(yaml_path)
         # _secrets() carries no AS400 creds.
         with pytest.raises(ConfigurationError) as ei:
-            _build_rvabrep_source(config.indexing, _secrets())
+            _build_rvabrep_source(config, _secrets())
         assert "AS400_USERNAME" in ei.value.context["missing_vars"]
 
 
@@ -435,12 +433,7 @@ class TestNiarvilogColumnsWiring049:
         assert "as400_sync:" in text, "replace target did not match"
         yaml_path.write_text(text)
         config = load_config(yaml_path)
-        secrets = Secrets(
-            cmis_username="t",
-            cmis_password="x",
-            as400_username="a400",
-            as400_password="a400pw",
-        )
+        secrets = Secrets({"cmis": Credential("t", "x"), "as400": Credential("a400", "a400pw")})
         sqlite_store = SQLiteTrackingStore(tmp_path / "tracking.db")
         try:
             # 096: _build_idempotency_coordinator devuelve la tupla

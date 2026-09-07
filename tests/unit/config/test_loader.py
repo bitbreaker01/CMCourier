@@ -7,7 +7,7 @@ from textwrap import dedent
 
 import pytest
 
-from cmcourier.config.loader import Secrets, load_config, load_secrets
+from cmcourier.config.loader import Credential, Secrets, load_config, load_secrets
 from cmcourier.config.schema import PipelineConfig
 from cmcourier.domain.exceptions import ConfigurationError
 
@@ -176,13 +176,14 @@ class TestLoadSecrets:
     def test_happy_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CMIS_USERNAME", "tester")
         monkeypatch.setenv("CMIS_PASSWORD", "topsecret")
+        monkeypatch.delenv("AS400_USERNAME", raising=False)
+        monkeypatch.delenv("AS400_PASSWORD", raising=False)
         secrets = load_secrets()
-        assert secrets == Secrets(
-            cmis_username="tester",
-            cmis_password="topsecret",
-            as400_username="",
-            as400_password="",
-        )
+        assert secrets.cmis == Credential(username="tester", password="topsecret")
+        assert secrets.cmis_username == "tester"
+        assert secrets.cmis_password == "topsecret"
+        assert secrets.get("as400") is None
+        assert secrets.get("cmis") == secrets.cmis
 
     def test_missing_cmis_username_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CMIS_USERNAME", raising=False)
@@ -198,20 +199,90 @@ class TestLoadSecrets:
             load_secrets()
         assert "CMIS_PASSWORD" in ei.value.context["missing_vars"]
 
-    def test_as400_optional(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_as400_optional_without_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Compat: sin config se lee el alias implícito `as400` (inspect)."""
         monkeypatch.setenv("CMIS_USERNAME", "tester")
         monkeypatch.setenv("CMIS_PASSWORD", "x")
         monkeypatch.setenv("AS400_USERNAME", "a400user")
         monkeypatch.setenv("AS400_PASSWORD", "a400pass")
         secrets = load_secrets()
-        assert secrets.as400_username == "a400user"
-        assert secrets.as400_password == "a400pass"
+        assert secrets.require("as400") == Credential("a400user", "a400pass")
 
-    def test_secrets_frozen(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import dataclasses
-
+    def test_reads_every_alias_the_config_needs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """E4 — `<ALIAS>_USERNAME/<ALIAS>_PASSWORD` por cada alias referenciado."""
+        yaml_path = _write_valid_yaml(tmp_path)
+        text = yaml_path.read_text()
+        text = text.replace(
+            f"indexing:\n  source:\n    kind: csv\n    csv_path: {tmp_path / 'rvabrep.csv'}\n",
+            "connections:\n"
+            "  rvi:\n"
+            "    kind: as400\n"
+            "    host: as400.bank.test\n"
+            "  clientes_sql:\n"
+            "    kind: mssql\n"
+            "    host: sql.bank.test\n"
+            "    database: cmcourier\n"
+            "indexing:\n"
+            "  source:\n"
+            "    kind: as400\n"
+            "    connection: rvi\n"
+            '    query: "SELECT * FROM RVILIB.RVABREP"\n',
+        )
+        text = text.replace(
+            "    - alias: clients\n",
+            "    - kind: as400\n"
+            "      alias: personas\n"
+            "      as400_connection: rvi\n"
+            "      table: PERSONAS\n"
+            "    - alias: clients\n",
+        )
+        yaml_path.write_text(text)
+        config = load_config(yaml_path)
+        assert config.required_aliases() == ("rvi",)
         monkeypatch.setenv("CMIS_USERNAME", "tester")
         monkeypatch.setenv("CMIS_PASSWORD", "x")
+        monkeypatch.setenv("RVI_USERNAME", "rviuser")
+        monkeypatch.setenv("RVI_PASSWORD", "rvipass")
+        monkeypatch.delenv("AS400_USERNAME", raising=False)
+        monkeypatch.delenv("AS400_PASSWORD", raising=False)
+        secrets = load_secrets(config)
+        assert secrets.get("rvi") == Credential("rviuser", "rvipass")
+        # `as400` no es requerido por esta config: no se lee.
+        assert secrets.get("as400") is None
+        assert secrets.get("clientes_sql") is None
+
+    def test_get_is_none_when_any_half_is_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CMIS_USERNAME", "tester")
+        monkeypatch.setenv("CMIS_PASSWORD", "x")
+        monkeypatch.setenv("AS400_USERNAME", "a400user")
+        monkeypatch.setenv("AS400_PASSWORD", "   ")
         secrets = load_secrets()
+        assert secrets.get("as400") is None
+        with pytest.raises(ConfigurationError) as ei:
+            secrets.require("as400")
+        assert ei.value.context["missing_vars"] == ["AS400_USERNAME", "AS400_PASSWORD"]
+
+    def test_require_names_alias_env_vars(self) -> None:
+        secrets = Secrets({"cmis": Credential("u", "p")})
+        with pytest.raises(ConfigurationError) as ei:
+            secrets.require("clientes_sql")
+        assert ei.value.context["missing_vars"] == [
+            "CLIENTES_SQL_USERNAME",
+            "CLIENTES_SQL_PASSWORD",
+        ]
+        assert "clientes_sql" in str(ei.value)
+
+    def test_secrets_frozen(self) -> None:
+        import dataclasses
+
+        secrets = Secrets({"cmis": Credential("u", "p")})
         with pytest.raises(dataclasses.FrozenInstanceError):
-            secrets.cmis_username = "other"  # type: ignore[misc]
+            secrets.credentials = {}  # type: ignore[misc]
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            secrets.cmis.username = "other"  # type: ignore[misc]
+
+    def test_secrets_requires_cmis(self) -> None:
+        with pytest.raises(ValueError, match="cmis"):
+            Secrets({})

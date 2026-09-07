@@ -18,13 +18,43 @@
 #   * Unknown keys are REJECTED (`extra="forbid"`) — a typo'd key fails
 #     fast at load time rather than being silently ignored.
 #
-# CREDENTIALS NEVER LIVE HERE. They are read from environment variables:
-#   * CMIS_USERNAME / CMIS_PASSWORD   — always required
-#   * AS400_USERNAME / AS400_PASSWORD — required only when an AS400 source
-#                                       or `tracking.as400_sync` is used
+# CREDENTIALS NEVER LIVE HERE. They are read from environment variables,
+# one pair per connection ALIAS, upper-cased: <ALIAS>_USERNAME / <ALIAS>_PASSWORD.
+#   * CMIS_USERNAME / CMIS_PASSWORD   — always required (alias `cmis`)
+#   * AS400_USERNAME / AS400_PASSWORD — implicit alias `as400` of every connection
+#                                       written INLINE (indexing.source.connection,
+#                                       metadata.sources[].as400_connection,
+#                                       tracking.as400_sync.connection)
+#   * RVI_USERNAME / RVI_PASSWORD     — a `connections.rvi` entry (see below)
 #
 # Source of truth: src/cmcourier/config/schema.py
 # =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# connections  (default: {})  — 129: registry of named connections.
+# Key = alias, matching ^[a-z][a-z0-9_]{0,31}$ (`cmis` is reserved).
+# Any site that takes an inline connection object also accepts a `str` alias
+# from this registry; the loader checks the alias exists and its `kind`
+# matches what the site expects (an as400 source cannot point to mssql).
+# Credentials: <ALIAS>_USERNAME / <ALIAS>_PASSWORD.
+# -----------------------------------------------------------------------------
+connections:
+  rvi:                                     # → RVI_USERNAME / RVI_PASSWORD
+    kind: as400
+    host: as400.bank.example               # (REQUIRED)
+    port: 446                              # (default: 446)  range 1..65535
+    database: RVILIB                       # (default: "RVILIB")
+    driver: "iSeries Access ODBC Driver"   # (default: "iSeries Access ODBC Driver")
+    table: null                            # (default: null) optional bare-table hint
+  clientes_sql:                            # → CLIENTES_SQL_USERNAME / CLIENTES_SQL_PASSWORD
+    kind: mssql                            # 130: SQL Server via ODBC
+    host: 127.0.0.1                        # (REQUIRED)
+    port: 1433                             # (default: 1433)
+    database: cmcourier                    # (REQUIRED)
+    driver: "ODBC Driver 18 for SQL Server"  # (default) msodbcsql18
+    encrypt: true                          # (default: true)  Encrypt=yes
+    trust_server_certificate: false        # (default: false) yes → accept self-signed certs
 
 
 # -----------------------------------------------------------------------------
@@ -79,7 +109,8 @@ indexing:
     # filters, but its OUTPUT COLUMNS must be RVABREP-shaped (the `columns`
     # map below is applied to the result set exactly as to a CSV).
     # kind: as400
-    # connection:
+    # connection: rvi                      # alias from `connections:` (129) …
+    # connection:                          # … OR an inline object (implicit alias `as400`)
     #   host: as400.bank.example           # (REQUIRED) AS400 host / system name
     #   port: 446                          # (default: 446)  range 1..65535
     #   database: RVILIB                   # (default: "RVILIB")
@@ -200,7 +231,7 @@ metadata:
       csv_path: /path/to/clients.csv        # (REQUIRED) must exist
     - kind: as400                          # (REQUIRED for an AS400 source)
       alias: branch_lookup                 # (REQUIRED) the name used in `as400:branch_lookup`
-      as400_connection:                    # (REQUIRED)
+      as400_connection:                    # (REQUIRED) inline object OR alias, e.g. `rvi`
         host: as400.bank.example
         port: 446
         database: RVILIB
@@ -294,7 +325,7 @@ tracking:
   # When `enabled: true`, `connection` becomes REQUIRED.
   as400_sync:
     enabled: false                         # (default: false)
-    connection:                            # (default: null; REQUIRED when enabled)
+    connection:                            # (default: null; REQUIRED when enabled) object OR alias
       host: as400.bank.example
       port: 446
       database: RVILIB

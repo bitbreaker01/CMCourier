@@ -13,6 +13,7 @@ Convenciones de los rangos:
 
 | Field | Type | Default | Constraint | Description |
 |-------|------|---------|------------|-------------|
+| `connections` | `dict[str, ConnectionConfig]` | `{}` | alias `^[a-z][a-z0-9_]{0,31}$`, `cmis` reservado | Registro de conexiones por alias (129). |
 | `trigger` | `TriggerConfigUnion` (required) | — | discriminated by `kind` | Strategy de S0. |
 | `indexing` | `IndexingConfig` (required) | — | — | Config de S1 + source RVABREP. |
 | `mapping` | `MappingConfig` (required) | — | — | Modelo Documental (S2). |
@@ -23,6 +24,64 @@ Convenciones de los rangos:
 | `observability` | `ObservabilityConfig` | factory | — | Logs + métricas. |
 | `processing` | `ProcessingConfig` | factory | — | Modo + lanes + workers. |
 | `batch_size` | int | `1000` | `≥ 1` | Tamaño del chunk lógico. |
+
+---
+
+## Connections (`connections`, 129)
+
+Registro opcional de conexiones con **alias**. Cada sitio que hoy acepta una
+conexión inline (`indexing.source.connection`,
+`metadata.sources[].as400_connection`, `tracking.as400_sync.connection`)
+acepta también un `str` con el alias de este registro. Un validador de
+`PipelineConfig` verifica que el alias exista y que su `kind` sea el que el
+sitio espera (una fuente `as400` no puede apuntar a una conexión `mssql`).
+
+```yaml
+connections:
+  rvi:                       # alias → env vars RVI_USERNAME / RVI_PASSWORD
+    kind: as400
+    host: as400.example.com
+  clientes_sql:              # alias → CLIENTES_SQL_USERNAME / CLIENTES_SQL_PASSWORD
+    kind: mssql
+    host: 127.0.0.1
+    database: cmcourier
+    trust_server_certificate: true
+
+indexing:
+  source:
+    kind: as400
+    connection: rvi          # referencia por alias
+    query: "SELECT ..."
+```
+
+### `ConnectionConfig` (discriminated by `kind`)
+
+| kind | Modelo | Notas |
+|------|--------|-------|
+| `as400` | [`As400ConnectionConfig`](#as400connectionconfig) | El mismo objeto que se usa inline. |
+| `mssql` | [`MssqlConnectionConfig`](#mssqlconnectionconfig) | SQL Server vía ODBC (130). |
+
+### `MssqlConnectionConfig`
+
+| Field | Type | Default | Constraint | Description |
+|-------|------|---------|------------|-------------|
+| `kind` | Literal `"mssql"` | `"mssql"` | — | — |
+| `host` | str (required) | — | — | Hostname / IP del SQL Server. |
+| `port` | int | `1433` | `1..65535` | — |
+| `database` | str (required) | — | — | Base a la que se conecta. |
+| `driver` | str | `"ODBC Driver 18 for SQL Server"` | — | Nombre del driver ODBC (msodbcsql18). |
+| `encrypt` | bool | `True` | — | `Encrypt=yes/no` en la connection string. |
+| `trust_server_certificate` | bool | `False` | — | `TrustServerCertificate=yes` para certificados self-signed (entornos locales). |
+
+### `ConnectionRef` — cómo se resuelve
+
+`PipelineConfig.connection_refs()` devuelve UNA entrada por sitio que use
+una conexión, ya resuelta (`alias`, `kind`, `spec`, `site`). Las conexiones
+inline tienen alias implícito **`as400`** — por eso el YAML de siempre sigue
+leyendo `AS400_USERNAME` / `AS400_PASSWORD` sin cambios.
+`required_aliases()` deduplica los alias en orden y `connection_ref(site)`
+devuelve la entrada de un sitio (`indexing`, `metadata:<alias de fuente>`,
+`tracking.as400_sync`). Doctor, consola y `sync_ops` derivan de ahí.
 
 ---
 
@@ -94,7 +153,7 @@ Sin campos extra — los parámetros (`shortname`, `system`, `cif`) vienen del C
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `kind` | Literal `"as400"` (required) | — | — |
-| `connection` | `As400ConnectionConfig` (required) | — | Conexión ODBC. |
+| `connection` | `As400ConnectionConfig \| str` (required) | — | Conexión ODBC inline o alias de `connections` (129). |
 | `query` | str (required) | — | SQL que devuelve columnas con shape RVABREP. |
 
 ### `As400ConnectionConfig`
@@ -216,7 +275,7 @@ Reglas:
 |-------|------|---------|------------|-------------|
 | `kind` | Literal `"as400"` (required) | — | — | — |
 | `alias` | str (required) | — | — | — |
-| `as400_connection` | `As400ConnectionConfig` (required) | — | — | — |
+| `as400_connection` | `As400ConnectionConfig \| str` (required) | — | — | Inline o alias de `connections` (129). |
 | `table` | `str \| None` | `None` | `min_length=1` | Modo table. |
 | `query` | `str \| None` | `None` | `min_length=1` | Modo query. |
 
@@ -300,7 +359,7 @@ Validators:
 | Field | Type | Default | Constraint | Description |
 |-------|------|---------|------------|-------------|
 | `enabled` | bool | `False` | — | Activa sync (034). |
-| `connection` | `As400ConnectionConfig \| None` | `None` | required if `enabled=true` | Validator lo verifica. |
+| `connection` | `As400ConnectionConfig \| str \| None` | `None` | required if `enabled=true` | Inline o alias de `connections` (129). Validator lo verifica. |
 | `library` | str | `"RVILIB"` | DB2 identifier | Library de NIARVILOG. |
 | `table` | str | `"NIARVILOG"` | DB2 identifier | — |
 | `columns` | `NiarvilogColumnsModel` | factory | — | Mapeo lógico → físico. |
@@ -405,16 +464,26 @@ Coerción legacy: `system_metrics: false` (bool en YAML pre-026) se promueve a `
 
 ---
 
-## Secrets (env vars, `config/env.py:Secrets`)
+## Secrets (env vars, `config/loader.py:Secrets`)
 
-Las credenciales NUNCA viven en el YAML.
+Las credenciales NUNCA viven en el YAML. Desde 129 `Secrets` es un mapa
+`alias → Credential(username, password)` y el esquema de env vars es
+uniforme: la credencial del alias `X` se lee de **`X_USERNAME` /
+`X_PASSWORD`** con el alias en MAYÚSCULAS.
 
-| Env var | Fallback | Default | Description |
-|---------|----------|---------|-------------|
-| `CMIS_USERNAME` | `CMIS_USER` | required for CMIS | Usuario Browser Binding. |
-| `CMIS_PASSWORD` | `CMIS_PASS` | required for CMIS | Password. |
-| `AS400_USERNAME` | — | `""` | Usuario ODBC. Required cuando hay source AS400. |
-| `AS400_PASSWORD` | — | `""` | Password ODBC. Idem. |
+| Alias | Env vars | Obligatoria | Description |
+|-------|----------|-------------|-------------|
+| `cmis` | `CMIS_USERNAME` / `CMIS_PASSWORD` | sí (`load_secrets` falla si faltan) | Usuario Browser Binding del destino. |
+| `as400` (implícito) | `AS400_USERNAME` / `AS400_PASSWORD` | cuando algún sitio usa una conexión inline | Alias implícito de toda conexión escrita inline. |
+| `<alias>` del registro | `<ALIAS>_USERNAME` / `<ALIAS>_PASSWORD` | cuando algún sitio lo referencia | Ej. `clientes_sql` → `CLIENTES_SQL_USERNAME` / `CLIENTES_SQL_PASSWORD`. |
+
+`load_secrets(config)` lee `cmis` más cada alias de
+`config.required_aliases()`. Las credenciales de conexión son opcionales al
+cargar: la ausencia se detecta al construir el pipeline, con
+`secrets.require(alias)`, que levanta `ConfigurationError` con
+`missing_vars=[<ALIAS>_USERNAME, <ALIAS>_PASSWORD]` y el `site` que la
+necesitaba. `secrets.get(alias)` devuelve `None` si falta cualquiera de las
+dos mitades (un usuario sin password NO cuenta como credencial).
 
 ---
 

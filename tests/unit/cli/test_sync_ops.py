@@ -14,7 +14,8 @@ from cmcourier.cli.sync_ops import (
     sync_status,
     sync_unavailable_reason,
 )
-from cmcourier.config.loader import Secrets
+from cmcourier.config.loader import Credential, Secrets
+from cmcourier.config.schema import As400ConnectionConfig, ConnectionRef
 
 pytestmark = pytest.mark.unit
 
@@ -23,11 +24,21 @@ def _config(*, enabled: bool = True, connection: str | None = "DSN=x") -> MagicM
     cfg = MagicMock()
     cfg.tracking.as400_sync.enabled = enabled
     cfg.tracking.as400_sync.connection = connection
+    # 129: sync_ops resuelve la conexión vía connection_ref("tracking.as400_sync").
+    ref = None
+    if connection is not None:
+        ref = ConnectionRef(
+            alias="as400",
+            kind="as400",
+            spec=As400ConnectionConfig(host="as400.test"),
+            site="tracking.as400_sync",
+        )
+    cfg.connection_ref.return_value = ref
     return cfg
 
 
 def _secrets(user: str = "u", pwd: str = "p") -> Secrets:
-    return Secrets(cmis_username="c", cmis_password="c", as400_username=user, as400_password=pwd)
+    return Secrets({"cmis": Credential("c", "c"), "as400": Credential(user, pwd)})
 
 
 class TestAvailability:

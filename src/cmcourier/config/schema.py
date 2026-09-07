@@ -20,43 +20,52 @@ ocurre en :mod:`cmcourier.config.wiring`.
 from __future__ import annotations
 
 __all__ = [
+    "AnyConnectionConfig",
     "As400ConnectionConfig",
     "As400MetadataSourceConfig",
     "As400RvabrepSource",
     "AssemblyConfig",
-    "SyntheticBandConfig",
-    "SyntheticContentConfig",
     "AutoTuneConfig",
     "CmisConfigModel",
+    "ConnectionConfig",
+    "ConnectionKind",
+    "ConnectionRef",
     "CsvMetadataSourceConfig",
     "CsvRvabrepSource",
     "CsvTriggerConfig",
     "FieldConfig",
     "FieldSourceItem",
     "HeavyLightLanesConfig",
+    "INLINE_CONNECTION_ALIAS",
     "IndexingColumnsModel",
     "IndexingConfig",
     "IndexingSourceConfig",
     "LocalScanTriggerConfig",
     "MappingConfig",
     "MetadataCacheConfig",
-    "SingleDocTriggerConfig",
     "MetadataConfigModel",
     "MetadataSourceConfig",
+    "MssqlConnectionConfig",
     "NiarvilogColumnsModel",
     "ObservabilityConfig",
     "PipelineConfig",
+    "RESERVED_CONNECTION_ALIASES",
     "RvabrepFiltersModel",
     "RvabrepSourceUnion",
     "RvabrepTriggerConfig",
+    "SingleDocTriggerConfig",
     "StreamingConfig",
+    "SyntheticBandConfig",
+    "SyntheticContentConfig",
     "TrackingConfig",
     "TriggerConfigUnion",
     "TriggerCsvConfig",
     "ValidationModel",
+    "credential_env_vars",
 ]
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -102,11 +111,74 @@ class As400ConnectionConfig(BaseModel):
     """Parámetros de conexión ODBC a AS400. Las credenciales viven en env vars."""
 
     model_config = _STRICT
+    kind: Literal["as400"] = "as400"
     host: str
     port: int = Field(default=446, ge=1, le=65535)
     database: str = "RVILIB"
     driver: str = "iSeries Access ODBC Driver"
     table: str | None = None
+
+
+class MssqlConnectionConfig(BaseModel):
+    """129 — parámetros de conexión ODBC a SQL Server (msodbcsql18).
+
+    ``encrypt`` / ``trust_server_certificate`` mapean a ``Encrypt=`` /
+    ``TrustServerCertificate=`` de la connection string. El driver 18
+    cifra por defecto y rechaza certificados autofirmados — en un banco
+    local se setea ``trust_server_certificate: true``.
+    """
+
+    model_config = _STRICT
+    kind: Literal["mssql"] = "mssql"
+    host: str
+    port: int = Field(default=1433, ge=1, le=65535)
+    database: str
+    driver: str = "ODBC Driver 18 for SQL Server"
+    encrypt: bool = True
+    trust_server_certificate: bool = False
+
+
+AnyConnectionConfig = As400ConnectionConfig | MssqlConnectionConfig
+ConnectionKind = Literal["as400", "mssql"]
+
+ConnectionConfig = Annotated[
+    As400ConnectionConfig | MssqlConnectionConfig,
+    Field(discriminator="kind"),
+]
+
+# Alias del registro `connections:`: minúscula + dígitos + underscore, así
+# `<ALIAS>_USERNAME` es un nombre de env var válido en cualquier shell.
+_CONNECTION_ALIAS_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
+# Alias implícito de toda conexión inline (compat: `AS400_USERNAME/PASSWORD`).
+INLINE_CONNECTION_ALIAS = "as400"
+# `cmis` es el destino, con su propio bloque `cmis:` y sus env vars `CMIS_*`.
+RESERVED_CONNECTION_ALIASES = frozenset({"cmis"})
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionRef:
+    """129 — una conexión que un sitio de la config necesita, ya resuelta.
+
+    ``site`` es ``indexing`` / ``metadata:<alias de fuente>`` /
+    ``tracking.as400_sync``. ``alias`` es la clave del registro o
+    :data:`INLINE_CONNECTION_ALIAS` para conexiones inline; de él salen las
+    env vars de credenciales (``<ALIAS>_USERNAME`` / ``<ALIAS>_PASSWORD``).
+    """
+
+    alias: str
+    kind: ConnectionKind
+    spec: AnyConnectionConfig
+    site: str
+
+    @property
+    def env_vars(self) -> tuple[str, str]:
+        return credential_env_vars(self.alias)
+
+
+def credential_env_vars(alias: str) -> tuple[str, str]:
+    """Nombres de las env vars de credenciales del alias (``X_USERNAME``, ``X_PASSWORD``)."""
+    prefix = alias.upper()
+    return (f"{prefix}_USERNAME", f"{prefix}_PASSWORD")
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +303,8 @@ class As400RvabrepSource(BaseModel):
 
     model_config = _STRICT
     kind: Literal["as400"]
-    connection: As400ConnectionConfig
+    # 129: objeto inline (alias implícito `as400`) o alias del registro.
+    connection: As400ConnectionConfig | str
     query: str
 
 
@@ -338,7 +411,8 @@ class As400MetadataSourceConfig(BaseModel):
     model_config = _STRICT
     kind: Literal["as400"]
     alias: str
-    as400_connection: As400ConnectionConfig
+    # 129: objeto inline (alias implícito `as400`) o alias del registro.
+    as400_connection: As400ConnectionConfig | str
     table: str | None = Field(default=None, min_length=1)
     query: str | None = Field(default=None, min_length=1)
 
@@ -650,7 +724,8 @@ class As400SyncConfig(BaseModel):
 
     model_config = _STRICT
     enabled: bool = False
-    connection: As400ConnectionConfig | None = None
+    # 129: objeto inline (alias implícito `as400`) o alias del registro.
+    connection: As400ConnectionConfig | str | None = None
     library: str = "RVILIB"
     table: str = "NIARVILOG"
     columns: NiarvilogColumnsModel = Field(default_factory=NiarvilogColumnsModel)
@@ -849,6 +924,10 @@ class PipelineConfig(BaseModel):
     """Config top-level que agrega cada bloque de configuración por `stage`."""
 
     model_config = _STRICT
+    # 129: registro de conexiones con alias. Las tres inserciones
+    # (`indexing.source.connection`, `metadata.sources[].as400_connection`,
+    # `tracking.as400_sync.connection`) pueden apuntar acá por alias.
+    connections: dict[str, ConnectionConfig] = Field(default_factory=dict)
     trigger: TriggerConfigUnion
     indexing: IndexingConfig
     mapping: MappingConfig
@@ -863,3 +942,83 @@ class PipelineConfig(BaseModel):
     # permanente. Los comandos headless existentes la ignoran.
     environment: Literal["staging", "prd"] = "staging"
     batch_size: int = Field(default=1000, ge=1)
+
+    @field_validator("connections")
+    @classmethod
+    def _check_aliases(
+        cls, value: dict[str, AnyConnectionConfig]
+    ) -> dict[str, AnyConnectionConfig]:
+        for alias in value:
+            if alias in RESERVED_CONNECTION_ALIASES:
+                raise ValueError(f"connection alias {alias!r} is reserved")
+            if not _CONNECTION_ALIAS_RE.fullmatch(alias):
+                raise ValueError(
+                    f"connection alias {alias!r} is invalid "
+                    "(lowercase letter, then lowercase letters / digits / _, 32 chars max)"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _check_connection_references(self) -> PipelineConfig:
+        # Resolver cada sitio valida existencia + kind; el resultado se tira.
+        self.connection_refs()
+        return self
+
+    def connection_refs(self) -> tuple[ConnectionRef, ...]:
+        """129 — una entrada por sitio que usa una conexión, en orden de config.
+
+        Única fuente de verdad de "qué conexiones necesita esta config":
+        la consola, el doctor y `sync_ops` derivan de acá.
+        """
+        sites: list[tuple[str, AnyConnectionConfig | str, ConnectionKind, str]] = []
+        source = self.indexing.source
+        if isinstance(source, As400RvabrepSource):
+            sites.append(("indexing", source.connection, "as400", "indexing.source.connection"))
+        for meta_source in self.metadata.sources:
+            if isinstance(meta_source, As400MetadataSourceConfig):
+                sites.append(
+                    (
+                        f"metadata:{meta_source.alias}",
+                        meta_source.as400_connection,
+                        "as400",
+                        f"metadata.sources[{meta_source.alias}].as400_connection",
+                    )
+                )
+        sync = self.tracking.as400_sync
+        if sync.connection is not None:
+            sites.append(
+                ("tracking.as400_sync", sync.connection, "as400", "tracking.as400_sync.connection")
+            )
+        return tuple(
+            self._resolve_site(site, value, expected, path) for site, value, expected, path in sites
+        )
+
+    def _resolve_site(
+        self,
+        site: str,
+        value: AnyConnectionConfig | str,
+        expected: ConnectionKind,
+        path: str,
+    ) -> ConnectionRef:
+        if not isinstance(value, str):
+            return ConnectionRef(INLINE_CONNECTION_ALIAS, value.kind, value, site)
+        spec = self.connections.get(value)
+        if spec is None:
+            raise ValueError(
+                f"{path}: unknown connection alias {value!r} "
+                f"(declared: {sorted(self.connections) or 'none'})"
+            )
+        if spec.kind != expected:
+            raise ValueError(
+                f"{path}: connection {value!r} is kind {spec.kind!r}, "
+                f"this site requires kind {expected!r}"
+            )
+        return ConnectionRef(value, spec.kind, spec, site)
+
+    def required_aliases(self) -> tuple[str, ...]:
+        """Aliases de conexión que la config usa, deduplicados en orden de aparición."""
+        return tuple(dict.fromkeys(ref.alias for ref in self.connection_refs()))
+
+    def connection_ref(self, site: str) -> ConnectionRef | None:
+        """La conexión de un sitio concreto (``indexing`` / ``metadata:<alias>`` / ...)."""
+        return next((ref for ref in self.connection_refs() if ref.site == site), None)

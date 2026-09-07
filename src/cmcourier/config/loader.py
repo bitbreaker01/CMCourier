@@ -11,27 +11,77 @@ NUNCA en el archivo YAML.
 
 from __future__ import annotations
 
-__all__ = ["Secrets", "load_config", "load_secrets"]
+__all__ = ["Credential", "Secrets", "load_config", "load_secrets"]
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 from pydantic import ValidationError
 
-from cmcourier.config.schema import PipelineConfig
+from cmcourier.config.schema import (
+    INLINE_CONNECTION_ALIAS,
+    PipelineConfig,
+    credential_env_vars,
+)
 from cmcourier.domain.exceptions import ConfigurationError
 
 
 @dataclass(frozen=True, slots=True)
-class Secrets:
-    """Credenciales leídas desde variables de entorno al arrancar."""
+class Credential:
+    """Un par usuario / contraseña de una conexión (o del destino CMIS)."""
 
-    cmis_username: str
-    cmis_password: str
-    as400_username: str = ""
-    as400_password: str = ""
+    username: str
+    password: str
+
+
+@dataclass(frozen=True, slots=True)
+class Secrets:
+    """129 — credenciales por alias de conexión, leídas de env vars al arrancar.
+
+    ``cmis`` está SIEMPRE presente (es el destino). El resto de los aliases
+    son los que la config referencia (:meth:`PipelineConfig.connection_refs`)
+    y se leen de ``<ALIAS>_USERNAME`` / ``<ALIAS>_PASSWORD``; los que
+    falten se detectan al construir el adapter con :meth:`require`.
+    """
+
+    credentials: Mapping[str, Credential]
+
+    def __post_init__(self) -> None:
+        if "cmis" not in self.credentials:
+            raise ValueError("Secrets requires the 'cmis' credential")
+
+    @property
+    def cmis(self) -> Credential:
+        return self.credentials["cmis"]
+
+    @property
+    def cmis_username(self) -> str:
+        return self.cmis.username
+
+    @property
+    def cmis_password(self) -> str:
+        return self.cmis.password
+
+    def get(self, alias: str) -> Credential | None:
+        """La credencial del alias, o ``None`` si falta o alguna mitad está vacía."""
+        credential = self.credentials.get(alias)
+        if credential is None or not credential.username or not credential.password:
+            return None
+        return credential
+
+    def require(self, alias: str) -> Credential:
+        """Como :meth:`get` pero levanta :class:`ConfigurationError` nombrando las env vars."""
+        credential = self.get(alias)
+        if credential is None:
+            raise ConfigurationError(
+                f"credentials for connection {alias!r} are missing or empty",
+                alias=alias,
+                missing_vars=list(credential_env_vars(alias)),
+            )
+        return credential
 
 
 def load_config(path: Path) -> PipelineConfig:
@@ -104,23 +154,35 @@ def _inject_default_kinds(data: dict[str, object]) -> None:
                     source["kind"] = "csv"
 
 
-def load_secrets() -> Secrets:
-    """Lee CMIS_USERNAME / CMIS_PASSWORD (requeridos) + AS400_* (opcionales)."""
-    cmis_username = os.environ.get("CMIS_USERNAME", "").strip()
-    cmis_password = os.environ.get("CMIS_PASSWORD", "").strip()
-    missing: list[str] = []
-    if not cmis_username:
-        missing.append("CMIS_USERNAME")
-    if not cmis_password:
-        missing.append("CMIS_PASSWORD")
-    if missing:
+def load_secrets(config: PipelineConfig | None = None, *, require_cmis: bool = True) -> Secrets:
+    """Lee ``CMIS_USERNAME`` / ``CMIS_PASSWORD`` (requeridos) + una credencial
+    por cada alias que *config* necesita (opcionales).
+
+    Sin *config* lee sólo ``cmis`` + el alias implícito ``as400`` —
+    compat para comandos que no cargan YAML. ``require_cmis=False`` es
+    para comandos de sólo lectura (``inspect``) que no tocan CMIS pero sí
+    pueden necesitar las conexiones de la config.
+    """
+    cmis = _read_credential("cmis")
+    user_var, pass_var = credential_env_vars("cmis")
+    missing = [
+        var for var, value in ((user_var, cmis.username), (pass_var, cmis.password)) if not value
+    ]
+    if missing and require_cmis:
         raise ConfigurationError(
             "required environment variables missing or empty",
             missing_vars=missing,
         )
-    return Secrets(
-        cmis_username=cmis_username,
-        cmis_password=cmis_password,
-        as400_username=os.environ.get("AS400_USERNAME", "").strip(),
-        as400_password=os.environ.get("AS400_PASSWORD", "").strip(),
+    aliases = config.required_aliases() if config is not None else (INLINE_CONNECTION_ALIAS,)
+    credentials = {"cmis": cmis}
+    for alias in aliases:
+        credentials[alias] = _read_credential(alias)
+    return Secrets(credentials)
+
+
+def _read_credential(alias: str) -> Credential:
+    user_var, pass_var = credential_env_vars(alias)
+    return Credential(
+        username=os.environ.get(user_var, "").strip(),
+        password=os.environ.get(pass_var, "").strip(),
     )

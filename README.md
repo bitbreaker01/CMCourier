@@ -154,11 +154,17 @@ cmcourier --version         # debe imprimir 0.109.0
 Credenciales **siempre** en env, **nunca** en YAML committeado (Constitution Principles V/VIII):
 
 ```bash
-export AS400_USERNAME="..."
-export AS400_PASSWORD="..."
-export CMIS_USERNAME="..."
+export CMIS_USERNAME="..."            # destino Alfresco (siempre)
 export CMIS_PASSWORD="..."
+export AS400_USERNAME="..."           # conexiones AS400 escritas inline (alias implícito `as400`)
+export AS400_PASSWORD="..."
+export CLIENTES_SQL_USERNAME="..."    # cada alias de `connections:` → <ALIAS>_USERNAME / <ALIAS>_PASSWORD
+export CLIENTES_SQL_PASSWORD="..."
 ```
+
+El esquema es uniforme: la credencial del alias `X` se lee de `X_USERNAME` /
+`X_PASSWORD` (alias en mayúsculas). Detalle en
+[`docs/reference/config-schema.md`](docs/reference/config-schema.md#secrets-env-vars-configloaderpysecrets).
 
 ### Tu primera corrida (mock)
 

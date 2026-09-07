@@ -12,7 +12,7 @@ from click.testing import CliRunner
 
 from cmcourier.cli.app import main
 from cmcourier.cli.doctor import CheckStatus, run_doctor
-from cmcourier.config.loader import Secrets, load_config
+from cmcourier.config.loader import Credential, Secrets, load_config
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -120,7 +120,7 @@ def _write_yaml(
 
 
 def _secrets() -> Secrets:
-    return Secrets(cmis_username="tester", cmis_password="secret-not-real")
+    return Secrets({"cmis": Credential("tester", "secret-not-real")})
 
 
 def _stub_warmup_ok() -> None:
@@ -418,7 +418,8 @@ class TestAs400Connectivity:
         report = run_doctor(config, _secrets())
         check = next(r for r in report.results if r.name == "as400_connectivity")
         assert check.status == CheckStatus.SKIP
-        assert check.details["reason"] == "indexing_source_not_as400"
+        # 129: el check mira el registro completo, no sólo indexing.source.
+        assert check.details["reason"] == "no as400 connections in config"
 
 
 class TestAs400Sync:

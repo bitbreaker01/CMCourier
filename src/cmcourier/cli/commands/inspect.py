@@ -27,7 +27,7 @@ from cmcourier.cli.commands._source_descriptor import (
     ParsedDescriptor,
     parse_source_descriptor,
 )
-from cmcourier.config.loader import Secrets, load_config, load_secrets
+from cmcourier.config.loader import load_config, load_secrets
 from cmcourier.config.schema import PipelineConfig
 from cmcourier.config.wiring import (
     _build_rvabrep_source,
@@ -70,11 +70,8 @@ def inspect_rvabrep_command(config_path: Path, shortname: str, system_id: str) -
     """Imprime las filas RVABREP que S1 produciria para el trigger."""
     config = _load(config_path)
     configure_observability(config.observability, "INFO")
-    try:
-        secrets = load_secrets()
-    except ConfigurationError:
-        secrets = Secrets(cmis_username="", cmis_password="")
-    rvabrep_src = _build_rvabrep_source(config.indexing, secrets)
+    secrets = load_secrets(config, require_cmis=False)
+    rvabrep_src = _build_rvabrep_source(config, secrets)
     try:
         indexing = IndexingService(
             rvabrep_src, _indexing_columns_from_schema(config.indexing.columns)
@@ -272,17 +269,13 @@ def _strategy_from_config(
 ) -> tuple[S0Strategy, Callable[[], None]]:
     """Construye una `strategy` desde ``config.trigger`` usando el helper de wiring existente.
 
-    `inspect` es read-only y NO requiere credenciales de CMIS; solo los
-    `trigger kinds` de AS400 necesitan ``AS400_USERNAME`` /
-    ``AS400_PASSWORD``. Probamos el loader de secrets completo pero
-    caemos a un bundle `Secrets` vacio asi las configs
+    `inspect` es read-only y NO requiere credenciales de CMIS; solo las
+    conexiones AS400 de la config necesitan sus ``<ALIAS>_USERNAME`` /
+    ``<ALIAS>_PASSWORD`` (129). Con ``require_cmis=False`` las configs
     csv/single_doc/rvabrep/local_scan Just Work sin env vars.
     """
-    try:
-        secrets = load_secrets()
-    except ConfigurationError:
-        secrets = Secrets(cmis_username="", cmis_password="")
-    rvabrep_src = _build_rvabrep_source(config.indexing, secrets)
+    secrets = load_secrets(config, require_cmis=False)
+    rvabrep_src = _build_rvabrep_source(config, secrets)
     indexing = IndexingService(rvabrep_src, _indexing_columns_from_schema(config.indexing.columns))
     try:
         strategy = _build_trigger_strategy(config, secrets, rvabrep_src, indexing)

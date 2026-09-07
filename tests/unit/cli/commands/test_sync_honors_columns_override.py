@@ -20,9 +20,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import cmcourier.cli.sync_ops as sync_ops
+import cmcourier.config.wiring as wiring
+from cmcourier.config.loader import Credential, Secrets
 from cmcourier.config.schema import (
     As400ConnectionConfig,
     As400SyncConfig,
+    ConnectionRef,
     NiarvilogColumnsModel,
     TrackingConfig,
 )
@@ -52,6 +55,11 @@ def _fake_config_with_overrides() -> MagicMock:
         db_path=Path("/tmp/test-tracking.db"),
         as400_sync=sync_cfg,
     )
+    # 129: wiring resuelve la conexión del sync vía ``connection_ref(site)``.
+    assert sync_cfg.connection is not None and not isinstance(sync_cfg.connection, str)
+    config.connection_ref.return_value = ConnectionRef(
+        alias="as400", kind="as400", spec=sync_cfg.connection, site="tracking.as400_sync"
+    )
     return config
 
 
@@ -68,10 +76,10 @@ class TestSyncHonorsColumnsOverride:
             return stub
 
         fake_config = _fake_config_with_overrides()
-        fake_secrets = MagicMock(as400_username="u", as400_password="p")
+        fake_secrets = Secrets({"cmis": Credential("c", "c"), "as400": Credential("u", "p")})
 
         with (
-            patch.object(sync_ops, "As400NiarvilogStore", side_effect=fake_ctor),
+            patch.object(wiring, "As400NiarvilogStore", side_effect=fake_ctor),
             patch.object(sync_ops, "SQLiteTrackingStore", MagicMock()),
         ):
             sync_ops.build_sync_stores(fake_config, fake_secrets)

@@ -29,6 +29,7 @@ from cmcourier.config.schema import (
     MappingConfig,
     MetadataCacheConfig,
     MetadataConfigModel,
+    MssqlConnectionConfig,
     PipelineConfig,
     ProcessingConfig,
     RvabrepTriggerConfig,
@@ -1358,3 +1359,152 @@ class TestMetadataCacheConfig:
         config = PipelineConfig.model_validate(data)
         assert config.metadata.cache.enabled is True
         assert config.metadata.cache.ttl_minutes == 30
+
+
+class TestConnectionRegistry:
+    """129 — bloque ``connections:`` con alias + referencias por alias."""
+
+    def _data(self, fixture_paths: dict[str, Path], tmp_path: Path) -> dict[str, Any]:
+        return _build_full_data(
+            fixture_paths["trigger"],
+            fixture_paths["rvabrep"],
+            fixture_paths["modelo"],
+            fixture_paths["clients"],
+            fixture_paths["assembly_root"],
+            tmp_path,
+        )
+
+    def test_mssql_connection_defaults(self) -> None:
+        cfg = MssqlConnectionConfig(host="sql.test", database="cmcourier")
+        assert cfg.kind == "mssql"
+        assert cfg.port == 1433
+        assert cfg.driver == "ODBC Driver 18 for SQL Server"
+        assert cfg.encrypt is True
+        assert cfg.trust_server_certificate is False
+
+    def test_as400_connection_carries_kind(self) -> None:
+        assert As400ConnectionConfig(host="h").kind == "as400"
+
+    def test_empty_registry_by_default(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        config = PipelineConfig.model_validate(self._data(fixture_paths, tmp_path))
+        assert config.connections == {}
+        assert config.connection_refs() == ()
+        assert config.required_aliases() == ()
+
+    def test_alias_reference_from_indexing_source(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        """E1 — `indexing.source.connection: rvi` resuelve contra el registro."""
+        data = self._data(fixture_paths, tmp_path)
+        data["connections"] = {"rvi": {"kind": "as400", "host": "10.0.0.1"}}
+        data["indexing"] = {
+            "source": {"kind": "as400", "connection": "rvi", "query": "SELECT 1"},
+        }
+        config = PipelineConfig.model_validate(data)
+        assert config.indexing.source.connection == "rvi"
+        (ref,) = config.connection_refs()
+        assert ref.alias == "rvi"
+        assert ref.kind == "as400"
+        assert ref.site == "indexing"
+        assert isinstance(ref.spec, As400ConnectionConfig)
+        assert ref.spec.host == "10.0.0.1"
+        assert config.required_aliases() == ("rvi",)
+        assert config.connection_ref("indexing") == ref
+        assert config.connection_ref("tracking.as400_sync") is None
+
+    def test_inline_connections_get_implicit_as400_alias(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        """E3 — el YAML de siempre: inline en indexing + metadata + sync."""
+        data = self._data(fixture_paths, tmp_path)
+        data["indexing"] = {
+            "source": {"kind": "as400", "connection": {"host": "a"}, "query": "SELECT 1"},
+        }
+        data["metadata"]["sources"].append(
+            {
+                "kind": "as400",
+                "alias": "clientes",
+                "as400_connection": {"host": "b"},
+                "table": "CLIENTES",
+            }
+        )
+        data["tracking"]["as400_sync"] = {"enabled": True, "connection": {"host": "c"}}
+        config = PipelineConfig.model_validate(data)
+        refs = config.connection_refs()
+        assert [(r.alias, r.site) for r in refs] == [
+            ("as400", "indexing"),
+            ("as400", "metadata:clientes"),
+            ("as400", "tracking.as400_sync"),
+        ]
+        assert [r.spec.host for r in refs] == ["a", "b", "c"]
+        assert config.required_aliases() == ("as400",)
+
+    def test_metadata_and_sync_sites_accept_aliases(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        data = self._data(fixture_paths, tmp_path)
+        data["connections"] = {
+            "rvi": {"kind": "as400", "host": "10.0.0.1"},
+            "clientes_sql": {"kind": "mssql", "host": "sql", "database": "cm"},
+        }
+        data["metadata"]["sources"].append(
+            {"kind": "as400", "alias": "clientes", "as400_connection": "rvi", "table": "C"}
+        )
+        data["tracking"]["as400_sync"] = {"enabled": True, "connection": "rvi"}
+        config = PipelineConfig.model_validate(data)
+        assert [(r.alias, r.site) for r in config.connection_refs()] == [
+            ("rvi", "metadata:clientes"),
+            ("rvi", "tracking.as400_sync"),
+        ]
+        # `clientes_sql` está declarada pero nadie la usa: no es requerida.
+        assert config.required_aliases() == ("rvi",)
+        assert isinstance(config.connections["clientes_sql"], MssqlConnectionConfig)
+
+    def test_unknown_alias_rejected_naming_site(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        """E2 — alias inexistente falla nombrando alias y sitio."""
+        data = self._data(fixture_paths, tmp_path)
+        data["indexing"] = {
+            "source": {"kind": "as400", "connection": "nadie", "query": "SELECT 1"},
+        }
+        with pytest.raises(ValidationError) as ei:
+            PipelineConfig.model_validate(data)
+        msg = str(ei.value)
+        assert "nadie" in msg
+        assert "indexing.source.connection" in msg
+
+    def test_wrong_kind_alias_rejected(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        data = self._data(fixture_paths, tmp_path)
+        data["connections"] = {"sql": {"kind": "mssql", "host": "s", "database": "d"}}
+        data["metadata"]["sources"].append(
+            {"kind": "as400", "alias": "clientes", "as400_connection": "sql", "table": "C"}
+        )
+        with pytest.raises(ValidationError) as ei:
+            PipelineConfig.model_validate(data)
+        msg = str(ei.value)
+        assert "metadata.sources[clientes]" in msg
+        assert "mssql" in msg and "as400" in msg
+
+    @pytest.mark.parametrize("alias", ["cmis", "Mal-Alias", "1abc", "a" * 33, ""])
+    def test_bad_aliases_rejected(
+        self, fixture_paths: dict[str, Path], tmp_path: Path, alias: str
+    ) -> None:
+        data = self._data(fixture_paths, tmp_path)
+        data["connections"] = {alias: {"kind": "as400", "host": "h"}}
+        with pytest.raises(ValidationError):
+            PipelineConfig.model_validate(data)
+
+    def test_sync_enabled_with_alias_passes_connection_required_check(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        data = self._data(fixture_paths, tmp_path)
+        data["connections"] = {"rvi": {"kind": "as400", "host": "h"}}
+        data["tracking"]["as400_sync"] = {"enabled": True, "connection": "rvi"}
+        config = PipelineConfig.model_validate(data)
+        ref = config.connection_ref("tracking.as400_sync")
+        assert ref is not None and ref.spec.host == "h"

@@ -9,7 +9,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from cmcourier.cli.commands import mock as mock_cmd
-from cmcourier.config.schema import As400ConnectionConfig, As400RvabrepSource
+from cmcourier.config.loader import Credential, Secrets
+from cmcourier.config.schema import As400ConnectionConfig, As400RvabrepSource, ConnectionRef
 
 pytestmark = pytest.mark.unit
 
@@ -17,6 +18,12 @@ pytestmark = pytest.mark.unit
 @dataclass
 class _StubConfig:
     indexing: Any
+
+    def connection_ref(self, site: str) -> ConnectionRef | None:
+        if site != "indexing":
+            return None
+        conn = self.indexing.source.connection
+        return ConnectionRef(alias="as400", kind="as400", spec=conn, site=site)
 
 
 @dataclass
@@ -36,8 +43,8 @@ def _make_config(
 def _stub_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     """``_build_source`` llama ``load_secrets`` adentro; le proveemos credenciales fake."""
 
-    def fake_load_secrets() -> Any:
-        return MagicMock(as400_username="user", as400_password="pass")
+    def fake_load_secrets(config: Any = None) -> Secrets:
+        return Secrets({"cmis": Credential("c", "c"), "as400": Credential("user", "pass")})
 
     monkeypatch.setattr(mock_cmd, "load_secrets", fake_load_secrets)
 

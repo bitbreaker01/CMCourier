@@ -50,8 +50,10 @@ from cmcourier.adapters.tracking import SQLiteTrackingStore
 from cmcourier.adapters.upload.cmis_uploader import CmisConfig, CmisUploader
 from cmcourier.config.loader import Secrets
 from cmcourier.config.schema import (
+    AnyConnectionConfig,
+    As400ConnectionConfig,
     As400MetadataSourceConfig,
-    As400RvabrepSource,
+    ConnectionRef,
     CsvMetadataSourceConfig,
     CsvTriggerConfig,
     MetadataSourceConfig,
@@ -301,23 +303,42 @@ def _skip(name: str, reason: str) -> CheckResult:
 
 
 def _open_metadata_source(
+    config: PipelineConfig,
     source_cfg: MetadataSourceConfig,
     secrets: Secrets,
 ) -> TabularDataSource | As400DataSource:
     if isinstance(source_cfg, CsvMetadataSourceConfig):
         return TabularDataSource(source_cfg.csv_path)
     if isinstance(source_cfg, As400MetadataSourceConfig):
-        return As400DataSource(
-            host=source_cfg.as400_connection.host,
-            port=source_cfg.as400_connection.port,
-            database=source_cfg.as400_connection.database,
-            driver=source_cfg.as400_connection.driver,
-            username=secrets.as400_username,
-            password=secrets.as400_password,
-            table=source_cfg.table or "",
-            query=source_cfg.query,
-        )
+        ref = config.connection_ref(f"metadata:{source_cfg.alias}")
+        if ref is None:  # pragma: no cover — el schema lo garantiza
+            raise RuntimeError(f"metadata source {source_cfg.alias!r} has no connection")
+        return _open_as400(ref, secrets, table=source_cfg.table or "", query=source_cfg.query)
     raise RuntimeError(f"unknown metadata source kind: {source_cfg!r}")
+
+
+def _open_as400(
+    ref: ConnectionRef,
+    secrets: Secrets,
+    *,
+    table: str = "",
+    query: str | None = None,
+) -> As400DataSource:
+    """``As400DataSource`` para *ref* (129); ``require`` nombra las env vars del alias."""
+    spec = ref.spec
+    if not isinstance(spec, As400ConnectionConfig):  # pragma: no cover — el schema lo garantiza
+        raise RuntimeError(f"connection {ref.alias!r} is not as400")
+    credential = secrets.require(ref.alias)
+    return As400DataSource(
+        host=spec.host,
+        port=spec.port,
+        database=spec.database,
+        driver=spec.driver,
+        username=credential.username,
+        password=credential.password,
+        table=table,
+        query=query,
+    )
 
 
 def _build_uploader(config: PipelineConfig, secrets: Secrets) -> CmisUploader:
@@ -395,48 +416,73 @@ def _check_cmis_connectivity(config: PipelineConfig, secrets: Secrets) -> CheckR
     )
 
 
+# 073: DB2 / AS400 exige una cláusula FROM. SYSIBM.SYSDUMMY1 es la
+# pseudo-tabla canónica de IBM para health checks (siempre 1 fila, 1
+# columna IBMREQD, sin permisos especiales).
+_AS400_PROBE_SQL = "SELECT 1 FROM SYSIBM.SYSDUMMY1"
+
+
 def _check_as400_connectivity(config: PipelineConfig, secrets: Secrets) -> CheckResult:
-    # 048: el source RVABREP de AS400 vive ahora bajo ``indexing.source``.
-    source = config.indexing.source
-    if not isinstance(source, As400RvabrepSource):
-        return _skip("as400_connectivity", "indexing_source_not_as400")
-    conn = source.connection
-    if not secrets.as400_username or not secrets.as400_password:
+    """129: prueba CADA conexión as400 que la config necesita, una fila por alias."""
+    return _check_connections("as400_connectivity", config, secrets, kind="as400")
+
+
+def _check_connections(
+    name: str, config: PipelineConfig, secrets: Secrets, *, kind: str
+) -> CheckResult:
+    groups = _group_refs(config, kind)
+    if not groups:
+        return _skip(name, f"no {kind} connections in config")
+    details: dict[str, str] = {}
+    failures: list[str] = []
+    for ref, sites in groups:
+        outcome = _probe_connection(ref, secrets)
+        details[ref.alias] = f"{outcome} · {' · '.join(sites)}"
+        if outcome != "PASS":
+            failures.append(f"{ref.alias} ({', '.join(sites)}): {outcome.removeprefix('FAIL: ')}")
+    if failures:
         return CheckResult(
-            name="as400_connectivity",
+            name=name,
             status=CheckStatus.FAIL,
-            message="AS400 credentials missing in environment",
-            details=_frozen({"host": conn.host}),
+            message="; ".join(failures),
+            details=_frozen(details),
         )
+    hosts = ", ".join(f"{ref.alias}@{ref.spec.host}" for ref, _ in groups)
+    return CheckResult(
+        name=name,
+        status=CheckStatus.PASS,
+        message=f"{kind} reachable: {hosts}",
+        details=_frozen(details),
+    )
+
+
+def _group_refs(config: PipelineConfig, kind: str) -> list[tuple[ConnectionRef, list[str]]]:
+    """Refs del *kind* deduplicados por (alias, spec) con la lista de sitios que los usan."""
+    groups: dict[tuple[str, AnyConnectionConfig], tuple[ConnectionRef, list[str]]] = {}
+    for ref in config.connection_refs():
+        if ref.kind != kind:
+            continue
+        key = (ref.alias, ref.spec)
+        if key not in groups:
+            groups[key] = (ref, [])
+        groups[key][1].append(ref.site)
+    return list(groups.values())
+
+
+def _probe_connection(ref: ConnectionRef, secrets: Secrets) -> str:
+    """``"PASS"`` o ``"FAIL: <motivo>"`` para una conexión concreta del registro."""
+    if secrets.get(ref.alias) is None:
+        user_var, pass_var = ref.env_vars
+        return f"FAIL: credentials missing in environment (set {user_var} / {pass_var})"
     try:
-        src = As400DataSource(
-            host=conn.host,
-            port=conn.port,
-            database=conn.database,
-            driver=conn.driver,
-            username=secrets.as400_username,
-            password=secrets.as400_password,
-            query=source.query,
-        )
+        src = _open_as400(ref, secrets)
         try:
-            # 073: DB2 / AS400 exige una cláusula FROM. SYSIBM.SYSDUMMY1
-            # es la pseudo-tabla canónica de IBM para health checks
-            # (siempre 1 fila, 1 columna IBMREQD, sin permisos especiales).
-            src.query("SELECT 1 FROM SYSIBM.SYSDUMMY1", [])
+            src.query(_AS400_PROBE_SQL, [])
         finally:
             src.close()
     except Exception as exc:  # noqa: BLE001
-        return _fail(
-            "as400_connectivity",
-            exc,
-            {"host": conn.host},
-        )
-    return CheckResult(
-        name="as400_connectivity",
-        status=CheckStatus.PASS,
-        message=f"AS400 reachable at {conn.host}",
-        details=_frozen({"host": conn.host}),
-    )
+        return f"FAIL: {type(exc).__name__}: {str(exc)[:200]}"
+    return "PASS"
 
 
 def _check_tracking_openable(config: PipelineConfig) -> CheckResult:
@@ -464,47 +510,38 @@ def _check_as400_sync(config: PipelineConfig, secrets: Secrets) -> CheckResult:
     sync_cfg = config.tracking.as400_sync
     if not sync_cfg.enabled:
         return _skip("as400_sync", "disabled (tracking.as400_sync.enabled=false)")
-    if sync_cfg.connection is None:  # pragma: no cover — el schema ya lo protege
+    ref = config.connection_ref("tracking.as400_sync")
+    if ref is None:  # pragma: no cover — el schema ya lo protege
         return CheckResult(
             name="as400_sync",
             status=CheckStatus.FAIL,
             message="as400_sync.enabled=true but connection is missing",
             details=_frozen({"reason": "missing_connection"}),
         )
-    if not secrets.as400_username or not secrets.as400_password:
+    host = ref.spec.host
+    if secrets.get(ref.alias) is None:
+        user_var, pass_var = ref.env_vars
         return CheckResult(
             name="as400_sync",
             status=CheckStatus.FAIL,
-            message="AS400 credentials missing in environment",
-            details=_frozen({"host": sync_cfg.connection.host}),
+            message=f"AS400 credentials missing in environment (set {user_var} / {pass_var})",
+            details=_frozen({"host": host, "alias": ref.alias}),
         )
     full_table = f"{sync_cfg.library}.{sync_cfg.table}"
     try:
-        src = As400DataSource(
-            host=sync_cfg.connection.host,
-            port=sync_cfg.connection.port,
-            database=sync_cfg.connection.database,
-            driver=sync_cfg.connection.driver,
-            username=secrets.as400_username,
-            password=secrets.as400_password,
-            table=full_table,
-        )
+        src = _open_as400(ref, secrets, table=full_table)
         try:
             # `1=0` mantiene la probe barata (cero filas devueltas, solo check de schema).
             src.query(f"SELECT 1 FROM {full_table} WHERE 1=0", [])
         finally:
             src.close()
     except Exception as exc:  # noqa: BLE001
-        return _fail(
-            "as400_sync",
-            exc,
-            {"host": sync_cfg.connection.host, "table": full_table},
-        )
+        return _fail("as400_sync", exc, {"host": host, "table": full_table})
     return CheckResult(
         name="as400_sync",
         status=CheckStatus.PASS,
-        message=f"AS400 NIARVILOG reachable at {sync_cfg.connection.host}/{full_table}",
-        details=_frozen({"host": sync_cfg.connection.host, "table": full_table}),
+        message=f"AS400 NIARVILOG reachable at {host}/{full_table}",
+        details=_frozen({"host": host, "table": full_table}),
     )
 
 
@@ -538,7 +575,7 @@ def _check_metadata_sources(config: PipelineConfig, secrets: Secrets) -> CheckRe
     counts: dict[str, str] = {}
     for source_cfg in config.metadata.sources:
         try:
-            src = _open_metadata_source(source_cfg, secrets)
+            src = _open_metadata_source(config, source_cfg, secrets)
             try:
                 count = src.count()
             finally:

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field, replace
 
 from cmcourier.cli.console.overrides import SessionOverrides, TriggerOverride
 from cmcourier.cli.doctor import DoctorReport
-from cmcourier.config.loader import Secrets
+from cmcourier.config.loader import Credential, Secrets
 
 AS400_MAX_TRIES = 3
 # M2 (informe UX v2): una credencial probada caduca — a los 45 min el
@@ -50,10 +50,10 @@ class SessionCredentials:
 
     def to_secrets(self) -> Secrets:
         return Secrets(
-            cmis_username=self.cmis_username,
-            cmis_password=self.cmis_password,
-            as400_username=self.as400_username,
-            as400_password=self.as400_password,
+            {
+                "cmis": Credential(self.cmis_username, self.cmis_password),
+                "as400": Credential(self.as400_username, self.as400_password),
+            }
         )
 
     def cmis_complete(self) -> bool:

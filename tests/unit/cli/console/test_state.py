@@ -6,6 +6,7 @@ import pytest
 
 from cmcourier.cli.console.state import AS400_MAX_TRIES, ConsoleState, SessionCredentials
 from cmcourier.cli.doctor import CheckResult, CheckStatus, DoctorReport
+from cmcourier.config.loader import Credential
 
 pytestmark = pytest.mark.unit
 
@@ -32,12 +33,8 @@ class TestSessionCredentials:
     def test_to_secrets_maps_fields(self) -> None:
         creds = SessionCredentials("u", "p", "au", "ap")
         s = creds.to_secrets()
-        assert (s.cmis_username, s.cmis_password, s.as400_username, s.as400_password) == (
-            "u",
-            "p",
-            "au",
-            "ap",
-        )
+        assert (s.cmis_username, s.cmis_password) == ("u", "p")
+        assert s.require("as400") == Credential("au", "ap")
 
 
 class TestConnLifecycle:

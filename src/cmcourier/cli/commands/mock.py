@@ -29,6 +29,7 @@ import click
 from cmcourier.adapters.sources import As400DataSource, TabularDataSource
 from cmcourier.config.loader import load_config, load_secrets
 from cmcourier.config.schema import (
+    As400ConnectionConfig,
     As400RvabrepSource,
     IndexingColumnsModel,
     PipelineConfig,
@@ -242,20 +243,12 @@ def _build_source(
             "--rvabrep-as400 requires --config with an AS400 connection",
         )
     source_cfg = _extract_as400_source(config)
-    conn = source_cfg.connection
-    secrets = load_secrets()
-    if not secrets.as400_username or not secrets.as400_password:
-        raise ConfigurationError(
-            "AS400 source requires AS400_USERNAME and AS400_PASSWORD env vars",
-            missing_vars=[
-                name
-                for name, value in (
-                    ("AS400_USERNAME", secrets.as400_username),
-                    ("AS400_PASSWORD", secrets.as400_password),
-                )
-                if not value
-            ],
-        )
+    ref = config.connection_ref("indexing")
+    if ref is None or not isinstance(ref.spec, As400ConnectionConfig):  # pragma: no cover
+        raise ConfigurationError("indexing.source has no AS400 connection")
+    conn = ref.spec
+    # 129: la credencial es la del alias de la conexión (inline → `as400`).
+    credential = load_secrets(config).require(ref.alias)
     # 073: si el operador definió ``source.query`` con WHERE / JOIN /
     # filtros, respetarlo — el adapter lo wrappea como ``(query) AS T``.
     # Pre-073 esto se ignoraba y ``mock generate --rvabrep-as400`` leía
@@ -267,8 +260,8 @@ def _build_source(
             port=conn.port,
             database=conn.database,
             driver=conn.driver,
-            username=secrets.as400_username,
-            password=secrets.as400_password,
+            username=credential.username,
+            password=credential.password,
             query=query,
         )
     # 073: cuando ni ``source.query`` ni ``connection.table`` están
@@ -281,8 +274,8 @@ def _build_source(
         port=conn.port,
         database=conn.database,
         driver=conn.driver,
-        username=secrets.as400_username,
-        password=secrets.as400_password,
+        username=credential.username,
+        password=credential.password,
         table=conn.table or f"{conn.database}.RVABREP",
     )
 

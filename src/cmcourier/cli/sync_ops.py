@@ -31,7 +31,7 @@ from cmcourier.adapters.tracking import SQLiteTrackingStore
 from cmcourier.adapters.tracking.as400_niarvilog import As400NiarvilogStore
 from cmcourier.config.loader import Secrets
 from cmcourier.config.schema import PipelineConfig
-from cmcourier.config.wiring import build_as400_recovery, niarvilog_columns_from_schema
+from cmcourier.config.wiring import build_as400_recovery, build_niarvilog_store
 from cmcourier.services.recovery import RecoveryResult
 
 
@@ -56,29 +56,21 @@ def sync_unavailable_reason(config: PipelineConfig, secrets: Secrets) -> str | N
             "tracking.as400_sync.enabled=false; "
             "`sync` commands require AS400 sync to be enabled in the YAML."
         )
-    if sync_cfg.connection is None:
+    ref = config.connection_ref("tracking.as400_sync")
+    if ref is None:
         return "tracking.as400_sync.connection is missing"
-    if not secrets.as400_username or not secrets.as400_password:
-        return "AS400 credentials missing in environment (set AS400_USERNAME / AS400_PASSWORD)."
+    if secrets.get(ref.alias) is None:
+        user_var, pass_var = ref.env_vars
+        return (
+            f"AS400 credentials for connection {ref.alias!r} missing in environment "
+            f"(set {user_var} / {pass_var})."
+        )
     return None
 
 
 def build_as400_store(config: PipelineConfig, secrets: Secrets) -> As400NiarvilogStore:
     """Construye SOLO el store AS400. Asume ``sync_unavailable_reason`` == None."""
-    sync_cfg = config.tracking.as400_sync
-    assert sync_cfg.connection is not None
-    return As400NiarvilogStore(
-        connection=sync_cfg.connection,
-        username=secrets.as400_username,
-        password=secrets.as400_password,
-        library=sync_cfg.library,
-        table=sync_cfg.table,
-        # 086: honrar el override de columnas del YAML (el CLI pre-086 no lo hacía).
-        columns=niarvilog_columns_from_schema(sync_cfg.columns),
-        stale_in_progress_minutes=sync_cfg.stale_in_progress_minutes,
-        retry_attempts=sync_cfg.retry_attempts,
-        retry_base_delay_s=sync_cfg.retry_base_delay_s,
-    )
+    return build_niarvilog_store(config, secrets)
 
 
 def build_sync_stores(

@@ -8,7 +8,7 @@ Constitución (separación de capas).
 
 from __future__ import annotations
 
-__all__ = ["build_pipeline"]
+__all__ = ["build_niarvilog_store", "build_pipeline"]
 
 import atexit
 from concurrent.futures import ProcessPoolExecutor
@@ -25,17 +25,18 @@ from cmcourier.adapters.tracking.as400_niarvilog import (
     NiarvilogColumns,
 )
 from cmcourier.adapters.upload.cmis_uploader import CmisConfig, CmisUploader
-from cmcourier.config.loader import Secrets
+from cmcourier.config.loader import Credential, Secrets
 from cmcourier.config.schema import (
+    As400ConnectionConfig,
+    As400MetadataSourceConfig,
     As400RvabrepSource,
+    ConnectionRef,
     CsvMetadataSourceConfig,
     CsvRvabrepSource,
     CsvTriggerConfig,
     IndexingColumnsModel,
-    IndexingConfig,
     LocalScanTriggerConfig,
     MetadataConfigModel,
-    MetadataSourceConfig,
     NiarvilogColumnsModel,
     PipelineConfig,
     RvabrepTriggerConfig,
@@ -103,8 +104,8 @@ def build_pipeline(
     # una sola vez acá y se comparte entre S0 (DirectRvabrepTriggerStrategy
     # / LocalScanTriggerStrategy) Y S1 (IndexingService) — la tabla
     # RVABREP es la misma data independientemente de dónde viva.
-    rvabrep_src = _build_rvabrep_source(config.indexing, secrets)
-    metadata_sources = _build_metadata_sources(config.metadata.sources, secrets)
+    rvabrep_src = _build_rvabrep_source(config, secrets)
+    metadata_sources = _build_metadata_sources(config, secrets)
 
     indexing_service = IndexingService(
         rvabrep_src,
@@ -258,25 +259,7 @@ def _build_idempotency_coordinator(
     sync_cfg = config.tracking.as400_sync
     if not sync_cfg.enabled:
         return None, None
-    if sync_cfg.connection is None:  # pragma: no cover — el schema lo garantiza
-        raise ConfigurationError(
-            "tracking.as400_sync.enabled=true requires connection settings",
-        )
-    if not secrets.as400_username or not secrets.as400_password:
-        raise ConfigurationError(
-            "AS400 credentials missing in environment (set AS400_USERNAME / AS400_PASSWORD)",
-        )
-    as400_store = As400NiarvilogStore(
-        connection=sync_cfg.connection,
-        username=secrets.as400_username,
-        password=secrets.as400_password,
-        library=sync_cfg.library,
-        table=sync_cfg.table,
-        columns=niarvilog_columns_from_schema(sync_cfg.columns),
-        stale_in_progress_minutes=sync_cfg.stale_in_progress_minutes,
-        retry_attempts=sync_cfg.retry_attempts,
-        retry_base_delay_s=sync_cfg.retry_base_delay_s,
-    )
+    as400_store = build_niarvilog_store(config, secrets)
     if sync_cfg.mode == "periodic":
         assert sync_cfg.periodic is not None  # el schema lo garantiza
         buffer = PendingSyncBuffer()
@@ -309,20 +292,8 @@ def build_as400_recovery(
     dependencias: store SQLite (provisto), store AS400, servicio de
     indexing (para re-derivar DOCFRM/IMGTIP desde RVABREP) y servicio de
     mapping (para IDNBAC/TIPIDN)."""
-    sync_cfg = config.tracking.as400_sync
-    assert sync_cfg.connection is not None  # el CLI lo valida antes
-    as400_store = As400NiarvilogStore(
-        connection=sync_cfg.connection,
-        username=secrets.as400_username,
-        password=secrets.as400_password,
-        library=sync_cfg.library,
-        table=sync_cfg.table,
-        columns=niarvilog_columns_from_schema(sync_cfg.columns),
-        stale_in_progress_minutes=sync_cfg.stale_in_progress_minutes,
-        retry_attempts=sync_cfg.retry_attempts,
-        retry_base_delay_s=sync_cfg.retry_base_delay_s,
-    )
-    rvabrep_src = _build_rvabrep_source(config.indexing, secrets)
+    as400_store = build_niarvilog_store(config, secrets)
+    rvabrep_src = _build_rvabrep_source(config, secrets)
     indexing_service = IndexingService(
         rvabrep_src,
         _indexing_columns_from_schema(config.indexing.columns),
@@ -341,7 +312,7 @@ def build_as400_recovery(
 # ---------------------------------------------------------------------------
 
 
-def _build_rvabrep_source(indexing_cfg: IndexingConfig, secrets: Secrets) -> IDataSource:
+def _build_rvabrep_source(config: PipelineConfig, secrets: Secrets) -> IDataSource:
     """Construye el ``IDataSource`` RVABREP desde ``indexing.source`` (048).
 
     ``csv`` → ``TabularDataSource`` sobre el archivo CSV.
@@ -349,36 +320,86 @@ def _build_rvabrep_source(indexing_cfg: IndexingConfig, secrets: Secrets) -> IDa
     operador (JOINs / filtros permitidos) se envuelve como ``(query) AS T``
     para que todo el contrato `IDataSource` funcione transparentemente. El
     único `source` retornado alimenta tanto a S0 (descubrimiento de
-    triggers) como a S1 (lookup de docs).
+    triggers) como a S1 (lookup de docs). 129: la conexión (inline o alias
+    del registro) y sus credenciales se resuelven por :class:`ConnectionRef`.
     """
-    source = indexing_cfg.source
+    source = config.indexing.source
     if isinstance(source, CsvRvabrepSource):
         return TabularDataSource(source.csv_path)
     if isinstance(source, As400RvabrepSource):
-        if not secrets.as400_username or not secrets.as400_password:
-            raise ConfigurationError(
-                "indexing.source.kind 'as400' requires AS400_USERNAME and AS400_PASSWORD env vars",
-                missing_vars=[
-                    name
-                    for name, value in (
-                        ("AS400_USERNAME", secrets.as400_username),
-                        ("AS400_PASSWORD", secrets.as400_password),
-                    )
-                    if not value
-                ],
-            )
-        return As400DataSource(
-            host=source.connection.host,
-            port=source.connection.port,
-            database=source.connection.database,
-            driver=source.connection.driver,
-            username=secrets.as400_username,
-            password=secrets.as400_password,
-            query=source.query,
-        )
+        ref = _require_ref(config, "indexing")
+        return _build_as400_source(ref, secrets, query=source.query)
     raise ConfigurationError(
         "unknown indexing.source.kind",
         kind=getattr(source, "kind", "<missing>"),
+    )
+
+
+def _require_ref(config: PipelineConfig, site: str) -> ConnectionRef:
+    ref = config.connection_ref(site)
+    if ref is None:  # pragma: no cover — el schema lo garantiza
+        raise ConfigurationError("connection required", site=site)
+    return ref
+
+
+def _as400_spec(ref: ConnectionRef) -> As400ConnectionConfig:
+    spec = ref.spec
+    if not isinstance(spec, As400ConnectionConfig):  # pragma: no cover — el schema lo garantiza
+        raise ConfigurationError(
+            "connection kind mismatch", site=ref.site, alias=ref.alias, kind=ref.kind
+        )
+    return spec
+
+
+def _require_credential(ref: ConnectionRef, secrets: Secrets) -> Credential:
+    """``secrets.require`` enriquecido con el sitio que necesita la conexión."""
+    try:
+        return secrets.require(ref.alias)
+    except ConfigurationError as exc:
+        raise ConfigurationError(
+            f"credentials for connection {ref.alias!r} are missing or empty",
+            site=ref.site,
+            **exc.context,
+        ) from exc
+
+
+def _build_as400_source(
+    ref: ConnectionRef,
+    secrets: Secrets,
+    *,
+    table: str = "",
+    query: str | None = None,
+) -> As400DataSource:
+    """``As400DataSource`` para *ref*; el error de credenciales nombra alias y sitio."""
+    spec = _as400_spec(ref)
+    credential = _require_credential(ref, secrets)
+    return As400DataSource(
+        host=spec.host,
+        port=spec.port,
+        database=spec.database,
+        driver=spec.driver,
+        username=credential.username,
+        password=credential.password,
+        table=table,
+        query=query,
+    )
+
+
+def build_niarvilog_store(config: PipelineConfig, secrets: Secrets) -> As400NiarvilogStore:
+    """Store NIARVILOG del sync (034) sobre la conexión de ``tracking.as400_sync``."""
+    sync_cfg = config.tracking.as400_sync
+    ref = _require_ref(config, "tracking.as400_sync")
+    credential = _require_credential(ref, secrets)
+    return As400NiarvilogStore(
+        connection=_as400_spec(ref),
+        username=credential.username,
+        password=credential.password,
+        library=sync_cfg.library,
+        table=sync_cfg.table,
+        columns=niarvilog_columns_from_schema(sync_cfg.columns),
+        stale_in_progress_minutes=sync_cfg.stale_in_progress_minutes,
+        retry_attempts=sync_cfg.retry_attempts,
+        retry_base_delay_s=sync_cfg.retry_base_delay_s,
     )
 
 
@@ -454,40 +475,25 @@ def _build_trigger_strategy(
 
 
 def _build_metadata_sources(
-    sources: list[MetadataSourceConfig],
+    config: PipelineConfig,
     secrets: Secrets,
 ) -> dict[str, IDataSource]:
     """Abre cada `source` de metadata y devuelve el registro alias→adapter."""
     registry: dict[str, IDataSource] = {}
-    for src_cfg in sources:
+    for src_cfg in config.metadata.sources:
         if isinstance(src_cfg, CsvMetadataSourceConfig):
             registry[src_cfg.alias] = TabularDataSource(src_cfg.csv_path)
-            continue
-        # as400 — credenciales requeridas.
-        if not secrets.as400_username or not secrets.as400_password:
-            missing = [
-                name
-                for name, value in (
-                    ("AS400_USERNAME", secrets.as400_username),
-                    ("AS400_PASSWORD", secrets.as400_password),
-                )
-                if not value
-            ]
-            raise ConfigurationError(
-                "AS400 credentials required for as400 metadata source",
-                alias=src_cfg.alias,
-                missing_vars=missing,
+        elif isinstance(src_cfg, As400MetadataSourceConfig):
+            ref = _require_ref(config, f"metadata:{src_cfg.alias}")
+            registry[src_cfg.alias] = _build_as400_source(
+                ref, secrets, table=src_cfg.table or "", query=src_cfg.query
             )
-        registry[src_cfg.alias] = As400DataSource(
-            host=src_cfg.as400_connection.host,
-            port=src_cfg.as400_connection.port,
-            database=src_cfg.as400_connection.database,
-            driver=src_cfg.as400_connection.driver,
-            username=secrets.as400_username,
-            password=secrets.as400_password,
-            table=src_cfg.table or "",
-            query=src_cfg.query,
-        )
+        else:  # pragma: no cover — la unión discriminada lo impide
+            raise ConfigurationError(
+                "unknown metadata source kind",
+                alias=getattr(src_cfg, "alias", "<missing>"),
+                kind=getattr(src_cfg, "kind", "<missing>"),
+            )
     return registry
 
 
