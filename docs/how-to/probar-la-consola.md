@@ -58,7 +58,7 @@ uv run cmcourier console --config sample/config-local.yaml
 ```
 
 Deberías ver la barra superior con **`STAGING`** en verde, el reloj a la
-derecha, y siete pestañas. Abajo, el footer con las teclas (azul =
+derecha, y ocho pestañas (`1`-`8` o `F1`-`F8`). Abajo, el footer con las teclas (azul =
 global, gris = de la pantalla actual).
 
 En cualquier momento: **`?`** abre la ayuda completa (incluye la leyenda
@@ -89,13 +89,19 @@ avanzás (credenciales → doctor → lanzar).
 > mirror). La consola lo deriva del YAML, no del tipo de pipeline.
 
 ### `4` DOCTOR
-1. Elegí un grupo en el selector (probá `connections`) o dejá `all`.
+1. El selector tiene tres niveles: **`all`** (todos los checks), **un
+   grupo** (probá `connections`) o **un check individual** (cada uno
+   aparece con su nombre; la ayuda `?` lista todos con su grupo).
 2. Apretá **`d`**. Corre en vivo (no congela la UI).
 3. Navegá los checks con **`↑↓`** y expandí el detalle de cualquiera con
    **`↵`**. Los FAIL/WARN se expanden solos.
-4. Deberías ver **9 pass / 0 fail** (los 2 de AS400 salen `salteados`).
+4. Con `all` deberías ver **9 pass / 0 fail** (los 2 de AS400 salen
+   `salteados`). Probá un check suelto, p. ej. `log_dir_writable`: corre
+   solo ese.
 5. Volvé a **`2`**, cambiá la contraseña, volvé a **`4`**: el banner dice
    **"desactualizado"** — el doctor sabe que la config cambió.
+6. El doctor valida la **config efectiva** (YAML + overrides guardados +
+   el pipeline elegido en `5`), no el YAML crudo.
 
 ### `3` CONFIG (overrides de sesión)
 1. Cambiá `cmis.workers` a `12`, o el `mode` a `batched`. El campo vacío
@@ -108,14 +114,21 @@ avanzás (credenciales → doctor → lanzar).
    Nada llega a una corrida sin pasar por esa validación.
 
 ### `5` CORRER (lanzar)
-1. El pipeline es el del YAML (read-only). Poné `--total` en `25` para
-   una corrida corta.
-2. Mirá **"Config efectiva"**: entorno, workers, overrides, credenciales,
-   doctor. El **comando equivalente** de abajo refleja exactamente eso.
-3. Apretá **`r`**. Si el doctor no está aprobado, aparece un modal
+1. El **pipeline** se elige acá, no hace falta editar el YAML: el
+   selector arranca en el del YAML (`csv`) y podés cambiarlo a `rvabrep`,
+   `local_scan` o `single_doc`; cada uno muestra sus parámetros (ruta del
+   CSV y columnas, filtros, carpeta a escanear, shortname/system/cif).
+   Es un **override de sesión**: el YAML no se toca. Probá `local_scan`
+   con la ruta vacía → el lanzamiento queda bloqueado con el motivo;
+   volvé a `csv` y el bloqueo desaparece.
+2. Poné `--total` en `25` para una corrida corta.
+3. Mirá **"Config efectiva"**: la primera línea dice el pipeline y si es
+   del YAML o un override; después entorno, workers, overrides,
+   credenciales, doctor.
+4. Apretá **`r`**. Si el doctor no está aprobado, aparece un modal
    "lanzar igual / ir a doctor" (la opción segura tiene el foco). Si el
    entorno fuera `prd`, además te haría **tipear "PRD"**.
-4. La consola salta al monitor.
+5. La consola salta al monitor.
 
 ### `6` MONITOR
 - Cabecera con **subidos / fallidos (con desglose por tipo) /
@@ -133,6 +146,21 @@ avanzás (credenciales → doctor → lanzar).
   launcher en modo reanudar), **`E`** te dice cómo exportar el reporte.
 - Corré una segunda vez con `--total 200` para generar uploads nuevos y
   ver la reconciliación.
+
+### `8` SYNC (SQLite ↔ AS400 NIARVILOG)
+Es la versión interactiva de `cmcourier sync status | recover | resolve`.
+- **En el entorno local aparece deshabilitada**, con el motivo en claro:
+  el YAML tiene `tracking.as400_sync.enabled: false`. Es lo esperado —
+  acá no hay AS400. Si el YAML lo habilita pero faltan las credenciales
+  AS400, te manda a `2`.
+- Con un AS400 real: **`s`** (o el botón) corre el estado — limpia los
+  `in_progress` vencidos y prueba la conectividad. **Recuperar**:
+  siempre `simular` primero (dry-run); `aplicar` recién se habilita si
+  la simulación del **mismo batch_id** encontró filas, y pide confirmación
+  (en `prd`, tipear `PRD`). **Resolver**: un `txn`, la preferencia
+  (`as400 manda` es read-only; `local manda` escribe en AS400 y requiere
+  `cm_object_id` + confirmación). Todo corre en background y el resultado
+  se acumula en el panel de abajo.
 
 ---
 
@@ -194,5 +222,9 @@ docker compose -f alfresco-compose.yml -f alfresco-compose.local.yml down -v   #
   (requiere que el AIMD respete un `min(user_cap, aimd_cap)`).
 - **ETA por ventana** en el monitor: usa el throughput acumulado del
   provider actual.
+- **Más conexiones / credenciales con alias** (p. ej. un SQL Server o
+  una DB2 extra para metadata) y **editar y guardar el YAML completo**
+  desde la consola: son las próximas iteraciones; hoy los overrides son
+  de sesión y las fuentes son las que declara el YAML.
 
 El resto del mock v2 (ver el artifact de diseño) está implementado.

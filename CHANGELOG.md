@@ -15,6 +15,76 @@ abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
+## [0.109.0] — 2026-09-06 — **Consola: doctor granular, pipeline elegible y pestaña SYNC**
+
+Respuesta a la primera ronda de uso real de la consola (seis preguntas
+del operador): el doctor se puede correr de a un check, el pipeline se
+elige desde el launcher sin editar el YAML, y el sync SQLite ↔ AS400
+NIARVILOG dejó de ser sólo CLI. Specs 126-128, TDD estricto y revisión
+antagonista.
+
+### Added
+
+- **Spec 126 — doctor por check individual.** El selector de `[4]`
+  ofrece tres niveles: todos, por grupo, o **un check suelto**
+  (`run_doctor(selected=<nombre>)`; `CHECK_NAMES` y `group_of()`
+  publicados por `cli/doctor.py`). La ayuda `?` lista todos los checks
+  con su grupo, generada desde `CHECK_NAMES` (nunca re-tipeada). El CLI
+  `cmcourier doctor --check` también acepta el nombre de un check.
+- **Spec 127 — selector de pipeline en el launcher.** `[5]` deja elegir
+  `csv` / `rvabrep` / `local_scan` / `single_doc` con los parámetros de
+  cada uno; es un **override de sesión** (`SessionOverrides.trigger`)
+  que viaja por `apply_overrides`, así que la corrida, el resumen de
+  config efectiva (`pipeline … (override|del YAML)`) y el **doctor**
+  ven la misma config. Un trigger inválido bloquea el lanzamiento con
+  el motivo; un `scan_path` vacío ya no pasa como `.` (gotcha de
+  `Path("")`).
+- **Spec 128 — pestaña `8·SYNC`** (`8` / `F8`). Estado (`s`),
+  recuperar con **dry-run obligatorio** antes de `aplicar` (habilitado
+  sólo tras simular el mismo `batch_id` con filas; confirm *danger*,
+  `PRD` tipeado en producción) y resolver por `txn` (`as400 manda`
+  read-only; `local manda` escribe en AS400 con confirmación). Todo en
+  worker thread con salida acumulada. Si el YAML no habilita el sync o
+  faltan credenciales AS400, la pestaña lo dice y se deshabilita.
+
+### Changed
+
+- **`cli/sync_ops.py`** concentra la lógica de `sync status | recover |
+  resolve` sin click (`SyncOpError`, stores siempre cerrados);
+  `cmcourier sync` delega en ella con los mismos mensajes y exit codes
+  (2 config, 1 uso, 3 AS400).
+- Guía `docs/how-to/probar-la-consola.md` actualizada (doctor
+  granular, selector de pipeline, pestaña SYNC, ocho pestañas).
+- `As400Recovery.close()` cierra el store AS400 y la fuente RVABREP que
+  `build_as400_recovery` le inyecta; `niarvilog_columns_from_schema`
+  pasa a ser API pública de `config/wiring.py`.
+
+### Fixed
+
+Ronda antagonista (Opus) sobre 126-128:
+
+- `[1] INICIO` interpolaba los mensajes de conexión (`[IBM][…]`, JSON)
+  en un `Static` con markup: el cuerpo ahora se arma como `Content`
+  (texto plano para lo externo). Ojo: `textual.markup.escape` NO cubre
+  tags en mayúscula y el parser sí los traga — por eso no se usa.
+- `[5] CORRER` con el selector de pipeline (127) empujaba `Lanzar`
+  fuera de la pantalla: `RunPane` ahora scrollea.
+- `[8] SYNC`: la salida usa `Log` con altura fija (el `1fr` colapsaba a
+  cero dentro del `TabPane`), scroll al final, tope de 200 líneas, y
+  `cm_object_id` sólo visible con `local manda`.
+- El worker del doctor y el de SYNC ya no tumban la consola ante una
+  excepción inesperada (`exit_on_error`): reportan un `FAIL`.
+- `doctor`: `sample_dry_run` construía el pipeline con process pool
+  (sólo se apagaba en `atexit`) y dejaba el tracking store abierto; en
+  la consola cada corrida sumaba procesos. Ahora corre in-process y
+  cierra el store.
+- `sync recover` dejaba abiertos el store AS400 y la fuente RVABREP;
+  `sync status` abría un SQLite que no usaba.
+- El check individual de `[2] CREDENCIALES` corría sobre el YAML crudo,
+  no sobre la config efectiva con overrides.
+
+---
+
 ## [0.108.0] — 2026-09-06 — **Consola de operación interactiva (`cmcourier console`)**
 
 La TUI dejó de ser solo un monitor: ahora `cmcourier console --config X`
