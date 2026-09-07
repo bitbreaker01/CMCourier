@@ -400,7 +400,7 @@ def single_doc_run_command(
     max_duration_s = _parse_max_duration(max_duration)
     try:
         config = load_config(config_path)
-        secrets = load_secrets()
+        secrets = load_secrets(config)
     except ConfigurationError as exc:
         click.echo(f"ConfigurationError: {exc}", err=True)
         sys.exit(2)
@@ -490,7 +490,7 @@ def doctor_command(config_path: Path, selected_check: str, log_level: str) -> No
     configure_logging(log_level)
     try:
         config = load_config(config_path)
-        secrets = load_secrets()
+        secrets = load_secrets(config)
     except ConfigurationError as exc:
         click.echo(f"ConfigurationError: {exc}", err=True)
         sys.exit(2)
@@ -573,7 +573,7 @@ def _run_pipeline_command(
     max_duration_s = _parse_max_duration(max_duration)
     try:
         config = load_config(config_path)
-        secrets = load_secrets()
+        secrets = load_secrets(config)
     except ConfigurationError as exc:
         click.echo(f"ConfigurationError: {exc}", err=True)
         sys.exit(2)

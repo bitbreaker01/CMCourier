@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from textwrap import dedent
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
 import respx
 from click.testing import CliRunner
 
+from cmcourier.cli import doctor as doctor_module
 from cmcourier.cli.app import main
 from cmcourier.cli.doctor import CheckStatus, run_doctor
 from cmcourier.config.loader import Credential, Secrets, load_config
@@ -275,6 +277,7 @@ class TestRunDoctorHappyPath:
             "log_dir_writable",
             "cmis_connectivity",
             "as400_connectivity",
+            "mssql_connectivity",  # 130
             "tracking_openable",
             "as400_sync",
             "mapping_completeness",
@@ -503,6 +506,45 @@ class TestCli:
         assert "[PASS]" in result.stdout
         assert "0 failed" in result.stdout
 
+    def test_registry_alias_credentials_reach_the_check(
+        self,
+        cli_runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """130 (bug de 129): el CLI debe cargar los secrets CON la config, si
+        no los alias del registro nunca reciben sus env vars."""
+        monkeypatch.setenv("CMIS_USERNAME", "tester")
+        monkeypatch.setenv("CMIS_PASSWORD", "secret-not-real")
+        monkeypatch.setenv("CLIENTES_SQL_USERNAME", "sa")
+        monkeypatch.setenv("CLIENTES_SQL_PASSWORD", "not-real")
+        probed: list[str] = []
+        fake = MagicMock()
+        fake.query = MagicMock(side_effect=lambda sql, params: probed.append(sql))
+        monkeypatch.setattr(doctor_module, "MssqlDataSource", lambda **kw: fake)
+        yaml_path = _write_yaml(tmp_path)
+        original = yaml_path.read_text()
+        assert original.count("\n  sources:\n") == 1
+        text = original.replace(
+            "\n  sources:\n",
+            "\n  sources:\n"
+            "    - kind: mssql\n"
+            "      alias: clientes\n"
+            "      connection: clientes_sql\n"
+            "      table: dbo.clientes\n",
+            1,
+        )
+        yaml_path.write_text(
+            "connections:\n  clientes_sql:\n    kind: mssql\n    host: sql.test\n"
+            "    database: cmcourier\n" + text
+        )
+        result = cli_runner.invoke(
+            main, ["doctor", "--config", str(yaml_path), "--check", "mssql_connectivity"]
+        )
+        assert result.exit_code == 0, result.stdout
+        assert "credentials missing" not in result.stdout
+        assert probed == ["SELECT 1"], result.stdout
+
     def test_doctor_missing_config_exit_2(
         self,
         cli_runner: CliRunner,
@@ -549,6 +591,7 @@ class TestDoctorCheckFilter:
                 "log_dir_writable",
                 "cmis_connectivity",
                 "as400_connectivity",
+                "mssql_connectivity",  # 130
                 "tracking_openable",
                 "as400_sync",  # 126: pasa al grupo connections (SKIP si sync off)
             ]
@@ -618,6 +661,7 @@ class TestDoctorCheckFilter:
                 "log_dir_writable",
                 "cmis_connectivity",
                 "as400_connectivity",
+                "mssql_connectivity",  # 130
                 "tracking_openable",
                 "as400_sync",
                 "mapping_completeness",

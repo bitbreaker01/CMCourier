@@ -18,7 +18,7 @@ from cmcourier.adapters.assembly import (
     PdfAssembler,
     build_s4_process_pool,
 )
-from cmcourier.adapters.sources import As400DataSource, TabularDataSource
+from cmcourier.adapters.sources import As400DataSource, MssqlDataSource, TabularDataSource
 from cmcourier.adapters.tracking import SqliteDocumentCache, SQLiteTrackingStore
 from cmcourier.adapters.tracking.as400_niarvilog import (
     As400NiarvilogStore,
@@ -37,6 +37,8 @@ from cmcourier.config.schema import (
     IndexingColumnsModel,
     LocalScanTriggerConfig,
     MetadataConfigModel,
+    MssqlConnectionConfig,
+    MssqlMetadataSourceConfig,
     NiarvilogColumnsModel,
     PipelineConfig,
     RvabrepTriggerConfig,
@@ -385,6 +387,34 @@ def _build_as400_source(
     )
 
 
+def _build_mssql_source(
+    ref: ConnectionRef,
+    secrets: Secrets,
+    *,
+    table: str = "",
+    query: str | None = None,
+) -> MssqlDataSource:
+    """130: ``MssqlDataSource`` para *ref* (siempre alias del registro)."""
+    spec = ref.spec
+    if not isinstance(spec, MssqlConnectionConfig):  # pragma: no cover — el schema lo garantiza
+        raise ConfigurationError(
+            "connection kind mismatch", site=ref.site, alias=ref.alias, kind=ref.kind
+        )
+    credential = _require_credential(ref, secrets)
+    return MssqlDataSource(
+        host=spec.host,
+        port=spec.port,
+        database=spec.database,
+        driver=spec.driver,
+        username=credential.username,
+        password=credential.password,
+        encrypt=spec.encrypt,
+        trust_server_certificate=spec.trust_server_certificate,
+        table=table,
+        query=query,
+    )
+
+
 def build_niarvilog_store(config: PipelineConfig, secrets: Secrets) -> As400NiarvilogStore:
     """Store NIARVILOG del sync (034) sobre la conexión de ``tracking.as400_sync``."""
     sync_cfg = config.tracking.as400_sync
@@ -486,6 +516,11 @@ def _build_metadata_sources(
         elif isinstance(src_cfg, As400MetadataSourceConfig):
             ref = _require_ref(config, f"metadata:{src_cfg.alias}")
             registry[src_cfg.alias] = _build_as400_source(
+                ref, secrets, table=src_cfg.table or "", query=src_cfg.query
+            )
+        elif isinstance(src_cfg, MssqlMetadataSourceConfig):
+            ref = _require_ref(config, f"metadata:{src_cfg.alias}")
+            registry[src_cfg.alias] = _build_mssql_source(
                 ref, secrets, table=src_cfg.table or "", query=src_cfg.query
             )
         else:  # pragma: no cover — la unión discriminada lo impide

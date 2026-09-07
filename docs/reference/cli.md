@@ -92,8 +92,25 @@ Pre-flight validation. No corre el pipeline.
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--config` | Path (required) | — | Pipeline YAML. |
-| `--check` | choice | `all` | Una de `connections`, `mapping`, `metadata`, `cm-types`, `cm-targets`, `all`. |
+| `--check` | choice | `all` | Un grupo (`connections`, `mapping`, `metadata`, `cm-types`, `cm-targets`, `all`) o un check individual por nombre (126). |
 | `--log-level` | choice | `INFO` | — |
+
+Checks individuales (`CHECK_NAMES`, en orden de ejecución):
+
+| Check | Grupo | Qué prueba |
+|-------|-------|------------|
+| `log_dir_writable` | connections | `observability.log_dir` se crea y admite escritura. |
+| `cmis_connectivity` | connections | `repositoryInfo` del CMIS. |
+| `as400_connectivity` | connections | Cada conexión `as400` del registro (129): credenciales presentes + `SELECT 1 FROM SYSIBM.SYSDUMMY1`. SKIP si no hay ninguna. |
+| `mssql_connectivity` | connections | Cada conexión `mssql` del registro (130): credenciales presentes + `SELECT 1`. SKIP si no hay ninguna. |
+| `tracking_openable` | connections | La SQLite de tracking abre en WAL. |
+| `as400_sync` | connections | Conexión + tabla NIARVILOG cuando `tracking.as400_sync.enabled`. SKIP si está off. |
+| `mapping_completeness` | mapping | El Modelo Documental tiene ≥1 fila. |
+| `metadata_sources` | metadata | Cada fuente de `metadata.sources` (csv / as400 / mssql) devuelve ≥1 fila. |
+| `cm_type_alignment` | cm-types, cm-targets | Cada `cm_object_type` resuelve por `getTypeDefinition`. |
+| `cmis_folders_exist` | cm-targets | Cada `CMISFolder` declarado en MapeoRVI_CM existe en el repositorio. |
+| `cmis_properties_alignment` | cm-targets | Cada par `(CMISType, CMISPropertyId)` de MetadatosCM existe en la definición del tipo. |
+| `sample_dry_run` | metadata | S1→S4 sobre el primer documento, sin upload. |
 
 Exit codes: `0` si todos los checks pasan, `1` si alguno falla, `2` si la config no carga, `3` si el doctor crashea.
 

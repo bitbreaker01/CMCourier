@@ -204,6 +204,7 @@ metadata:
         #   "rvabrep"      — a column on the RVABREP row
         #   "csv:<alias>"  — a named CSV source declared under `sources:`
         #   "as400:<alias>"— a named AS400 source declared under `sources:`
+        #   "mssql:<alias>"— a named SQL Server source declared under `sources:` (130)
         - source_type: trigger
           lookup_value_column: cif         # (REQUIRED) column to read the value from
         - source_type: rvabrep
@@ -224,7 +225,7 @@ metadata:
           lookup_key_column: BRANCH_ID
 
   # sources — named lookup sources referenced by `csv:<alias>` / `as400:<alias>`
-  # above. A list; it MAY mix csv and as400 entries freely.
+  # / `mssql:<alias>` above. A list; it MAY mix csv, as400 and mssql entries freely.
   sources:                                 # (default: [] empty)
     - kind: csv                            # (default: "csv" — may be omitted)
       alias: clients                       # (REQUIRED) the name used in `csv:clients`
@@ -240,6 +241,13 @@ metadata:
       # provide EXACTLY ONE of `table` / `query`:
       table: BRANCHES                      # bare-table prefetch  (XOR query)
       # query: "SELECT * FROM RVILIB.BRANCHES WHERE ACTIVE = 'Y'"   # (XOR table)
+    - kind: mssql                          # (130) SQL Server lookup source
+      alias: clientes                      # (REQUIRED) the name used in `mssql:clientes`
+      connection: clientes_sql             # (REQUIRED) alias under `connections:` with kind mssql
+                                           # — no inline form; credentials come from
+                                           # CLIENTES_SQL_USERNAME / CLIENTES_SQL_PASSWORD
+      table: dbo.clientes                  # EXACTLY ONE of `table` / `query`
+      # query: "SELECT CIF, Nombre_Cliente FROM dbo.clientes WHERE Activo = 1"
 
   # prefetch_enabled — bulk-load metadata sources once at startup vs. per-doc.
   prefetch_enabled: true                   # (default: true)

@@ -195,14 +195,63 @@ Los dos números deben coincidir.
 
 ---
 
-## 5. Resetear entre pruebas
+## 5. SQL Server local como fuente de metadata (130)
+
+Mismo banco, pero `BAC_Nombre_Cliente` sale de una tabla SQL Server en vez
+del CSV. Sirve para probar el registro de conexiones (129), el adapter
+`mssql` (130) y las tarjetas de credenciales por alias de la consola.
+
+```bash
+# 1) driver ODBC de Microsoft en el host (una vez; requiere el repo de MS):
+sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+odbcinst -q -d            # debe listar [ODBC Driver 18 for SQL Server]
+
+# 2) SQL Server 2022 en Docker + tabla dbo.clientes desde sample/clients.csv
+cd scripts/staging
+docker compose -f mssql-compose.yml up -d
+bash mssql-seed.sh        # idempotente: recrea la tabla (1406 filas)
+cd ../..
+
+# 3) credenciales: el alias de conexión es `clientes_sql`, así que las
+#    env vars son CLIENTES_SQL_USERNAME / CLIENTES_SQL_PASSWORD
+export CMIS_USERNAME=admin CMIS_PASSWORD=admin
+export CLIENTES_SQL_USERNAME=sa CLIENTES_SQL_PASSWORD='CmCourier!2026'
+
+# 4) doctor: el check nuevo y la fuente concreta
+uv run cmcourier doctor --config sample/config-local-mssql.yaml --check mssql_connectivity
+uv run cmcourier doctor --config sample/config-local-mssql.yaml --check metadata_sources
+
+# 5) la consola con este YAML — en [2] CREDENCIALES aparece la tarjeta
+#    `clientes_sql · mssql · 127.0.0.1` además de CMIS
+uv run cmcourier console --config sample/config-local-mssql.yaml
+```
+
+Qué mirar:
+
+- `mssql_connectivity` en **PASS** con `clientes_sql@127.0.0.1` en el
+  mensaje; sin las env vars da **FAIL** nombrando `CLIENTES_SQL_USERNAME`.
+- `metadata_sources` en **PASS** con `clientes` (la fuente) — el doctor
+  cuenta filas contra `dbo.clientes`.
+- Una corrida desde `[5]` produce los mismos `BAC_Nombre_Cliente` que con
+  `config-local.yaml` (los datos son los mismos, sólo cambia la fuente).
+- El test de integración real: `CMCOURIER_MSSQL_LIVE=1 uv run pytest
+  tests/integration/adapters/test_mssql_live.py -q` (se salta sin la env var).
+
+Este YAML usa su propia SQLite (`sample/local-mssql-tracking.db`) para no
+mezclar corridas con el banco CSV. Bajar el SQL Server:
+`docker compose -f scripts/staging/mssql-compose.yml down` (`-v` borra los datos;
+re-correr `mssql-seed.sh` después).
+
+---
+
+## 6. Resetear entre pruebas
 
 ```bash
 bash scripts/staging/wipe-alfresco-docs.sh
 TRACKING_DB=sample/local-tracking.db bash scripts/staging/wipe-local-state.sh
 ```
 
-## 6. Bajar el entorno
+## 7. Bajar el entorno
 
 ```bash
 cd scripts/staging

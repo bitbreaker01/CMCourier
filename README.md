@@ -34,7 +34,7 @@ Cada documento del legacy IBM RVI atraviesa **8 stages atómicos** (S0–S7):
 1. **S0 — Trigger** — leer un CSV/RVABREP/local-scan para saber qué procesar.
 2. **S1 — Indexing** — querear RVABREP en AS400 (o su mirror CSV) para resolver metadata RVI.
 3. **S2 — Mapping** — convertir el `ID RVI` a un tipo de Content Manager + folder destino.
-4. **S3 — Metadata resolution** — resolver las propiedades CMIS con cadena de fallback configurable (trigger → CSV → AS400 → default).
+4. **S3 — Metadata resolution** — resolver las propiedades CMIS con cadena de fallback configurable (trigger → CSV → AS400 → SQL Server → default).
 5. **S4 — Assembly** — tomar los TIFFs/PDFs del file server y armar el PDF final.
 6. **S5 — Upload** — POST multipart a CMIS Browser Binding, con HTTP/2, AIMD auto-tune y circuit breaker.
 7. **S6 — Tracking** — persistir el estado en SQLite (WAL) + opcionalmente AS400 NIARVILOG.
@@ -89,6 +89,7 @@ Ratificación: [`.specify/memory/constitution.md`](.specify/memory/constitution.
 | Config | Pydantic v2 (validación en startup) |
 | CLI | Click |
 | AS400 | pyodbc + iSeries Access ODBC (conexiones thread-local) |
+| SQL Server | pyodbc + msodbcsql18, misma base ODBC que AS400 — fuente de metadata `mssql:<alias>` (130) |
 | HTTP | `httpx[http2]` (multiplexing CMIS) |
 | CSV | pandas |
 | Ensamblado PDF | img2pdf (fast) + Pillow + PyPDF2 (fallback) |
@@ -111,6 +112,7 @@ Ratificación: [`.specify/memory/constitution.md`](.specify/memory/constitution.
   - **Linux** (Debian/Ubuntu): `sudo apt install unixodbc`
   - **macOS**: `brew install unixodbc`
   - **Windows**: instalar el [IBM iSeries Access ODBC Driver](https://www.ibm.com/support/pages/ibm-i-access-client-solutions)
+- (Opcional) Driver ODBC de Microsoft si alguna fuente de metadata es SQL Server (`kind: mssql`): `msodbcsql18` — en Debian/Ubuntu `sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18` tras agregar el repo de Microsoft.
 - Git
 
 ### Instalar (editable + dev tools)

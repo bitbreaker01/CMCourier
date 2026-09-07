@@ -9,6 +9,7 @@ import httpx
 import pytest
 import respx
 
+from cmcourier.adapters.sources.mssql import MssqlDataSource
 from cmcourier.config.loader import Credential, Secrets, load_config
 from cmcourier.config.wiring import build_pipeline
 from cmcourier.domain.exceptions import ConfigurationError
@@ -315,6 +316,63 @@ class TestBuildMappingService:
         m2 = svc.get_mapping("FB23")
         assert m2.cmis_type == "DocCN02"
         assert m2.required_metadata_fields == ("CIF",)
+
+
+# ---------------------------------------------------------------------------
+# 130 — fuente de metadata `kind: mssql` por alias del registro
+# ---------------------------------------------------------------------------
+
+
+def _write_mssql_yaml(tmp_path: Path) -> Path:
+    yaml_path = _write_yaml(tmp_path)
+    text = yaml_path.read_text()
+    text = (
+        "connections:\n"
+        "  clientes_sql:\n"
+        "    kind: mssql\n"
+        "    host: 127.0.0.1\n"
+        "    database: cmcourier\n"
+        "    trust_server_certificate: true\n"
+    ) + text.replace(
+        "  sources:\n    - alias: clients",
+        "  sources:\n"
+        "    - kind: mssql\n"
+        "      alias: clientes\n"
+        "      connection: clientes_sql\n"
+        "      table: dbo.clientes\n"
+        "    - alias: clients",
+        1,
+    )
+    yaml_path.write_text(text)
+    return yaml_path
+
+
+class TestMssqlMetadataSource130:
+    def test_builds_mssql_datasource_under_source_alias(self, tmp_path: Path) -> None:
+        """E4 — con CLIENTES_SQL_* el registro trae un MssqlDataSource bajo `clientes`."""
+        config = load_config(_write_mssql_yaml(tmp_path))
+        secrets = Secrets(
+            {
+                "cmis": Credential("tester", "secret-not-real"),
+                "clientes_sql": Credential("sa", "not-real"),
+            }
+        )
+        pipeline = build_pipeline(config, secrets)
+        registry = pipeline._metadata_service._sources_registry  # type: ignore[attr-defined]
+        source = registry["clientes"]
+        assert isinstance(source, MssqlDataSource)
+        assert "SERVER=127.0.0.1,1433" in source._build_connection_string()
+        assert "TrustServerCertificate=yes" in source._build_connection_string()
+
+    def test_missing_mssql_credentials_name_alias_env_vars(self, tmp_path: Path) -> None:
+        config = load_config(_write_mssql_yaml(tmp_path))
+        with pytest.raises(ConfigurationError) as ei:
+            build_pipeline(config, _secrets())
+        assert ei.value.context["missing_vars"] == [
+            "CLIENTES_SQL_USERNAME",
+            "CLIENTES_SQL_PASSWORD",
+        ]
+        assert ei.value.context["site"] == "metadata:clientes"
 
 
 # ---------------------------------------------------------------------------

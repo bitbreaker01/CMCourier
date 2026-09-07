@@ -248,7 +248,7 @@ Reglas:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `source_type` | str (required) | — | `"trigger"`, `"rvabrep"`, `"csv:{alias}"` o `"as400:{alias}"`. |
+| `source_type` | str (required) | — | `"trigger"`, `"rvabrep"`, `"csv:{alias}"`, `"as400:{alias}"` o `"mssql:{alias}"` (130). El prefijo se parsea con `split_lookup_source_type()`; `LOOKUP_SOURCE_KINDS = ("csv", "as400", "mssql")`. |
 | `lookup_value_column` | str (required) | — | Columna a leer. |
 | `lookup_key_column` | `str \| None` | `None` | Columna pivot. |
 | `validation` | `ValidationModel \| None` | `None` | — |
@@ -280,6 +280,18 @@ Reglas:
 | `query` | `str \| None` | `None` | `min_length=1` | Modo query. |
 
 Exactamente uno de `table` / `query` (validator `_exactly_one_table_or_query`).
+
+#### `MssqlMetadataSourceConfig` — `kind: mssql` (130)
+
+| Field | Type | Default | Constraint | Description |
+|-------|------|---------|------------|-------------|
+| `kind` | Literal `"mssql"` (required) | — | — | — |
+| `alias` | str (required) | — | — | Nombre usado en `source_type: mssql:{alias}`. |
+| `connection` | str (required) | — | — | Alias de `connections` con `kind: mssql`. NO admite forma inline: SQL Server sólo existe a través del registro (129). |
+| `table` | `str \| None` | `None` | `min_length=1` | Modo table (p. ej. `dbo.clientes`). |
+| `query` | `str \| None` | `None` | `min_length=1` | Modo query. |
+
+Exactamente uno de `table` / `query`. Si `connection` apunta a una conexión de otro kind, `load_config` falla nombrando `metadata.sources[{alias}].connection` y "requires kind 'mssql'". En runtime el registro de fuentes recibe un `MssqlDataSource` (subclase de `OdbcDataSource`, misma base que AS400) bajo `alias`.
 
 ### `MetadataCacheConfig`
 

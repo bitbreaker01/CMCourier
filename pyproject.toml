@@ -122,6 +122,7 @@ markers = [
   "unit: fast tests that mock all ports",
   "integration: tests that exercise real adapters (SQLite, CSV, Alfresco, etc.)",
   "slow: tests that take more than 5 seconds individually",
+  "mssql_live: tests against the local SQL Server container (need CMCOURIER_MSSQL_LIVE=1)",
 ]
 
 # ---------------------------------------------------------------------------

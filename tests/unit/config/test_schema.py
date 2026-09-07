@@ -30,11 +30,13 @@ from cmcourier.config.schema import (
     MetadataCacheConfig,
     MetadataConfigModel,
     MssqlConnectionConfig,
+    MssqlMetadataSourceConfig,
     PipelineConfig,
     ProcessingConfig,
     RvabrepTriggerConfig,
     TrackingConfig,
     TriggerCsvConfig,
+    split_lookup_source_type,
 )
 
 pytestmark = pytest.mark.unit
@@ -1508,3 +1510,94 @@ class TestConnectionRegistry:
         config = PipelineConfig.model_validate(data)
         ref = config.connection_ref("tracking.as400_sync")
         assert ref is not None and ref.spec.host == "h"
+
+
+class TestMssqlMetadataSource:
+    """130 — fuente de metadata ``kind: mssql`` (siempre por alias del registro)."""
+
+    def _data(self, fixture_paths: dict[str, Path], tmp_path: Path) -> dict[str, Any]:
+        data = _build_full_data(
+            fixture_paths["trigger"],
+            fixture_paths["rvabrep"],
+            fixture_paths["modelo"],
+            fixture_paths["clients"],
+            fixture_paths["assembly_root"],
+            tmp_path,
+        )
+        data["connections"] = {
+            "clientes_sql": {"kind": "mssql", "host": "h", "database": "cmcourier"}
+        }
+        return data
+
+    def test_mssql_source_resolves_to_ref_with_schema_qualified_table(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        """E4 — carga y `connection_refs()` trae el sitio `metadata:clientes`."""
+        data = self._data(fixture_paths, tmp_path)
+        data["metadata"]["sources"].append(
+            {
+                "kind": "mssql",
+                "alias": "clientes",
+                "connection": "clientes_sql",
+                "table": "dbo.clientes",
+            }
+        )
+        config = PipelineConfig.model_validate(data)
+        source = config.metadata.sources[-1]
+        assert isinstance(source, MssqlMetadataSourceConfig)
+        assert source.table == "dbo.clientes"
+        ref = config.connection_ref("metadata:clientes")
+        assert ref is not None
+        assert (ref.alias, ref.kind) == ("clientes_sql", "mssql")
+        assert config.required_aliases() == ("clientes_sql",)
+
+    def test_mssql_source_pointing_to_as400_connection_rejected(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        data = self._data(fixture_paths, tmp_path)
+        data["connections"]["rvi"] = {"kind": "as400", "host": "h"}
+        data["metadata"]["sources"].append(
+            {"kind": "mssql", "alias": "clientes", "connection": "rvi", "table": "dbo.c"}
+        )
+        with pytest.raises(ValidationError) as ei:
+            PipelineConfig.model_validate(data)
+        msg = str(ei.value)
+        assert "metadata.sources[clientes].connection" in msg
+        assert "requires kind 'mssql'" in msg
+
+    def test_mssql_source_requires_exactly_one_of_table_or_query(self) -> None:
+        with pytest.raises(ValidationError):
+            MssqlMetadataSourceConfig(kind="mssql", alias="c", connection="clientes_sql")
+        with pytest.raises(ValidationError):
+            MssqlMetadataSourceConfig(
+                kind="mssql", alias="c", connection="clientes_sql", table="t", query="q"
+            )
+
+    def test_mssql_source_has_no_inline_form(self) -> None:
+        with pytest.raises(ValidationError):
+            MssqlMetadataSourceConfig.model_validate(
+                {
+                    "kind": "mssql",
+                    "alias": "c",
+                    "connection": {"kind": "mssql", "host": "h", "database": "d"},
+                    "table": "t",
+                }
+            )
+
+    def test_field_source_accepts_mssql_prefix(self) -> None:
+        item = FieldSourceItem(source_type="mssql:clientes", lookup_value_column="Nombre")
+        assert item.source_type == "mssql:clientes"
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("csv:clients", ("csv", "clients")),
+            ("as400:personas", ("as400", "personas")),
+            ("mssql:clientes", ("mssql", "clientes")),
+            ("trigger", None),
+            ("rvabrep", None),
+            ("oracle:x", None),
+        ],
+    )
+    def test_split_lookup_source_type(self, value: str, expected: tuple[str, str] | None) -> None:
+        assert split_lookup_source_type(value) == expected

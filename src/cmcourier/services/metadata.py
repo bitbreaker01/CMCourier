@@ -27,6 +27,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from cmcourier.config.schema import split_lookup_source_type
 from cmcourier.domain.exceptions import (
     ConfigurationError,
     DefaultValidationFailedError,
@@ -43,8 +44,8 @@ from cmcourier.domain.ports import IDataSource
 
 _logger = logging.getLogger(__name__)
 
-_CSV_PREFIX = "csv:"
-_AS400_PREFIX = "as400:"
+# 130: `csv:` / `as400:` / `mssql:` resuelven contra el registro por alias
+# con el mismo contrato; `split_lookup_source_type` es el único parser.
 
 
 def _trigger_cif(trigger: Trigger) -> str | None:
@@ -195,14 +196,10 @@ class MetadataService:
         seen_pairs: set[tuple[str, str, str]] = set()
         for fsc in self._config.field_sources.values():
             for sc in fsc.sources:
-                if sc.source_type.startswith(_CSV_PREFIX):
-                    alias = sc.source_type[len(_CSV_PREFIX) :]
-                    prefix_label = "csv"
-                elif sc.source_type.startswith(_AS400_PREFIX):
-                    alias = sc.source_type[len(_AS400_PREFIX) :]
-                    prefix_label = "as400"
-                else:
+                lookup = split_lookup_source_type(sc.source_type)
+                if lookup is None:
                     continue
+                prefix_label, alias = lookup
                 if alias not in self._sources_registry:
                     raise ConfigurationError(
                         f"unknown {prefix_label} alias referenced in metadata config",
@@ -390,16 +387,10 @@ class MetadataService:
             return self._fetch_trigger(sc, trigger)
         if sc.source_type == "rvabrep":
             return self._fetch_rvabrep(sc, document)
-        if sc.source_type.startswith(_CSV_PREFIX):
-            alias = sc.source_type[len(_CSV_PREFIX) :]
-            return self._fetch_lookup(
-                sc, alias, "csv", trigger, document, cif_override=cif_override
-            )
-        if sc.source_type.startswith(_AS400_PREFIX):
-            alias = sc.source_type[len(_AS400_PREFIX) :]
-            return self._fetch_lookup(
-                sc, alias, "as400", trigger, document, cif_override=cif_override
-            )
+        lookup = split_lookup_source_type(sc.source_type)
+        if lookup is not None:
+            kind, alias = lookup
+            return self._fetch_lookup(sc, alias, kind, trigger, document, cif_override=cif_override)
         raise ConfigurationError("unknown source_type", source_type=sc.source_type)
 
     def _fetch_trigger(self, sc: SourceConfig, trigger: Trigger) -> str | None:

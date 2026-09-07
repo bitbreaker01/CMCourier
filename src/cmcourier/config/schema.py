@@ -40,12 +40,14 @@ __all__ = [
     "IndexingColumnsModel",
     "IndexingConfig",
     "IndexingSourceConfig",
+    "LOOKUP_SOURCE_KINDS",
     "LocalScanTriggerConfig",
     "MappingConfig",
     "MetadataCacheConfig",
     "MetadataConfigModel",
     "MetadataSourceConfig",
     "MssqlConnectionConfig",
+    "MssqlMetadataSourceConfig",
     "NiarvilogColumnsModel",
     "ObservabilityConfig",
     "PipelineConfig",
@@ -62,6 +64,7 @@ __all__ = [
     "TriggerCsvConfig",
     "ValidationModel",
     "credential_env_vars",
+    "split_lookup_source_type",
 ]
 
 import re
@@ -423,11 +426,47 @@ class As400MetadataSourceConfig(BaseModel):
         return self
 
 
+class MssqlMetadataSourceConfig(BaseModel):
+    """130: un `source` SQL Server con nombre, disponible para la resolución
+    de metadata.
+
+    La conexión es SIEMPRE un alias del registro ``connections:`` (kind
+    ``mssql``): no hay forma inline — es nuevo, no hay compat que respetar.
+    ``table`` admite esquema (``dbo.clientes``); igual que AS400, DEBE
+    setearse exactamente uno de ``table`` / ``query``.
+    """
+
+    model_config = _STRICT
+    kind: Literal["mssql"]
+    alias: str
+    connection: str
+    table: str | None = Field(default=None, min_length=1)
+    query: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _exactly_one_table_or_query(self) -> MssqlMetadataSourceConfig:
+        if bool(self.table) == bool(self.query):
+            raise ValueError("mssql metadata source requires exactly one of `table` or `query`")
+        return self
+
+
 # Nombre retrocompatible para la forma legacy solo-CSV.
 MetadataSourceConfig = Annotated[
-    CsvMetadataSourceConfig | As400MetadataSourceConfig,
+    CsvMetadataSourceConfig | As400MetadataSourceConfig | MssqlMetadataSourceConfig,
     Field(discriminator="kind"),
 ]
+
+# 130: prefijos de `source_type` que resuelven contra `metadata.sources[]`
+# por alias. Un único helper reemplaza los `startswith` repartidos.
+LOOKUP_SOURCE_KINDS: tuple[str, ...] = ("csv", "as400", "mssql")
+
+
+def split_lookup_source_type(source_type: str) -> tuple[str, str] | None:
+    """``"csv:clients"`` → ``("csv", "clients")``; ``None`` si no es un lookup."""
+    kind, sep, alias = source_type.partition(":")
+    if not sep or kind not in LOOKUP_SOURCE_KINDS:
+        return None
+    return kind, alias
 
 
 class ValidationModel(BaseModel):
@@ -460,7 +499,7 @@ class FieldSourceItem(BaseModel):
     def _validate_source_type(cls, value: str) -> str:
         if value in ("trigger", "rvabrep"):
             return value
-        if value.startswith("csv:") or value.startswith("as400:"):
+        if split_lookup_source_type(value) is not None:
             return value
         raise ValueError(f"unknown source_type: {value!r}")
 
@@ -982,6 +1021,15 @@ class PipelineConfig(BaseModel):
                         meta_source.as400_connection,
                         "as400",
                         f"metadata.sources[{meta_source.alias}].as400_connection",
+                    )
+                )
+            elif isinstance(meta_source, MssqlMetadataSourceConfig):
+                sites.append(
+                    (
+                        f"metadata:{meta_source.alias}",
+                        meta_source.connection,
+                        "mssql",
+                        f"metadata.sources[{meta_source.alias}].connection",
                     )
                 )
         sync = self.tracking.as400_sync

@@ -1,0 +1,115 @@
+"""130 E5 — check ``mssql_connectivity`` del doctor: una fila por conexión
+``mssql`` del registro, ``SELECT 1`` como probe, SKIP sin conexiones."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+from cmcourier.cli import doctor as doctor_module
+from cmcourier.cli.doctor import (
+    _CHECK_GROUPS,  # type: ignore[attr-defined]
+    CHECK_NAMES,
+    CheckStatus,
+    _check_as400_connectivity,  # type: ignore[attr-defined]
+    _check_mssql_connectivity,  # type: ignore[attr-defined]
+    group_of,
+)
+from cmcourier.config.loader import Credential, Secrets
+from cmcourier.config.schema import As400ConnectionConfig, ConnectionRef, MssqlConnectionConfig
+
+pytestmark = pytest.mark.unit
+
+
+@dataclass
+class _StubConfig:
+    refs: tuple[ConnectionRef, ...]
+
+    def connection_refs(self) -> tuple[ConnectionRef, ...]:
+        return self.refs
+
+
+def _mssql_ref(alias: str, site: str, host: str = "sql.test") -> ConnectionRef:
+    spec = MssqlConnectionConfig(host=host, database="cmcourier")
+    return ConnectionRef(alias=alias, kind="mssql", spec=spec, site=site)
+
+
+def _as400_ref(alias: str, site: str) -> ConnectionRef:
+    spec = As400ConnectionConfig(host="as400.test", port=446, database="RVILIB")
+    return ConnectionRef(alias=alias, kind="as400", spec=spec, site=site)
+
+
+def _secrets(**aliases: tuple[str, str]) -> Secrets:
+    creds = {"cmis": Credential("cmis", "cmis")}
+    creds.update({alias: Credential(*pair) for alias, pair in aliases.items()})
+    return Secrets(creds)
+
+
+def _patch_sources(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tuple[str, list[Any]]]]:
+    """Parchea AMBOS adapters en el doctor y captura qué SQL recibe cada uno."""
+    captured: dict[str, list[tuple[str, list[Any]]]] = {"mssql": [], "as400": []}
+
+    def _fake(kind: str) -> Any:
+        def _build(**kwargs: Any) -> MagicMock:
+            src = MagicMock()
+            src.query = MagicMock(
+                side_effect=lambda sql, params: captured[kind].append((sql, params))
+            )
+            src.close = MagicMock()
+            return src
+
+        return _build
+
+    monkeypatch.setattr(doctor_module, "MssqlDataSource", _fake("mssql"))
+    monkeypatch.setattr(doctor_module, "As400DataSource", _fake("as400"))
+    return captured
+
+
+class TestMssqlConnectivityCheck:
+    def test_registered_in_check_names_and_connections_group(self) -> None:
+        assert "mssql_connectivity" in CHECK_NAMES
+        assert (
+            CHECK_NAMES.index("mssql_connectivity") == CHECK_NAMES.index("as400_connectivity") + 1
+        )
+        assert "mssql_connectivity" in _CHECK_GROUPS["connections"]
+        assert group_of("mssql_connectivity") == "connections"
+
+    def test_skips_without_mssql_connections(self) -> None:
+        config = _StubConfig(refs=(_as400_ref("as400", "indexing"),))
+        result = _check_mssql_connectivity(config, _secrets(as400=("u", "p")))  # type: ignore[arg-type]
+        assert result.status == CheckStatus.SKIP
+        assert result.details["reason"] == "no mssql connections in config"
+
+    def test_fails_naming_alias_env_vars(self) -> None:
+        config = _StubConfig(refs=(_mssql_ref("clientes_sql", "metadata:clientes"),))
+        result = _check_mssql_connectivity(config, _secrets())  # type: ignore[arg-type]
+        assert result.status == CheckStatus.FAIL
+        assert "CLIENTES_SQL_USERNAME" in result.message
+        assert "metadata:clientes" in result.message
+
+    def test_probes_with_select_1_and_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured = _patch_sources(monkeypatch)
+        config = _StubConfig(refs=(_mssql_ref("clientes_sql", "metadata:clientes"),))
+        result = _check_mssql_connectivity(config, _secrets(clientes_sql=("u", "p")))  # type: ignore[arg-type]
+        assert result.status == CheckStatus.PASS
+        assert captured["mssql"] == [("SELECT 1", [])]
+        assert captured["as400"] == []
+        assert "clientes_sql@sql.test" in result.message
+
+    def test_as400_check_ignores_mssql_refs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Las dos familias no se mezclan: cada check prueba sólo su kind."""
+        captured = _patch_sources(monkeypatch)
+        config = _StubConfig(
+            refs=(_as400_ref("as400", "indexing"), _mssql_ref("clientes_sql", "metadata:clientes"))
+        )
+        secrets = _secrets(as400=("u", "p"), clientes_sql=("u", "p"))
+        as400 = _check_as400_connectivity(config, secrets)  # type: ignore[arg-type]
+        mssql = _check_mssql_connectivity(config, secrets)  # type: ignore[arg-type]
+        assert as400.status == CheckStatus.PASS and mssql.status == CheckStatus.PASS
+        assert captured["as400"] == [("SELECT 1 FROM SYSIBM.SYSDUMMY1", [])]
+        assert captured["mssql"] == [("SELECT 1", [])]
+        assert "clientes_sql" not in as400.details
+        assert "as400" not in mssql.details

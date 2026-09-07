@@ -65,7 +65,7 @@ def _load(config_path: Path) -> tuple[PipelineConfig, Secrets]:
     """Carga YAML + secrets y valida que el sync sea operable. Sale con 2."""
     try:
         config = load_config(config_path)
-        secrets = load_secrets()
+        secrets = load_secrets(config)
     except ConfigurationError as exc:
         click.echo(f"ConfigurationError: {exc}", err=True)
         sys.exit(2)

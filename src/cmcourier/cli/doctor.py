@@ -45,7 +45,12 @@ from types import MappingProxyType
 from typing import TypeVar
 
 from cmcourier.adapters.assembly import PdfAssembler
-from cmcourier.adapters.sources import As400DataSource, TabularDataSource
+from cmcourier.adapters.sources import (
+    As400DataSource,
+    MssqlDataSource,
+    OdbcDataSource,
+    TabularDataSource,
+)
 from cmcourier.adapters.tracking import SQLiteTrackingStore
 from cmcourier.adapters.upload.cmis_uploader import CmisConfig, CmisUploader
 from cmcourier.config.loader import Secrets
@@ -57,6 +62,8 @@ from cmcourier.config.schema import (
     CsvMetadataSourceConfig,
     CsvTriggerConfig,
     MetadataSourceConfig,
+    MssqlConnectionConfig,
+    MssqlMetadataSourceConfig,
     PipelineConfig,
     SingleDocTriggerConfig,
 )
@@ -134,6 +141,7 @@ _CHECK_GROUPS: dict[str, frozenset[str]] = {
             "log_dir_writable",
             "cmis_connectivity",
             "as400_connectivity",
+            "mssql_connectivity",  # 130
             "tracking_openable",
             # 126: antes no pertenecía a ningún grupo (solo corría con
             # `all`). SKIP cuando el sync está off, así no cambia veredictos.
@@ -161,6 +169,7 @@ CHECK_NAMES: tuple[str, ...] = (
     "log_dir_writable",
     "cmis_connectivity",
     "as400_connectivity",
+    "mssql_connectivity",  # 130
     "tracking_openable",
     "as400_sync",
     "mapping_completeness",
@@ -230,6 +239,8 @@ def run_doctor(
         results.append(_check_cmis_connectivity(config, secrets))
     if _selected("as400_connectivity", selected):
         results.append(_check_as400_connectivity(config, secrets))
+    if _selected("mssql_connectivity", selected):
+        results.append(_check_mssql_connectivity(config, secrets))
     if _selected("tracking_openable", selected):
         results.append(_check_tracking_openable(config))
     if _selected("as400_sync", selected):
@@ -306,15 +317,28 @@ def _open_metadata_source(
     config: PipelineConfig,
     source_cfg: MetadataSourceConfig,
     secrets: Secrets,
-) -> TabularDataSource | As400DataSource:
+) -> TabularDataSource | OdbcDataSource:
     if isinstance(source_cfg, CsvMetadataSourceConfig):
         return TabularDataSource(source_cfg.csv_path)
-    if isinstance(source_cfg, As400MetadataSourceConfig):
+    if isinstance(source_cfg, As400MetadataSourceConfig | MssqlMetadataSourceConfig):
         ref = config.connection_ref(f"metadata:{source_cfg.alias}")
         if ref is None:  # pragma: no cover — el schema lo garantiza
             raise RuntimeError(f"metadata source {source_cfg.alias!r} has no connection")
-        return _open_as400(ref, secrets, table=source_cfg.table or "", query=source_cfg.query)
+        return _open_odbc(ref, secrets, table=source_cfg.table or "", query=source_cfg.query)
     raise RuntimeError(f"unknown metadata source kind: {source_cfg!r}")
+
+
+def _open_odbc(
+    ref: ConnectionRef,
+    secrets: Secrets,
+    *,
+    table: str = "",
+    query: str | None = None,
+) -> OdbcDataSource:
+    """130: despacha por ``ref.kind`` al adapter ODBC concreto."""
+    if ref.kind == "mssql":
+        return _open_mssql(ref, secrets, table=table, query=query)
+    return _open_as400(ref, secrets, table=table, query=query)
 
 
 def _open_as400(
@@ -336,6 +360,32 @@ def _open_as400(
         driver=spec.driver,
         username=credential.username,
         password=credential.password,
+        table=table,
+        query=query,
+    )
+
+
+def _open_mssql(
+    ref: ConnectionRef,
+    secrets: Secrets,
+    *,
+    table: str = "",
+    query: str | None = None,
+) -> MssqlDataSource:
+    """130: ``MssqlDataSource`` para *ref*; ``require`` nombra las env vars del alias."""
+    spec = ref.spec
+    if not isinstance(spec, MssqlConnectionConfig):  # pragma: no cover — el schema lo garantiza
+        raise RuntimeError(f"connection {ref.alias!r} is not mssql")
+    credential = secrets.require(ref.alias)
+    return MssqlDataSource(
+        host=spec.host,
+        port=spec.port,
+        database=spec.database,
+        driver=spec.driver,
+        username=credential.username,
+        password=credential.password,
+        encrypt=spec.encrypt,
+        trust_server_certificate=spec.trust_server_certificate,
         table=table,
         query=query,
     )
@@ -420,11 +470,21 @@ def _check_cmis_connectivity(config: PipelineConfig, secrets: Secrets) -> CheckR
 # pseudo-tabla canónica de IBM para health checks (siempre 1 fila, 1
 # columna IBMREQD, sin permisos especiales).
 _AS400_PROBE_SQL = "SELECT 1 FROM SYSIBM.SYSDUMMY1"
+# 130: SQL Server sí acepta un SELECT sin FROM.
+_MSSQL_PROBE_SQL = "SELECT 1"
+_PROBE_SQL_BY_KIND: Mapping[str, str] = MappingProxyType(
+    {"as400": _AS400_PROBE_SQL, "mssql": _MSSQL_PROBE_SQL}
+)
 
 
 def _check_as400_connectivity(config: PipelineConfig, secrets: Secrets) -> CheckResult:
     """129: prueba CADA conexión as400 que la config necesita, una fila por alias."""
     return _check_connections("as400_connectivity", config, secrets, kind="as400")
+
+
+def _check_mssql_connectivity(config: PipelineConfig, secrets: Secrets) -> CheckResult:
+    """130: ídem para las conexiones ``mssql`` del registro."""
+    return _check_connections("mssql_connectivity", config, secrets, kind="mssql")
 
 
 def _check_connections(
@@ -475,9 +535,9 @@ def _probe_connection(ref: ConnectionRef, secrets: Secrets) -> str:
         user_var, pass_var = ref.env_vars
         return f"FAIL: credentials missing in environment (set {user_var} / {pass_var})"
     try:
-        src = _open_as400(ref, secrets)
+        src = _open_odbc(ref, secrets)
         try:
-            src.query(_AS400_PROBE_SQL, [])
+            src.query(_PROBE_SQL_BY_KIND[ref.kind], [])
         finally:
             src.close()
     except Exception as exc:  # noqa: BLE001
