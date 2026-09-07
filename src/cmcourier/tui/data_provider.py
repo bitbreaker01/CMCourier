@@ -23,6 +23,7 @@ from __future__ import annotations
 __all__ = ["TUIDataProvider", "TUISnapshot"]
 
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -36,7 +37,11 @@ from cmcourier.observability.network_info import detect_link_speed_mbps
 from cmcourier.orchestrators.streaming import StreamingSnapshot
 from cmcourier.services.auto_tune import AutoTuneController
 from cmcourier.services.lane_controller import LaneController, LaneSnapshot
-from cmcourier.services.worker_pool_stats import ResizableSemaphore, WorkerPoolStats
+from cmcourier.services.worker_pool_stats import (
+    ResizableSemaphore,
+    WorkerPoolStats,
+    WorkerPoolStatsSnapshot,
+)
 
 # Stages que se muestran en el tab PREP. S5 vive en UPLOAD.
 PREP_STAGES: tuple[str, ...] = ("S0", "S1", "S2", "S3", "S4")
@@ -114,6 +119,16 @@ class TUISnapshot:
     # ---------- 064: modo de orquestación (decide el tab BUCKET vs CHUNKS)
     mode: Literal["batched", "streaming"] = "batched"
 
+    # ---------- 134: tasa por ventana deslizante + ETA de corrida.
+    # ``docs_processed`` son resultados terminales (subido, fallido,
+    # salteado, filtrado). La ventana es None hasta tener dos muestras
+    # separadas ≥ 1 s; la ETA sólo existe con ``planned_total`` (el
+    # `total` de [5] / --total): sin él la fuente puede tener 20M filas.
+    docs_processed: int = 0
+    throughput_window_docs_per_s: float | None = None
+    planned_total: int | None = None
+    eta_run_s: float | None = None
+
     # ---------- 064: snapshot del tab BUCKET en `streaming` (None en `batched`)
     bucket: StreamingSnapshot | None = None
 
@@ -143,8 +158,19 @@ class TUIDataProvider:
         tracking_store: ITrackingStore | None = None,
         mode: Literal["batched", "streaming"] = "batched",
         bucket_provider: Callable[[], StreamingSnapshot | None] | None = None,
+        planned_total: int | None = None,
+        window_s: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._pipeline_name = pipeline_name
+        # 134: ventana deslizante de (t, procesados). Se alimenta en cada
+        # ``snapshot()``; con [6] en otra pestaña hay huecos, pero la tasa
+        # es Δdocs/Δt entre la muestra más vieja dentro de la ventana y la
+        # última, así que sigue siendo real.
+        self._planned_total = planned_total if planned_total is None else max(0, int(planned_total))
+        self._window_s = float(window_s)
+        self._clock = clock
+        self._window: deque[tuple[float, int]] = deque()
         self._fallback_recorder = metrics_recorder
         # 030: cuando el orchestrator multi-batch maneja la corrida, el
         # provider sigue apuntando al recorder del `chunk` activo. Para
@@ -225,14 +251,14 @@ class TUIDataProvider:
 
     def mark_batch_started(self, batch_id: str) -> None:
         self._batch_id = batch_id
-        self._batch_started_monotonic = time.monotonic()
+        self._batch_started_monotonic = self._clock()
         self._batch_completed_monotonic = None
         self._is_complete = False
 
     def mark_batch_complete(self) -> None:
         self._is_complete = True
         # 052: congela el reloj de la corrida al completarse.
-        self._batch_completed_monotonic = time.monotonic()
+        self._batch_completed_monotonic = self._clock()
 
     # ------------------------------------------------------- drill-down (052)
 
@@ -268,12 +294,15 @@ class TUIDataProvider:
         if self._batch_started_monotonic is None:
             elapsed = 0.0
         else:
-            end = self._batch_completed_monotonic or time.monotonic()
+            end = self._batch_completed_monotonic or self._clock()
             elapsed = end - self._batch_started_monotonic
         completed = pool.completed
         throughput = (completed / elapsed) if elapsed > 0 and completed > 0 else 0.0
 
         chunks_snapshot = self._chunks_state_snapshot()
+        processed = self._docs_processed(chunks_snapshot, pool)
+        window_rate = self._sample_window(processed)
+        eta_run_s = self._eta_run(processed, window_rate)
         (
             chunk_bytes_uploaded,
             chunk_bytes_total,
@@ -343,9 +372,61 @@ class TUIDataProvider:
             current_chunk_elapsed_s=chunk_elapsed_s,
             current_chunk_avg_mbps=chunk_avg_mbps,
             current_chunk_eta_s=chunk_eta_s,
+            docs_processed=processed,
+            throughput_window_docs_per_s=window_rate,
+            planned_total=self._planned_total,
+            eta_run_s=eta_run_s,
             mode=self._mode,
             bucket=(self._bucket_provider() if self._bucket_provider is not None else None),
         )
+
+    # ------------------------------------------ 134: ventana deslizante + ETA
+
+    @staticmethod
+    def _docs_processed(
+        chunks_snapshot: tuple[dict[str, object], ...], pool: WorkerPoolStatsSnapshot
+    ) -> int:
+        """Resultados terminales de la corrida. Con `chunk`s, suma sobre
+        ellos; en el path monolítico (resume) cae a los contadores del pool."""
+        if not chunks_snapshot:
+            return int(pool.completed) + int(pool.failed)
+        keys = (
+            "s5_done",
+            "s5_failed",
+            "upload_skipped",
+            "prep_failed",
+            "prep_filtered",
+            "prep_skipped",
+        )
+        total = 0
+        for row in chunks_snapshot:
+            for k in keys:
+                v = row.get(k, 0)
+                if isinstance(v, (int, float)):
+                    total += int(v)
+        return total
+
+    def _sample_window(self, processed: int) -> float | None:
+        now = self._clock()
+        self._window.append((now, processed))
+        cutoff = now - self._window_s
+        # Queda como más vieja la última muestra en o antes del corte:
+        # la ventana cubre ≥ window_s sin perder el punto de partida.
+        while len(self._window) > 1 and self._window[1][0] <= cutoff:
+            self._window.popleft()
+        t0, c0 = self._window[0]
+        dt = now - t0
+        if dt < 1.0:
+            return None
+        return max(0, processed - c0) / dt
+
+    def _eta_run(self, processed: int, window_rate: float | None) -> float | None:
+        if self._planned_total is None or self._is_complete:
+            return None
+        remaining = self._planned_total - processed
+        if remaining <= 0 or not window_rate or window_rate <= 0.0:
+            return None
+        return remaining / window_rate
 
     def _chunks_state_snapshot(self) -> tuple[dict[str, object], ...]:
         """Renderiza la máquina de estados de `chunk`s del orchestrator para el TUI.
@@ -359,7 +440,7 @@ class TUIDataProvider:
         if self._chunks_provider is None:
             return ()
         chunks = self._chunks_provider()
-        now = time.monotonic()
+        now = self._clock()
         # 042: el recorder del lado upload es el que tiene los contadores
         # del `chunk` que está actualmente en S5. Leerlo una vez por
         # snapshot evita contención de `lock` por fila.
@@ -455,9 +536,7 @@ class TUIDataProvider:
             if status == "UPLOAD":
                 mono = active.get("upload_started_monotonic")
                 elapsed_s = (
-                    max(0.0, time.monotonic() - float(mono))
-                    if isinstance(mono, (int, float))
-                    else 0.0
+                    max(0.0, self._clock() - float(mono)) if isinstance(mono, (int, float)) else 0.0
                 )
             elif status == "DONE":
                 frozen = active.get("upload_elapsed_s")

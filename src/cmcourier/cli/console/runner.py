@@ -54,6 +54,8 @@ def build_data_provider(
     pipeline: StagedPipeline,
     orchestrator: MultiBatchOrchestrator | StreamingOrchestrator,
     config: PipelineConfig,
+    *,
+    planned_total: int | None = None,
 ) -> TUIDataProvider:
     """El mismo cableado que arma ``cli/app.py`` para la TUI clásica."""
     bucket_provider = (
@@ -74,6 +76,7 @@ def build_data_provider(
         tracking_store=pipeline.tracking_store,
         mode=config.processing.mode,
         bucket_provider=bucket_provider,
+        planned_total=planned_total,
     )
 
 
@@ -140,7 +143,12 @@ class ConsoleRunManager:
         self.reauth_pending = False
         # 132: un 401 en S5 pausa la corrida y avisa acá (worker thread).
         pipeline.set_auth_expired_handler(self._on_auth_expired)
-        self.provider = build_data_provider(pipeline, self.orchestrator, effective)  # type: ignore[arg-type]
+        self.provider = build_data_provider(
+            pipeline,
+            self.orchestrator,  # type: ignore[arg-type]
+            effective,
+            planned_total=spec.total,  # 134: la ETA de corrida necesita el total
+        )
         if spec.max_duration_s is not None:
             assert self.orchestrator is not None
             self._watchdog = DeadlineWatchdog(self.orchestrator.cancel_token, spec.max_duration_s)

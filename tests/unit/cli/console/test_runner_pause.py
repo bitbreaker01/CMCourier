@@ -114,3 +114,34 @@ def test_launch_registers_the_auth_expired_handler(monkeypatch: pytest.MonkeyPat
     mgr.join(5.0)
 
     pipeline.set_auth_expired_handler.assert_called_once_with(mgr._on_auth_expired)
+
+
+def test_launch_passes_planned_total_to_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """134: la ETA de corrida necesita el total elegido en [5]."""
+    import cmcourier.cli.console.runner as runner_mod
+
+    app = MagicMock()
+    mgr = ConsoleRunManager(app)
+    seen: dict[str, object] = {}
+
+    def fake_provider(*_a: object, **kw: object) -> MagicMock:
+        seen.update(kw)
+        return MagicMock()
+
+    monkeypatch.setattr(runner_mod, "apply_overrides", lambda cfg, ov: cfg)
+    monkeypatch.setattr(runner_mod, "configure_observability", lambda *a, **k: None)
+    monkeypatch.setattr(runner_mod, "acquire_config_lock", lambda _p: MagicMock())
+    monkeypatch.setattr(runner_mod, "build_data_provider", fake_provider)
+
+    def fake_build(_effective, _spec):
+        mgr.orchestrator = MagicMock()
+        mgr.orchestrator.cancel_token = CancellationToken()
+        mgr.orchestrator.run.return_value = None
+        return MagicMock(), {}
+
+    monkeypatch.setattr(mgr, "_build", fake_build)
+
+    mgr.launch(LaunchSpec(total=500))
+    mgr.join(5.0)
+
+    assert seen["planned_total"] == 500

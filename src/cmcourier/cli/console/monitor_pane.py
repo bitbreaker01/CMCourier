@@ -11,6 +11,7 @@ from __future__ import annotations
 
 __all__ = ["MonitorPane"]
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
@@ -86,6 +87,7 @@ class MonitorPane(Vertical):
             f"[green]subidos {done}[/green]  "
             + (f"[red]fallidos {failed}[/red]  " if failed else f"fallidos {failed}  ")
             + f"salteados {skipped}  {snap.throughput_docs_per_s:.1f} docs/s"
+            + self._window_fragment(snap)
             + self._workers_fragment(mgr, snap)
         )
         breakdown = getattr(snap, "failures_by_type", None)
@@ -99,6 +101,20 @@ class MonitorPane(Vertical):
         if self.console.config.processing.mode == "streaming":
             body += "\n\n" + render_bucket(snap)
         self.query_one("#mon-body", Static).update(body)
+
+    @staticmethod
+    def _window_fragment(snap: TUISnapshot) -> str:
+        """134: tasa de los últimos 60 s + ETA de corrida (sólo con total)."""
+        rate = snap.throughput_window_docs_per_s
+        frag = f" · {rate:.1f} docs/s (60 s)" if rate is not None else " · — docs/s (60 s)"
+        if snap.is_complete:
+            return frag
+        if snap.planned_total is None:
+            return frag + " · ETA — (sin total)"
+        if snap.eta_run_s is None:
+            return frag + f" · ETA — de {snap.planned_total}"
+        eta = timedelta(seconds=int(snap.eta_run_s))
+        return frag + f" · ETA {eta} de {snap.planned_total}"
 
     @staticmethod
     def _workers_fragment(mgr: object, snap: TUISnapshot) -> str:

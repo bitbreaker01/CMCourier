@@ -19,8 +19,18 @@ pytestmark = pytest.mark.unit
 
 
 class _FakeProvider:
-    def __init__(self, *, complete: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        complete: bool = False,
+        planned_total: int | None = None,
+        window_rate: float | None = 1.0,
+        eta_run_s: float | None = None,
+    ) -> None:
         self._complete = complete
+        self._planned_total = planned_total
+        self._window_rate = window_rate
+        self._eta_run_s = eta_run_s
 
     def snapshot(self) -> TUISnapshot:
         return TUISnapshot(
@@ -35,6 +45,10 @@ class _FakeProvider:
             s1_filtered=1,
             pool_capacity=4,
             pool_in_use=3,
+            docs_processed=45,
+            throughput_window_docs_per_s=self._window_rate,
+            planned_total=self._planned_total,
+            eta_run_s=self._eta_run_s,
         )
 
 
@@ -357,3 +371,33 @@ class TestWorkerCap133:
                 assert "techo manual" not in header
 
         asyncio.run(_run())
+
+
+class TestWindowEta134:
+    def _header(self, tmp_path: Path, provider: _FakeProvider) -> str:
+        async def _run() -> str:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            app.run_manager = _FakeManager(provider)  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                return str(app.query_one("#mon-header", Static).renderable)
+
+        return asyncio.run(_run())
+
+    def test_header_shows_window_rate_and_eta(self, tmp_path: Path) -> None:
+        header = self._header(
+            tmp_path, _FakeProvider(planned_total=200, window_rate=1.25, eta_run_s=120.0)
+        )
+        assert "3.4 docs/s" in header
+        assert "1.2 docs/s (60 s)" in header or "1.3 docs/s (60 s)" in header
+        assert "ETA 0:02:00 de 200" in header
+
+    def test_header_without_total_says_so(self, tmp_path: Path) -> None:
+        header = self._header(tmp_path, _FakeProvider(window_rate=None))
+        assert "— docs/s (60 s)" in header
+        assert "ETA — (sin total)" in header
+
+    def test_header_complete_has_no_eta(self, tmp_path: Path) -> None:
+        header = self._header(tmp_path, _FakeProvider(complete=True, planned_total=200))
+        assert "ETA" not in header

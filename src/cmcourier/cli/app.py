@@ -816,6 +816,8 @@ def _run_with_optional_tui(
         # 064: modo de orquestacion + fuente de datos de la pestana BUCKET.
         mode=config.processing.mode,
         bucket_provider=bucket_provider,
+        # 134: ETA de corrida sólo con --total (la fuente puede no tener fin).
+        planned_total=pipeline_kwargs.get("total"),
     )
     if watchdog is not None:
         watchdog.start()
