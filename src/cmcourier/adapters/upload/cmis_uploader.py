@@ -309,6 +309,19 @@ class CmisUploader(IUploader):
         ``_timeout_s`` directo."""
         return self._timeout_s
 
+    def set_credentials(self, username: str, password: str) -> None:
+        """132: credenciales nuevas en caliente.
+
+        Reemplaza el auth del cliente, tira la cookie jar (el
+        ``JSESSIONID`` de la sesión rechazada) y marca la sesión fría: la
+        próxima operación re-hace el warmup con la credencial nueva. Bajo
+        ``_warm_lock`` porque los workers en vuelo leen ``_warm``."""
+        with self._warm_lock:
+            self._client.auth = httpx.BasicAuth(username, password)
+            self._client.cookies.clear()
+            self._warm = False
+        _log.info("cmis credentials replaced (132)", extra={"event": "cmis_credentials_set"})
+
     def _request_timeout(self) -> httpx.Timeout:
         """116: timeout por request con connect capeado.
 

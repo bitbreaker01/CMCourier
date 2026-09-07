@@ -142,7 +142,35 @@ avanzás (credenciales → doctor → lanzar).
   y debajo los paneles PREP/UPLOAD en vivo.
 - **`x`** cancela con drain (los uploads en vuelo terminan, el batch
   queda reanudable) — y **te quedás en la consola** para ver el resumen.
+- **`p`** pausa (con confirmación) y **`r`** reanuda (132). La pausa es
+  cooperativa: lo que está en vuelo termina, ningún worker toma trabajo
+  nuevo. La cabecera dice `PAUSADA` y la barra superior `⏸ pausada`.
+  Ojo: `--max-duration` sigue corriendo mientras está pausada.
 - Al terminar aparece la tarjeta de cierre con el resultado.
+
+#### Pausa y re-autenticación CMIS en caliente (132)
+
+Si la sesión CMIS expira a mitad de corrida (el server devuelve 401 dos
+veces seguidas para un upload), la consola **no quema docs**: pausa la
+corrida sola, muestra una notificación roja y te lleva a `[2]` con la
+pista "sesión CMIS rechazada — corrida PAUSADA". El flujo:
+
+1. En `[2]`, cargá usuario/contraseña nuevos en la tarjeta `cmis` y
+   probá la conexión (el chip verde importa: si reanudás sin probar, la
+   consola te pide confirmación).
+2. Volvé a `[6]` y apretá **`r`**: la credencial nueva se empuja al
+   uploader (sesión fría, próximo POST re-hace el warmup) y la compuerta
+   se abre. El doc que recibió el 401 se reintenta **él mismo**, no se
+   marca fallido.
+3. Si la credencial nueva también es rechazada, la corrida vuelve a
+   pausarse (segundo episodio). Al tercer 401 consecutivo del mismo doc,
+   ése se marca `S5_FAILED` y aparece en `[7]` para retry.
+
+Para probarlo en local con Alfresco: lanzá una corrida larga (`total`
+alto), cambiá la contraseña del usuario en Alfresco (o revocá la sesión
+desde el admin) y mirá cómo `[6]` pasa a `PAUSADA · esperando
+credenciales CMIS`. Sin consola (CLI headless, TUI clásica) el 401 sigue
+fallando el doc como siempre.
 
 ### `7` BATCHES
 - Tabla de todos los batches con su **auditoría**: quién lo lanzó, el
@@ -280,10 +308,6 @@ docker compose -f alfresco-compose.yml -f alfresco-compose.local.yml down -v   #
 
 ## Qué NO hace todavía (por diseño de la v1)
 
-- **Pausa / re-autenticación en caliente**: si la sesión CMIS expira a
-  mitad de corrida, la salida es cancelar con `x` (drain) y reanudar el
-  batch — la consola te lo dice. (Requiere que el `CancellationToken`
-  deje de ser one-way; queda para una iteración futura.)
 - **Techo manual de workers en caliente** desde el monitor: pendiente
   (requiere que el AIMD respete un `min(user_cap, aimd_cap)`).
 - **ETA por ventana** en el monitor: usa el throughput acumulado del

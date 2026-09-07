@@ -15,6 +15,7 @@ from __future__ import annotations
 
 __all__ = ["CredsPane", "run_single_check"]
 
+import contextlib
 import time
 from typing import TYPE_CHECKING
 
@@ -104,7 +105,15 @@ class CredsPane(Vertical):
         self.render_all()
         self.console.refresh_status()
 
+    _REAUTH_HINT = (
+        "⏸ Sesión CMIS rechazada — corrida PAUSADA. Cargá usuario/contraseña "
+        "nuevos en la tarjeta cmis, probá la conexión y reanudá con r en [6]."
+    )
+
     def _render_hint(self) -> None:
+        if getattr(self.console.run_manager, "reauth_pending", False):
+            self.query_one("#creds-hint", Static).update(self._REAUTH_HINT)  # 132
+            return
         n = len(self.console.state.conn) - 1
         self.query_one("#creds-hint", Static).update(
             "Esta config usa solo CMIS — no tiene conexiones AS400 ni SQL Server."
@@ -115,6 +124,14 @@ class CredsPane(Vertical):
     def render_all(self) -> None:
         for alias in self.console.state.conn:
             self._render_conn(alias)
+
+    def show_reauth_hint(self) -> None:
+        """132: la corrida está pausada esperando una credencial CMIS nueva —
+        la pista sobrevive a `rebuild_cards` porque `_render_hint` mira
+        `run_manager.reauth_pending`."""
+        self._render_hint()
+        with contextlib.suppress(Exception):
+            self.query_one(f"#pass-{CMIS_ALIAS}", Input).focus()
 
     def _card(self, info: ConnInfo) -> Vertical:
         alias = info.alias

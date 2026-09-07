@@ -1172,3 +1172,59 @@ class TestHttp2Enabled060:
         # la config del pool. Invariante más sencillo: el AsyncClient/Client
         # lleva http2 = True al construirse.
         assert uploader._client._transport._pool._http2 is True  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# Grupo — 132: credenciales en caliente
+# ---------------------------------------------------------------------------
+
+
+def _basic(user: str, pwd: str) -> str:
+    import base64
+
+    return "Basic " + base64.b64encode(f"{user}:{pwd}".encode()).decode()
+
+
+class TestSetCredentials132:
+    @respx.mock
+    def test_next_call_rewarms_with_new_auth_and_no_old_cookie(
+        self, respx_mock: respx.MockRouter
+    ) -> None:
+        # Warmup viejo deja una cookie de sesión.
+        respx_mock.get(_repo_info_url()).mock(
+            return_value=httpx.Response(
+                200,
+                json={"repositoryId": _REPO_ID, "productName": "x", "productVersion": "1"},
+                headers={"Set-Cookie": "JSESSIONID=OLD; Path=/"},
+            )
+        )
+        respx_mock.get(_repo_info_url(), params={"cmisselector": "typeDefinition"}).mock(
+            return_value=httpx.Response(200, json={"id": "t"})
+        )
+        uploader = CmisUploader(_make_config())
+        uploader.get_type_definition("t")
+        assert len(respx_mock.calls) == 2  # warmup + typeDefinition
+        assert uploader._client.cookies.get("JSESSIONID") == "OLD"  # noqa: SLF001
+        assert respx_mock.calls[0].request.headers["Authorization"] == _basic(
+            "tester", "secret-not-real"
+        )
+
+        uploader.set_credentials("nuevo", "clave")
+        uploader.get_type_definition("t")
+
+        # Sesión fría: warmup NUEVO con el auth nuevo y sin la cookie vieja.
+        assert len(respx_mock.calls) == 4
+        warm = respx_mock.calls[2].request
+        assert "cmisselector=repositoryInfo" in str(warm.url)
+        assert warm.headers["Authorization"] == _basic("nuevo", "clave")
+        assert "OLD" not in warm.headers.get("Cookie", "")
+        assert respx_mock.calls[3].request.headers["Authorization"] == _basic("nuevo", "clave")
+
+    @respx.mock
+    def test_set_credentials_without_warmup_is_harmless(self, respx_mock: respx.MockRouter) -> None:
+        _stub_warmup(respx_mock)
+        uploader = CmisUploader(_make_config())
+        uploader.set_credentials("nuevo", "clave")
+        uploader.test_connection()
+        assert len(respx_mock.calls) == 1
+        assert respx_mock.calls[0].request.headers["Authorization"] == _basic("nuevo", "clave")

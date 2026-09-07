@@ -68,7 +68,17 @@ class MonitorPane(Vertical):
         done = int(s5.get("count", 0))
         failed = snap.failed_total
         skipped = snap.s1_filtered
-        state = "completada" if snap.is_complete else "corriendo"
+        if snap.is_complete:
+            state = "completada"
+        elif getattr(mgr, "paused", False):
+            # 132
+            state = (
+                "PAUSADA · esperando credenciales CMIS"
+                if getattr(mgr, "reauth_pending", False)
+                else "PAUSADA"
+            )
+        else:
+            state = "corriendo"
         header = (
             f"[b]batch[/b] {snap.batch_id or '—'}  [b]{state}[/b]  "
             f"[b]elapsed[/b] {int(snap.elapsed_s)}s\n"

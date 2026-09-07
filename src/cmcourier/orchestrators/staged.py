@@ -224,6 +224,16 @@ class StagedPipeline:
         # entrar para frenar ordenadamente (drain). Headless = nunca se
         # prende.
         self._cancel_token = CancellationToken()
+        # 132: re-autenticación CMIS en caliente. Con handler registrado,
+        # un 401 en S5 pausa el token, avisa UNA vez por episodio y
+        # reintenta el doc cuando alguien reanuda. Sin handler (headless,
+        # TUI clásica) el 401 falla como siempre. ``_cred_generation``
+        # distingue un 401 de un request que ya viajaba con la sesión
+        # vieja cuando las credenciales se refrescaron: ése reintenta sin
+        # abrir episodio nuevo.
+        self._auth_expired_handler: Callable[[], None] | None = None
+        self._reauth_lock = threading.Lock()
+        self._cred_generation = 0
         # 037: cache de metadata cross-batch. None cuando está
         # deshabilitado (default) — S3 siempre invoca
         # MetadataService.resolve (comportamiento pre-037).
@@ -314,6 +324,41 @@ class StagedPipeline:
     def cancel_token(self) -> CancellationToken:
         """097: token de cancelación cooperativa compartido con el TUI."""
         return self._cancel_token
+
+    # ------------------------------------------- 132: re-auth CMIS en caliente
+
+    def set_auth_expired_handler(self, handler: Callable[[], None] | None) -> None:
+        """Registra el aviso de "sesión CMIS rechazada". Se invoca desde un
+        worker thread, UNA vez por episodio de pausa; el receptor debe
+        despachar a su propio thread (p. ej. ``app.call_from_thread``)."""
+        self._auth_expired_handler = handler
+
+    def set_cmis_credentials(self, username: str, password: str) -> None:
+        """Empuja credenciales nuevas al uploader (próximo POST re-hace el
+        warmup) y sube la generación para que los 401 en vuelo reintenten
+        sin abrir otro episodio."""
+        with self._reauth_lock:
+            self._uploader.set_credentials(username, password)
+            self._cred_generation += 1
+
+    def _await_reauth(self, generation: int) -> bool:
+        """Tras un 401: si las credenciales ya cambiaron desde que salió el
+        request, reintenta directo; si no, pausa, avisa (una vez por
+        episodio) y espera en la compuerta. Devuelve False si la corrida
+        se canceló mientras esperaba."""
+        with self._reauth_lock:
+            if self._cancel_token.is_cancelled():
+                return False
+            if self._cred_generation != generation:
+                return True
+            if not self._cancel_token.is_paused():
+                self._cancel_token.pause()
+                fire = True
+            else:
+                fire = False
+        if fire and self._auth_expired_handler is not None:
+            self._auth_expired_handler()
+        return self._cancel_token.checkpoint()
 
     # --------------------------------------------------- wiring del auto-tune
 
@@ -643,7 +688,7 @@ class StagedPipeline:
         for trigger in triggers:
             # 097: cancelación cooperativa — dejamos de tomar triggers
             # nuevos; los ya convertidos a items siguen su curso.
-            if self._cancel_token.is_cancelled():
+            if not self._cancel_token.checkpoint():
                 break
             audit = trigger.audit_row()
             audit_shortname = audit.get("shortname") or "<unknown>"
@@ -860,7 +905,7 @@ class StagedPipeline:
         corrida previa se descarta sin contar."""
         # 097: cancelación cooperativa — el item se saltea sin contar
         # como falla; queda pendiente para un resume.
-        if self._cancel_token.is_cancelled():
+        if not self._cancel_token.checkpoint():
             return None, False
         txn = item.document.txn_num
         with StageTimer(
@@ -905,7 +950,7 @@ class StagedPipeline:
         """Resolución de metadata S3 para un item. Devuelve
         ``(survivor_or_None, counted_failure)``."""
         # 097: cancelación cooperativa — saltea sin contar como falla.
-        if self._cancel_token.is_cancelled():
+        if not self._cancel_token.checkpoint():
             return None, False
         assert item.mapping is not None
         txn = item.document.txn_num
@@ -999,7 +1044,7 @@ class StagedPipeline:
         trabajo de S1-S3.
         """
         # 097: cancelación cooperativa — saltea sin contar como falla.
-        if self._cancel_token.is_cancelled():
+        if not self._cancel_token.checkpoint():
             return None, False
         txn = item.document.txn_num
         with StageTimer(
@@ -1259,7 +1304,7 @@ class StagedPipeline:
         # upload se saltea limpio (queda pendiente para un resume). Los
         # docs ya en vuelo pasaron este chequeo y terminan — eso es el
         # drain. Chequeado antes de tomar el slot del semaphore.
-        if self._cancel_token.is_cancelled():
+        if not self._cancel_token.checkpoint():
             return "skipped"
         txn = item.document.txn_num
         # 109: el pre-flight de idempotencia (query SQLite + claim AS400)
@@ -1302,14 +1347,8 @@ class StagedPipeline:
                     # código.
                     object_type_id = item.mapping.cmis_type or item.mapping.cm_object_type
                     folder_path = item.mapping.cmis_folder or item.mapping.cm_folder
-                    cm_object_id = self._uploader.upload(
-                        file=item.staged_file,
-                        folder_path=folder_path,
-                        object_type_id=object_type_id,
-                        document_name=f"{txn}.pdf",
-                        mime_type="application/pdf",
-                        properties=dict(item.metadata.properties),
-                        batch_id=batch_id,
+                    cm_object_id = self._upload_with_reauth(
+                        item, batch_id, txn, folder_path, object_type_id
                     )
                 except (CMISClientError, CMISServerError, RetriesExhaustedError) as exc:
                     timer.mark_failed()
@@ -1357,6 +1396,56 @@ class StagedPipeline:
             else:
                 assert self._lane_controller is not None
                 self._lane_controller.release(lane)
+
+    _MAX_REAUTH_EPISODES = 2
+
+    def _upload_with_reauth(
+        self,
+        item: _StageItem,
+        batch_id: str,
+        txn: str,
+        folder_path: str,
+        object_type_id: str,
+    ) -> str:
+        """132: el upload de S5 con hasta dos episodios de re-autenticación.
+
+        Sin handler registrado es una sola llamada al uploader (headless).
+        Con handler, un 401 pausa la corrida y espera credenciales nuevas;
+        si llegan, reintenta el MISMO doc dentro del mismo slot y timer.
+        Al tercer 401 consecutivo (o si cancelan durante la espera) la
+        excepción sube y el doc se marca ``S5_FAILED`` como siempre."""
+        assert item.staged_file is not None
+        assert item.metadata is not None
+        episodes = 0
+        while True:
+            generation = self._cred_generation
+            try:
+                return self._uploader.upload(
+                    file=item.staged_file,
+                    folder_path=folder_path,
+                    object_type_id=object_type_id,
+                    document_name=f"{txn}.pdf",
+                    mime_type="application/pdf",
+                    properties=dict(item.metadata.properties),
+                    batch_id=batch_id,
+                )
+            except CMISClientError as exc:
+                if (
+                    exc.status_code != 401
+                    or self._auth_expired_handler is None
+                    or episodes >= self._MAX_REAUTH_EPISODES
+                ):
+                    raise
+                episodes += 1
+                _log.warning(
+                    "S5 txn=%s: sesión CMIS rechazada (401) — corrida pausada, "
+                    "esperando credenciales nuevas (episodio %d/%d)",
+                    txn,
+                    episodes,
+                    self._MAX_REAUTH_EPISODES,
+                )
+                if not self._await_reauth(generation):
+                    raise
 
     @staticmethod
     def _record_s4_substages(

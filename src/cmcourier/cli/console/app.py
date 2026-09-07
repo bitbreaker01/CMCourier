@@ -137,7 +137,7 @@ class HelpScreen(ModalScreen[None]):
 [b $accent]POR PANTALLA[/]
   [2] ↵ probar conexión del formulario     [3] a  guardar overrides
   [4] d correr la selección · ↑↓ navegar · ↵ expandir
-  [5] r lanzar                             [6] x  cancelar (drain) · +/- workers
+  [5] r lanzar                             [6] x cancelar (drain) · p pausar · r reanudar
   [7] ↑↓ navegar · ↵ detalle · R retry · E export
   [8] s estado del sync · simular antes de aplicar (recover) · resolver por txn
 
@@ -189,6 +189,7 @@ class ConsoleApp(App[None]):
         Binding("a", "apply_overrides", "guardar overrides", show=False),
         Binding("r", "launch", "lanzar", show=False),
         Binding("x", "cancel_run", "cancelar corrida", show=False),
+        Binding("p", "pause_run", "pausar corrida", show=False),
         Binding("s", "sync_status", "estado sync", show=False),
     ]
 
@@ -322,8 +323,11 @@ class ConsoleApp(App[None]):
             self.q("ConfigPane", ConfigPane).apply_draft()
 
     def action_launch(self) -> None:
-        if self.q("#tabs", TabbedContent).active == "correr":
+        active = self.q("#tabs", TabbedContent).active
+        if active == "correr":
             self.try_launch()
+        elif active == "monitor":
+            self.resume_run()  # 132: en [6] la misma tecla reanuda
 
     def action_sync_status(self) -> None:
         if self.q("#tabs", TabbedContent).active == "sync":
@@ -342,6 +346,84 @@ class ConsoleApp(App[None]):
             no="seguir corriendo",
             cb=lambda ok: self.run_manager.cancel() if ok else None,
         )
+
+    # ------------------------------------------------ 132: pausa / re-auth
+
+    def action_pause_run(self) -> None:
+        mgr = self.run_manager
+        if self.q("#tabs", TabbedContent).active != "monitor" or not self.run_active:
+            return
+        if mgr.paused:
+            self.notify("La corrida ya está pausada — r para reanudar", severity="warning")
+            return
+        self.confirm(
+            title="Pausar la corrida",
+            body=(
+                "Pausa cooperativa: los uploads en vuelo terminan; ningún worker toma "
+                "trabajo nuevo hasta que reanudes con r. El límite de --max-duration "
+                "sigue corriendo mientras está pausada."
+            ),
+            yes="pausar",
+            no="seguir corriendo",
+            cb=self._after_pause_confirm,
+        )
+
+    def _after_pause_confirm(self, ok: bool) -> None:
+        if not ok:
+            return
+        self.run_manager.pause()
+        self._refresh_run_state()
+
+    def resume_run(self) -> None:
+        mgr = self.run_manager
+        if not self.run_active or not mgr.paused:
+            return
+        cmis = self.state.conn.get("cmis")
+        if mgr.reauth_pending and cmis is not None and cmis.status != "ok":
+            self.confirm(
+                title="Reanudar sin probar la credencial CMIS",
+                body=(
+                    "La sesión CMIS fue rechazada y la credencial de [2] no está "
+                    "probada OK. Si sigue mal, el próximo 401 vuelve a pausar la "
+                    "corrida (o marca el doc como fallido al tercer intento)."
+                ),
+                yes="reanudar igual",
+                no="ir a probarla",
+                danger=True,
+                cb=self._after_resume_confirm,
+            )
+            return
+        self._do_resume()
+
+    def _after_resume_confirm(self, ok: bool) -> None:
+        if ok:
+            self._do_resume()
+        else:
+            self.action_switch_tab("credenciales")
+
+    def _do_resume(self) -> None:
+        self.run_manager.resume()
+        self.notify("Corrida reanudada", severity="information")
+        self._refresh_run_state()
+
+    def on_auth_expired(self, manager: ConsoleRunManager) -> None:
+        """132: llega (vía call_from_thread) cuando un worker recibió 401.
+        La corrida ya está pausada; acá sólo se guía al operador."""
+        self.notify(
+            "Sesión CMIS rechazada (401) — corrida PAUSADA. Cargá la credencial "
+            "nueva en [2] y reanudá con r en [6].",
+            severity="error",
+            timeout=12,
+        )
+        self._refresh_run_state()
+        self.action_switch_tab("credenciales")
+        with contextlib.suppress(NoMatches):
+            self.q("CredsPane", CredsPane).show_reauth_hint()
+
+    def _refresh_run_state(self) -> None:
+        self.refresh_status()
+        with contextlib.suppress(NoMatches):
+            self.q("MonitorPane", MonitorPane).refresh_monitor()
 
     def on_key(self, event: events.Key) -> None:
         """Rutea teclas locales a DOCTOR / BATCHES cuando el foco no está
@@ -619,7 +701,9 @@ class ConsoleApp(App[None]):
         for alias, conn in st.conn.items():
             mark = {"ok": "✔", "err": "✘", "testing": "…"}.get(conn.status, "·")
             conn_bits.append(f"{alias} {mark}")
-        run_bit = " · ▶ corriendo" if self.run_active else ""
+        run_bit = ""
+        if self.run_active:
+            run_bit = " · ⏸ pausada" if self.run_manager.paused else " · ▶ corriendo"
         self.q("#top-status", Static).update(
             f"  {' · '.join(conn_bits)} · doctor: {st.doctor_verdict()}{run_bit}"
         )

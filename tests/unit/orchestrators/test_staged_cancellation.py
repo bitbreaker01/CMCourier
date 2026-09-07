@@ -7,11 +7,13 @@ desde el TUI.
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 from unittest.mock import MagicMock
 
 import pytest
 
+from cmcourier.domain.exceptions import CMISClientError
 from cmcourier.domain.models import (
     ClientTrigger,
     CMMapping,
@@ -25,7 +27,7 @@ from cmcourier.services.cancellation import CancellationToken
 pytestmark = pytest.mark.unit
 
 
-def _pipeline() -> StagedPipeline:
+def _pipeline(workers: int = 1) -> StagedPipeline:
     return StagedPipeline(
         trigger_strategy=MagicMock(),
         indexing_service=MagicMock(),
@@ -34,7 +36,7 @@ def _pipeline() -> StagedPipeline:
         assembler=MagicMock(),
         uploader=MagicMock(),
         tracking_store=MagicMock(),
-        workers=1,
+        workers=workers,
     )
 
 
@@ -156,3 +158,217 @@ def test_not_cancelled_upload_one_is_unaffected(tmp_path) -> None:
 
     assert outcome == "done"
     pipeline._uploader.upload.assert_called_once()
+
+
+# ------------------------------------------------------ 132: pausa en caliente
+
+
+def _run_upload_in_thread(
+    pipeline: StagedPipeline, item: _StageItem
+) -> tuple[threading.Thread, list]:
+    results: list[str] = []
+    t = threading.Thread(target=lambda: results.append(pipeline._upload_one(item, "B1")))
+    t.start()
+    return t, results
+
+
+def test_upload_one_waits_while_paused_then_uploads(tmp_path) -> None:
+    pipeline = _pipeline()
+    item = _full_item(tmp_path)
+    pipeline._tracking_store.is_stage_done.return_value = False
+    pipeline._uploader.upload.return_value = "cm-obj-1"
+    pipeline.cancel_token.pause()
+
+    t, results = _run_upload_in_thread(pipeline, item)
+    t.join(0.3)
+    assert t.is_alive(), "pausado: el worker espera antes de tomar trabajo"
+    pipeline._uploader.upload.assert_not_called()
+
+    pipeline.cancel_token.resume()
+    t.join(3.0)
+    assert results == ["done"]
+    pipeline._uploader.upload.assert_called_once()
+
+
+def test_upload_one_paused_then_cancelled_skips(tmp_path) -> None:
+    pipeline = _pipeline()
+    item = _full_item(tmp_path)
+    pipeline.cancel_token.pause()
+
+    t, results = _run_upload_in_thread(pipeline, item)
+    t.join(0.3)
+    assert t.is_alive()
+
+    pipeline.cancel_token.cancel()
+    t.join(3.0)
+    assert results == ["skipped"]
+    pipeline._uploader.upload.assert_not_called()
+
+
+def test_s2_one_waits_while_paused() -> None:
+    pipeline = _pipeline()
+    item = _StageItem(
+        trigger=ClientTrigger(shortname="SN", cif="1", system_id="1"), document=_doc()
+    )
+    pipeline.cancel_token.pause()
+    results: list = []
+    t = threading.Thread(
+        target=lambda: results.append(pipeline._s2_one(item, "B1", pipeline._metrics))
+    )
+    t.start()
+    t.join(0.3)
+    assert t.is_alive()
+    pipeline.cancel_token.cancel()
+    t.join(3.0)
+    assert results == [(None, False)]
+
+
+# --------------------------------------------- 132: re-autenticación al 401
+
+
+def _pipeline_with_401_then_ok(tmp_path, *, failures: int = 1, workers: int = 1):
+    """Uploader que devuelve 401 `failures` veces y después sube OK."""
+    pipeline = _pipeline(workers)
+    item = _full_item(tmp_path)
+    pipeline._tracking_store.is_stage_done.return_value = False
+    calls = {"n": 0}
+
+    def upload(**_kw):
+        calls["n"] += 1
+        if calls["n"] <= failures:
+            raise CMISClientError(status_code=401, response_body="expired")
+        return "cm-obj-1"
+
+    pipeline._uploader.upload.side_effect = upload
+    return pipeline, item, calls
+
+
+def test_401_without_handler_fails_as_before(tmp_path) -> None:
+    pipeline, item, calls = _pipeline_with_401_then_ok(tmp_path)
+
+    outcome = pipeline._upload_one(item, "B1")
+
+    assert outcome == "failed"
+    assert calls["n"] == 1
+    assert pipeline.cancel_token.is_paused() is False
+    pipeline._uploader.set_credentials.assert_not_called()
+
+
+def test_401_with_handler_pauses_and_retries_with_new_credentials(tmp_path) -> None:
+    pipeline, item, calls = _pipeline_with_401_then_ok(tmp_path)
+    fired: list[int] = []
+    pipeline.set_auth_expired_handler(lambda: fired.append(1))
+
+    t, results = _run_upload_in_thread(pipeline, item)
+    t.join(1.0)
+    assert t.is_alive(), "tras el 401 el worker espera en la compuerta"
+    assert pipeline.cancel_token.is_paused() is True
+    assert fired == [1]
+
+    pipeline.set_cmis_credentials("nuevo", "clave")
+    pipeline.cancel_token.resume()
+    t.join(3.0)
+
+    assert results == ["done"]
+    assert calls["n"] == 2
+    pipeline._uploader.set_credentials.assert_called_once_with("nuevo", "clave")
+    pipeline._tracking_store.mark_stage_failed.assert_not_called()
+
+
+def test_401_handler_fires_once_per_episode_across_workers(tmp_path) -> None:
+    # workers=2: el que espera en la compuerta retiene su slot del semáforo
+    # (está DENTRO de S5), así que el segundo necesita slot propio.
+    pipeline, item, calls = _pipeline_with_401_then_ok(tmp_path, failures=2, workers=2)
+    item2 = _full_item(tmp_path)
+    fired: list[int] = []
+    pipeline.set_auth_expired_handler(lambda: fired.append(1))
+    # Barrera: los DOS POST están en vuelo antes de que cualquiera reciba
+    # el 401 (si uno pausara antes, el otro se frenaría en la compuerta de
+    # entrada y nunca vería el 401 — otro escenario, no éste).
+    both_in_flight = threading.Barrier(2, timeout=2.0)
+    inner = pipeline._uploader.upload.side_effect
+
+    def upload(**kw):
+        if calls["n"] < 2:
+            both_in_flight.wait()
+        return inner(**kw)
+
+    pipeline._uploader.upload.side_effect = upload
+
+    t1, r1 = _run_upload_in_thread(pipeline, item)
+    t2, r2 = _run_upload_in_thread(pipeline, item2)
+    t1.join(1.0)
+    t2.join(1.0)
+    assert t1.is_alive() and t2.is_alive()
+    assert fired == [1], "un episodio de 401 → UN aviso, aunque choquen dos workers"
+
+    pipeline.cancel_token.resume()
+    t1.join(3.0)
+    t2.join(3.0)
+    assert r1 == ["done"] and r2 == ["done"]
+
+
+def test_401_with_handler_then_cancel_marks_failed(tmp_path) -> None:
+    pipeline, item, _calls = _pipeline_with_401_then_ok(tmp_path)
+    pipeline.set_auth_expired_handler(lambda: None)
+
+    t, results = _run_upload_in_thread(pipeline, item)
+    t.join(1.0)
+    assert t.is_alive()
+
+    pipeline.cancel_token.cancel()
+    t.join(3.0)
+    assert results == ["failed"]
+    pipeline._tracking_store.mark_stage_failed.assert_called_once()
+
+
+def test_401_gives_up_after_two_reauth_episodes(tmp_path) -> None:
+    """Tercer 401 consecutivo del mismo doc → failed (sin loop infinito)."""
+    pipeline, item, calls = _pipeline_with_401_then_ok(tmp_path, failures=10)
+    pipeline.set_auth_expired_handler(lambda: pipeline.cancel_token.resume())
+
+    outcome = pipeline._upload_one(item, "B1")
+
+    assert outcome == "failed"
+    assert calls["n"] == 3
+    assert pipeline.cancel_token.is_paused() is False
+
+
+def test_401_after_fresh_credentials_retries_without_pausing(tmp_path) -> None:
+    """Un 401 de un request que ya estaba en vuelo cuando se refrescaron las
+    credenciales NO abre un episodio nuevo: reintenta directo."""
+    pipeline, item, calls = _pipeline_with_401_then_ok(tmp_path)
+    fired: list[int] = []
+    pipeline.set_auth_expired_handler(lambda: fired.append(1))
+
+    def upload(**_kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            pipeline.set_cmis_credentials("nuevo", "clave")  # llega mientras el POST viaja
+            raise CMISClientError(status_code=401)
+        return "cm-obj-1"
+
+    pipeline._uploader.upload.side_effect = upload
+
+    outcome = pipeline._upload_one(item, "B1")
+
+    assert outcome == "done"
+    assert calls["n"] == 2
+    assert fired == []
+    assert pipeline.cancel_token.is_paused() is False
+
+
+def test_second_episode_fires_handler_again(tmp_path) -> None:
+    pipeline, item, _calls = _pipeline_with_401_then_ok(tmp_path, failures=2)
+    fired: list[int] = []
+
+    def handler() -> None:
+        fired.append(1)
+        pipeline.cancel_token.resume()
+
+    pipeline.set_auth_expired_handler(handler)
+
+    outcome = pipeline._upload_one(item, "B1")
+
+    assert outcome == "done"
+    assert fired == [1, 1]

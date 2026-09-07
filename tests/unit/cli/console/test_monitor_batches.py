@@ -6,7 +6,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Static, TabbedContent
 
 from cmcourier.cli.console.app import ConfirmScreen, ConsoleApp
 from cmcourier.cli.console.batches_pane import BatchesPane
@@ -37,12 +37,24 @@ class _FakeProvider:
 
 
 class _FakeManager:
-    def __init__(self, provider: object | None) -> None:
+    def __init__(self, provider: object | None, *, paused: bool = False) -> None:
         self.provider = provider
         self.active = provider is not None
+        self.paused = paused
+        self.reauth_pending = False
+        self.calls: list[str] = []
 
     def cancel(self) -> None:
-        pass
+        self.calls.append("cancel")
+
+    def pause(self) -> None:
+        self.calls.append("pause")
+        self.paused = True
+
+    def resume(self) -> None:
+        self.calls.append("resume")
+        self.paused = False
+        self.reauth_pending = False
 
 
 def _seed_batch(tmp_path: Path, path: Path, *, fail: bool = True) -> str:
@@ -116,6 +128,101 @@ class TestMonitor:
                 await pilot.press("x")
                 await pilot.pause()
                 assert isinstance(app.screen, ConfirmScreen)
+
+        asyncio.run(_run())
+
+
+class TestPauseResume132:
+    def test_p_pauses_after_confirm(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            mgr = _FakeManager(_FakeProvider())
+            app.run_manager = mgr  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                await pilot.press("p")
+                await pilot.pause()
+                assert isinstance(app.screen, ConfirmScreen)
+                app.screen.dismiss(True)
+                await pilot.pause()
+                assert mgr.calls == ["pause"]
+                header = str(app.query_one("#mon-header", Static).renderable)
+                assert "PAUSADA" in header
+                assert "⏸ pausada" in str(app.query_one("#top-status", Static).renderable)
+
+        asyncio.run(_run())
+
+    def test_r_on_monitor_resumes(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            mgr = _FakeManager(_FakeProvider(), paused=True)
+            app.run_manager = mgr  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                await pilot.press("r")
+                await pilot.pause()
+                assert mgr.calls == ["resume"]
+                assert not isinstance(app.screen, ConfirmScreen)
+
+        asyncio.run(_run())
+
+    def test_r_with_reauth_pending_and_untested_cmis_asks_first(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            mgr = _FakeManager(_FakeProvider(), paused=True)
+            mgr.reauth_pending = True
+            app.run_manager = mgr  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                await pilot.press("r")
+                await pilot.pause()
+                assert isinstance(app.screen, ConfirmScreen)
+                assert mgr.calls == []
+                app.screen.dismiss(True)
+                await pilot.pause()
+                assert mgr.calls == ["resume"]
+
+        asyncio.run(_run())
+
+    def test_r_with_reauth_pending_and_tested_cmis_resumes_directly(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            mgr = _FakeManager(_FakeProvider(), paused=True)
+            mgr.reauth_pending = True
+            app.run_manager = mgr  # type: ignore[assignment]
+            app.state.creds.set("cmis", "u", "p")
+            app.state.record_conn_result("cmis", ok=True, message="ok")
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                await pilot.press("r")
+                await pilot.pause()
+                assert mgr.calls == ["resume"]
+
+        asyncio.run(_run())
+
+    def test_on_auth_expired_jumps_to_creds_with_hint(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            mgr = _FakeManager(_FakeProvider(), paused=True)
+            mgr.reauth_pending = True
+            app.run_manager = mgr  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                app.on_auth_expired(mgr)  # type: ignore[arg-type]
+                await pilot.pause()
+                await pilot.pause()
+                assert app.query_one(TabbedContent).active == "credenciales"
+                hint = str(app.query_one("#creds-hint", Static).renderable)
+                assert "PAUSADA" in hint and "cmis" in hint.lower()
+                header_call = app.query_one(MonitorPane)
+                header_call.refresh_monitor()
+                header = str(app.query_one("#mon-header", Static).renderable)
+                assert "esperando credenciales CMIS" in header
 
         asyncio.run(_run())
 

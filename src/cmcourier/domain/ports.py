@@ -382,6 +382,15 @@ class IUploader(ABC):
             CMISServerError: 5xx.
         """
 
+    @abstractmethod
+    def set_credentials(self, username: str, password: str) -> None:
+        """132: reemplaza las credenciales en caliente.
+
+        La sesión vigente se descarta y la próxima operación re-hace el
+        `warmup` con las credenciales nuevas. Thread-safe: la llama el
+        thread de la consola mientras los workers están pausados o en
+        vuelo."""
+
 
 # ---------------------------------------------------------------------------
 # S0Strategy — etapa S0

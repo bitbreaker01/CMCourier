@@ -448,7 +448,7 @@ class MultiBatchOrchestrator:
             for idx, chunk in enumerate(chunked(triggers, batch_size)):
                 # No arrancamos chunks nuevos; el chunk en vuelo drena
                 # vía los chequeos per-doc del StagedPipeline.
-                if cancel_token is not None and cancel_token.is_cancelled():
+                if cancel_token is not None and not cancel_token.checkpoint():
                     break
                 prepared = self._prep_one_chunk(
                     idx, chunk, failed=failed, results_lock=results_lock
@@ -685,7 +685,7 @@ class MultiBatchOrchestrator:
             # pipeline no definen cancel_token (mismo patrón que :446).
             cancel_token = getattr(self._pipeline, "cancel_token", None)
             for idx, chunk in enumerate(chunks_iter):
-                if cancel_token is not None and cancel_token.is_cancelled():
+                if cancel_token is not None and not cancel_token.checkpoint():
                     break
                 prepared = self._prep_one_chunk(
                     idx, chunk, failed=failed, results_lock=results_lock

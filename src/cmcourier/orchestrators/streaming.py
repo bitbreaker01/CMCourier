@@ -645,7 +645,7 @@ class StreamingOrchestrator:
         while True:
             # El producer deja de tomar triggers nuevos; lo que ya está
             # en el bucket lo drena el consumer vía los chequeos per-doc.
-            if cancel_token is not None and cancel_token.is_cancelled():
+            if cancel_token is not None and not cancel_token.checkpoint():
                 return
             try:
                 trigger = next(trigger_iter)

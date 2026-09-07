@@ -93,10 +93,19 @@ class ConsoleRunManager:
         self._lock_cm: Any = None
         self._thread: threading.Thread | None = None
         self._watchdog: DeadlineWatchdog | None = None
+        # 132: True entre el aviso de "sesión CMIS rechazada" y el resume
+        # que empuja la credencial nueva al pipeline.
+        self.reauth_pending = False
 
     @property
     def active(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def paused(self) -> bool:
+        """132: la compuerta del token está cerrada (corrida en pausa)."""
+        orch = self.orchestrator
+        return orch is not None and orch.cancel_token.is_paused()
 
     def outcome(self) -> str:
         if self.exception is not None:
@@ -128,6 +137,9 @@ class ConsoleRunManager:
             self._release_lock()
             raise
         self.pipeline = pipeline
+        self.reauth_pending = False
+        # 132: un 401 en S5 pausa la corrida y avisa acá (worker thread).
+        pipeline.set_auth_expired_handler(self._on_auth_expired)
         self.provider = build_data_provider(pipeline, self.orchestrator, effective)  # type: ignore[arg-type]
         if spec.max_duration_s is not None:
             assert self.orchestrator is not None
@@ -245,6 +257,30 @@ class ConsoleRunManager:
     def cancel(self) -> None:
         if self.orchestrator is not None:
             self.orchestrator.cancel_token.cancel()
+
+    # 132: pausa cooperativa + re-auth en caliente. ``pause``/``resume``
+    # se llaman desde el thread de la UI; ``_on_auth_expired`` llega desde
+    # un worker del pipeline y sólo despacha a la UI.
+
+    def pause(self) -> None:
+        if self.orchestrator is not None:
+            self.orchestrator.cancel_token.pause()
+
+    def resume(self) -> None:
+        """Abre la compuerta. Si hay una re-auth pendiente, ANTES empuja la
+        credencial CMIS de [2] al pipeline — los workers reintentan con la
+        sesión nueva, no con la rechazada."""
+        if self.orchestrator is None:
+            return
+        if self.reauth_pending and self.pipeline is not None:
+            cred = self.app.state.creds.get("cmis")
+            self.pipeline.set_cmis_credentials(cred.username, cred.password)
+            self.reauth_pending = False
+        self.orchestrator.cancel_token.resume()
+
+    def _on_auth_expired(self) -> None:
+        self.reauth_pending = True
+        self.app.call_from_thread(self.app.on_auth_expired, self)
 
     def join(self, timeout: float | None = None) -> None:
         if self._thread is not None:
