@@ -15,6 +15,90 @@ abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
+## [0.110.0] — 2026-09-07 — **Registro de conexiones, SQL Server como fuente de metadata y credenciales por alias**
+
+Plan B de la consola: una config ya no está atada a "un AS400 y punto".
+Las conexiones se declaran una vez con alias, se referencian desde
+indexing / metadata / sync, cada una tiene sus propias credenciales, y
+SQL Server entra como segunda familia ODBC. Specs 129-131, TDD estricto y
+revisión antagonista.
+
+### Added
+
+- **Spec 129 — registro de conexiones con alias.** Bloque `connections:`
+  en el YAML (`kind: as400 | mssql`); `indexing.source.connection`,
+  `metadata.sources[].as400_connection` y `tracking.as400_sync.connection`
+  aceptan un objeto inline (alias implícito `as400`) o un alias del
+  registro. `config.connection_refs()` es la única fuente de verdad de
+  "qué conexiones usa esta config" (una entrada por sitio; una conexión
+  declarada pero sin uso no cuenta). `Secrets` pasa a ser un mapa
+  `alias → Credential` (`get` / `require`), y las env vars siguen un
+  esquema uniforme `<ALIAS>_USERNAME` / `<ALIAS>_PASSWORD`.
+  `as400_connectivity` prueba cada conexión `as400` del registro.
+- **Spec 130 — SQL Server como fuente de metadata.** `MssqlDataSource`
+  (pyodbc + `msodbcsql18`, `encrypt` / `trust_server_certificate`) sobre
+  una base ODBC compartida con AS400 (`OdbcDataSource`);
+  `metadata.sources[] kind: mssql` con `connection: <alias>` y
+  `source_type: "mssql:<alias>"` en la cadena de fallback de S3. Check
+  `mssql_connectivity` (`SELECT 1`) y `metadata_sources` abre fuentes
+  mssql. Banco local: `scripts/staging/mssql-compose.yml` +
+  `mssql-seed.sh` (SQL Server 2022, `dbo.clientes` desde
+  `sample/clients.csv`) y test live opt-in (`CMCOURIER_MSSQL_LIVE=1`).
+- **Spec 131 — tarjetas de credenciales por alias en la consola.** `[2]`
+  compone una tarjeta por conexión que la config **efectiva** usa
+  (`<alias> · <kind> · <host>` + los sitios que la usan) además de CMIS;
+  se recomponen al entrar si la config efectiva cambió de conexiones
+  (rama defensiva: los overrides de 127 hoy no tocan conexiones).
+  El contador de intentos / confirmación de lockout queda sólo en las
+  tarjetas `as400`. INICIO, la barra superior, el launcher y `[8] SYNC`
+  exigen y muestran **todas** las conexiones requeridas; probar una
+  tarjeta usa el nuevo `doctor.check_connection(config, secrets, alias)`.
+  Precarga por alias desde `<ALIAS>_*`.
+
+### Fixed
+
+- **CLI cargaba secrets sin config** (`load_secrets()` en `run`,
+  `doctor`, single-doc y `sync`): sólo leía CMIS + el alias implícito
+  `as400`, así que cualquier alias del registro daba "credentials
+  missing" aunque las env vars estuvieran exportadas. Ahora
+  `load_secrets(config)` en los cuatro sitios, con test de CLI que lo
+  reproduce.
+- **Revisión antagonista de 129–131** (todo reproducido antes de tocar):
+  - `tracking.as400_sync` con `enabled: false` y `connection` seteada (la
+    forma documentada) exigía credenciales de una conexión que el pipeline
+    nunca abre: tarjeta fantasma, launcher bloqueado sin bypass y doctor en
+    FAIL. `connection_refs()` ahora respeta `enabled`; el alias se sigue
+    validando al cargar (`include_disabled=True`).
+  - Recomponer las tarjetas invalidaba una conexión ya probada (el `Input`
+    recién montado postea `Input.Changed`); un resultado tardío del worker
+    para un alias que desapareció tiraba `KeyError` en el message-loop; los
+    alias nuevos no recibían prefill de entorno. Los tres cerrados.
+  - La consola no strippeaba la contraseña y `load_secrets` sí: la misma
+    credencial llegaba distinta al AS400 (gasta intentos de lockout).
+  - Doctor: dos conexiones inline distintas con el alias implícito `as400`
+    pisaban una fila del detalle; ahora `<alias>@<host>`.
+  - `table` de las fuentes `as400` / `mssql` se interpolaba crudo en el SQL
+    sin validar (049 lo exige): 1–3 identificadores separados por punto.
+  - `source_type: "mssql:x"` sobre una fuente `csv` pasaba en silencio: el
+    prefijo debe coincidir con el `kind` declarado.
+  - El test live de SQL Server no podía correr en otro clon (firma de
+    `get_by_fields_in` y config gitignoreada): genera la config en `tmp_path`.
+
+### Changed
+
+- `SessionCredentials` / `ConsoleState` de la consola pasan a estado por
+  alias (`ConsoleState.for_config`, `creds_ready(required=...)`,
+  `next_steps(required=...)`); `ConsoleApp.as400_required()` se
+  reemplaza por `required_aliases()` sobre `effective_config()`.
+  `doctor.check_as400` desaparece (su único consumidor era la tarjeta
+  fija).
+- `docs/reference/cli.md` documenta los 12 checks del doctor con su
+  grupo; `config-schema.md` / `config-reference.yaml` cubren
+  `connections:` y `kind: mssql`; el README lista `msodbcsql18` como
+  prerrequisito para SQL Server.
+
+---
+
 ## [0.109.0] — 2026-09-06 — **Consola: doctor granular, pipeline elegible y pestaña SYNC**
 
 Respuesta a la primera ronda de uso real de la consola (seis preguntas
