@@ -17,9 +17,9 @@ __all__ = ["ConnState", "ConsoleState", "SessionCredentials"]
 
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
-from cmcourier.cli.console.overrides import SessionOverrides
+from cmcourier.cli.console.overrides import SessionOverrides, TriggerOverride
 from cmcourier.cli.doctor import DoctorReport
 from cmcourier.config.loader import Secrets
 
@@ -106,6 +106,15 @@ class ConsoleState:
         """Valida y promueve el draft. El doctor queda stale."""
         self.overrides = draft.validated()
         self.mark_doctor_stale("cambiaron los overrides de sesión")
+
+    def set_trigger_override(self, trigger: TriggerOverride | None) -> bool:
+        """127: el pipeline elegido en [5] (``None`` = el del YAML).
+        Devuelve True si cambió — y en ese caso el doctor queda stale."""
+        if trigger == self.overrides.trigger:
+            return False
+        self.overrides = replace(self.overrides, trigger=trigger)
+        self.mark_doctor_stale("cambió el pipeline a correr")
+        return True
 
     # ------------------------------------------------- credenciales
 

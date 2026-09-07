@@ -32,6 +32,7 @@ from cmcourier.cli.console.config_pane import ConfigPane
 from cmcourier.cli.console.creds_pane import CredsPane, run_single_check
 from cmcourier.cli.console.doctor_pane import DoctorPane
 from cmcourier.cli.console.monitor_pane import MonitorPane
+from cmcourier.cli.console.overrides import apply_overrides
 from cmcourier.cli.console.run_pane import RunPane
 from cmcourier.cli.console.runner import ConsoleRunManager, LaunchSpec
 from cmcourier.cli.console.state import ConsoleState
@@ -573,8 +574,12 @@ class ConsoleApp(App[None]):
         self.run_worker(work, thread=True, exclusive=False)
 
     def run_doctor_worker(self, group: str, apply_cb: Callable[[DoctorReport, str], None]) -> None:
+        # 127: el doctor valida la config EFECTIVA (yaml + overrides, incluido
+        # el pipeline elegido en [5]) — la que realmente se va a lanzar.
+        effective = apply_overrides(self.config, self.state.overrides)
+
         def work() -> None:
-            report = run_doctor(self.config, self.state.creds.to_secrets(), selected=group)
+            report = run_doctor(effective, self.state.creds.to_secrets(), selected=group)
             self.call_from_thread(apply_cb, report, group)
 
         self.run_worker(work, thread=True, exclusive=True)

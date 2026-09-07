@@ -8,12 +8,22 @@ toca el YAML.
 
 from __future__ import annotations
 
-__all__ = ["OverrideError", "SessionOverrides", "apply_overrides"]
+__all__ = ["OverrideError", "SessionOverrides", "TriggerOverride", "apply_overrides"]
 
 import json
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, fields, replace
 
-from cmcourier.config.schema import PipelineConfig
+from cmcourier.config.schema import (
+    CsvTriggerConfig,
+    LocalScanTriggerConfig,
+    PipelineConfig,
+    RvabrepTriggerConfig,
+    SingleDocTriggerConfig,
+)
+
+TriggerOverride = (
+    CsvTriggerConfig | RvabrepTriggerConfig | LocalScanTriggerConfig | SingleDocTriggerConfig
+)
 
 
 class OverrideError(ValueError):
@@ -22,7 +32,12 @@ class OverrideError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class SessionOverrides:
-    """Cada campo en ``None`` significa "usar el YAML"."""
+    """Cada campo en ``None`` significa "usar el YAML".
+
+    127: ``trigger`` es el pipeline elegido en [5] CORRER — un modelo
+    pydantic ya validado (el CSV / la carpeta existen). Se elige y se
+    aplica en el launcher, no en [3]: por eso ``cleared()`` no lo toca.
+    """
 
     mode: str | None = None  # batched | streaming
     prep_workers: int | None = None
@@ -31,18 +46,30 @@ class SessionOverrides:
     auto_tune_enabled: bool | None = None
     max_bandwidth_mbps: float | None = None
     unmask_pii: bool | None = None
+    trigger: TriggerOverride | None = None
+
+    def _scalar_items(self) -> list[tuple[str, object]]:
+        # No usamos ``asdict``: deep-copiaría el modelo pydantic del trigger.
+        return [
+            (f.name, getattr(self, f.name))
+            for f in fields(self)
+            if f.name != "trigger" and getattr(self, f.name) is not None
+        ]
 
     def is_empty(self) -> bool:
-        return all(v is None for v in asdict(self).values())
+        return self.trigger is None and not self._scalar_items()
 
     def summary(self) -> str:
-        parts = [f"{k}={v}" for k, v in asdict(self).items() if v is not None]
+        parts = [f"{k}={v}" for k, v in self._scalar_items()]
+        if self.trigger is not None:
+            parts.append(f"pipeline={self.trigger.kind}")
         return ", ".join(parts) if parts else "ninguno"
 
     def to_json(self) -> str:
-        return json.dumps(
-            {k: v for k, v in asdict(self).items() if v is not None}, ensure_ascii=False
-        )
+        payload: dict[str, object] = dict(self._scalar_items())
+        if self.trigger is not None:
+            payload["trigger"] = self.trigger.model_dump(mode="json")
+        return json.dumps(payload, ensure_ascii=False)
 
     def validated(self) -> SessionOverrides:
         """Valida rangos (los mismos del schema) y devuelve self."""
@@ -107,5 +134,10 @@ def apply_overrides(config: PipelineConfig, ov: SessionOverrides) -> PipelineCon
         updates["observability"] = config.observability.model_copy(
             update={"unmask_pii": ov.unmask_pii}
         )
+
+    if ov.trigger is not None:
+        # 127: build_pipeline despacha S0 solo por config.trigger — con
+        # esto alcanza para que toda la corrida use el pipeline elegido.
+        updates["trigger"] = ov.trigger
 
     return config.model_copy(update=updates) if updates else config

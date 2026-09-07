@@ -135,6 +135,144 @@ class TestLaunchGuards:
 
         asyncio.run(_run())
 
+    def test_pipeline_selector_applies_trigger_override(self, tmp_path: Path) -> None:
+        """127 / E2: elegir rvabrep aplica el override y muestra sus filas;
+        volver a csv con el path del YAML lo deja en None."""
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            app.run_manager = _FakeManager()  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                _ready_state(app)
+                await goto(pilot, app, "5")
+                pane = app.query_one(RunPane)
+                assert str(pane.query_one("#run-kind", Select).value) == "csv"
+                assert pane.query_one("#kind-csv").display is True
+                assert pane.query_one("#kind-rvabrep").display is False
+                pane.query_one("#run-kind", Select).value = "rvabrep"
+                await pilot.pause()
+                pane.query_one("#run-rv-systems", Input).value = "1, 7"
+                await pilot.pause()
+                assert pane.query_one("#kind-rvabrep").display is True
+                assert pane.query_one("#kind-csv").display is False
+                trig = app.state.overrides.trigger
+                assert trig is not None and trig.kind == "rvabrep"
+                assert list(trig.filters.systems) == ["1", "7"]
+                assert app.state.doctor_stale
+                summary = str(pane.query_one("#run-summary").renderable)
+                assert "pipeline      rvabrep (override)" in summary
+                pane.query_one("#run-kind", Select).value = "csv"
+                await pilot.pause()
+                assert app.state.overrides.trigger is None
+
+        asyncio.run(_run())
+
+    def test_invalid_scan_path_blocks_launch(self, tmp_path: Path) -> None:
+        """127 / E3: carpeta inexistente → no se aplica y no se lanza."""
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            fake = _FakeManager()
+            app.run_manager = fake  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                _ready_state(app)
+                await goto(pilot, app, "5")
+                pane = app.query_one(RunPane)
+                pane.query_one("#run-kind", Select).value = "local_scan"
+                await pilot.pause()
+                pane.query_one("#run-scan-path", Input).value = str(tmp_path / "nope")
+                await pilot.pause()
+                assert app.state.overrides.trigger is None
+                assert "scan_path" in str(pane.query_one("#run-guard").renderable)
+                assert pane.build_spec() is None
+                await pilot.press("r")
+                await pilot.pause()
+                assert fake.launched == []
+
+        asyncio.run(_run())
+
+    def test_single_doc_launch_uses_effective_trigger(self, tmp_path: Path) -> None:
+        """127 / E4."""
+
+        async def _run() -> None:
+            from cmcourier.cli.console.overrides import apply_overrides
+
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            fake = _FakeManager()
+            app.run_manager = fake  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                _ready_state(app)
+                await goto(pilot, app, "5")
+                pane = app.query_one(RunPane)
+                pane.query_one("#run-kind", Select).value = "single_doc"
+                await pilot.pause()
+                assert pane.query_one("#kind-single").display is True
+                assert pane.query_one("#row-mode").display is False
+                pane.query_one("#run-shortname", Input).value = "CLI01"
+                pane.query_one("#run-system", Input).value = "1"
+                _ready_state(app)  # el cambio de pipeline dejó el doctor stale
+                await pilot.press("r")
+                assert await _wait_for(pilot, lambda: len(fake.launched) == 1)
+                spec = fake.launched[0]
+                assert spec.shortname == "CLI01" and spec.system_id == "1"
+                eff = apply_overrides(app.config, app.state.overrides)
+                assert eff.trigger.kind == "single_doc"
+
+        asyncio.run(_run())
+
+    def test_discard_overrides_keeps_pipeline(self, tmp_path: Path) -> None:
+        """127 / E5 + REQ-001: [3] no pisa el pipeline elegido en [5] ni
+        lo marca como borrador sin guardar."""
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            app.run_manager = _FakeManager()  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "5")
+                app.query_one(RunPane).query_one("#run-kind", Select).value = "rvabrep"
+                await pilot.pause()
+                assert app.state.overrides.trigger is not None
+                await goto(pilot, app, "3")
+                assert not app.draft_dirty()
+                app.query_one(ConfigPane).reset_draft()
+                await pilot.pause()
+                assert app.state.overrides.trigger is not None
+
+        asyncio.run(_run())
+
+    def test_doctor_runs_on_effective_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """127 / REQ-003."""
+
+        async def _run() -> None:
+            import cmcourier.cli.console.app as app_module
+
+            seen: list[str] = []
+
+            def fake_doctor(cfg, secrets, selected):  # noqa: ANN001
+                seen.append(cfg.trigger.kind)
+                return DoctorReport(results=(), elapsed_seconds=0.0)
+
+            monkeypatch.setattr(app_module, "run_doctor", fake_doctor)
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "5")
+                app.query_one(RunPane).query_one("#run-kind", Select).value = "rvabrep"
+                await pilot.pause()
+                await goto(pilot, app, "4")
+                await pilot.press("d")
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                assert await _wait_for(pilot, lambda: seen == ["rvabrep"])
+
+        asyncio.run(_run())
+
     def test_streaming_hides_resume(self, tmp_path: Path) -> None:
         """C1: resume solo en batched."""
 

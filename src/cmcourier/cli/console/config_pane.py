@@ -137,6 +137,8 @@ class ConfigPane(Vertical):
             auto_tune_enabled=selbool("ov-aimd"),
             max_bandwidth_mbps=float(bw_raw) if bw_raw else None,
             unmask_pii=selbool("ov-pii"),
+            # 127: el pipeline se elige en [5]; acá se arrastra tal cual.
+            trigger=self.console.state.overrides.trigger,
         )
 
     def apply_draft(self) -> None:
