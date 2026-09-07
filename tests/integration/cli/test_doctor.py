@@ -549,8 +549,35 @@ class TestDoctorCheckFilter:
                 "cmis_connectivity",
                 "as400_connectivity",
                 "tracking_openable",
+                "as400_sync",  # 126: pasa al grupo connections (SKIP si sync off)
             ]
         )
+
+    def test_single_check_by_name(self, tmp_path: Path) -> None:
+        """126 E1: `selected` acepta el nombre exacto de un check."""
+        config = load_config(_write_yaml(tmp_path))
+        report = run_doctor(config, _secrets(), selected="log_dir_writable")
+        assert [r.name for r in report.results] == ["log_dir_writable"]
+
+    def test_check_names_and_group_of(self) -> None:
+        from cmcourier.cli.doctor import CHECK_NAMES, group_of
+
+        assert "log_dir_writable" in CHECK_NAMES
+        assert "as400_sync" in CHECK_NAMES
+        assert len(CHECK_NAMES) == len(set(CHECK_NAMES))
+        assert group_of("cmis_folders_exist") == "cm-targets"
+        assert group_of("log_dir_writable") == "connections"
+
+    def test_cli_accepts_check_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """126 REQ-002: --check acepta nombres de check, no solo grupos."""
+        monkeypatch.setenv("CMIS_USERNAME", "tester")
+        monkeypatch.setenv("CMIS_PASSWORD", "secret-not-real")
+        result = CliRunner().invoke(
+            main, ["doctor", "--config", str(_write_yaml(tmp_path)), "--check", "log_dir_writable"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "log_dir_writable" in result.output
+        assert "cmis_connectivity" not in result.output
 
     @respx.mock
     def test_mapping_runs_only_mapping_check(self, tmp_path: Path) -> None:

@@ -15,14 +15,21 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Select, Static
 
-from cmcourier.cli.doctor import _CHECK_GROUPS, CheckStatus, DoctorReport
+from cmcourier.cli.doctor import _CHECK_GROUPS, CHECK_NAMES, CheckStatus, DoctorReport, group_of
 
 if TYPE_CHECKING:
     from cmcourier.cli.console.app import ConsoleApp
 
 # Los grupos REALES del doctor, importados — nunca re-tipeados (informe
-# UX v2, hallazgo A8: el mock los tenía mal).
-_GROUPS = ["all", *sorted(_CHECK_GROUPS)]
+# UX v2, hallazgo A8: el mock los tenía mal). 126: `all` viene dentro
+# de _CHECK_GROUPS (sentinel) — se filtra para no duplicarlo — y los
+# checks individuales se listan después de los grupos.
+_GROUPS = [g for g in sorted(_CHECK_GROUPS) if g != "all"]
+_OPTIONS: list[tuple[str, str]] = [
+    ("todos los checks", "all"),
+    *[(f"grupo · {g}", g) for g in _GROUPS],
+    *[(f"check · {n}", n) for n in CHECK_NAMES],
+]
 _ICON = {
     CheckStatus.PASS: ("✔", "st-pass"),
     CheckStatus.FAIL: ("✘", "st-fail"),
@@ -37,6 +44,7 @@ class DoctorPane(Vertical):
     DoctorPane .intro { color: $text-muted; margin-bottom: 1; }
     DoctorPane .toolbar { height: auto; margin-bottom: 1; }
     DoctorPane .toolbar > * { margin-right: 2; }
+    DoctorPane #doc-group { width: 40; }
     DoctorPane #doc-summary { color: $text-muted; padding-top: 1; }
     DoctorPane .stale { color: $warning; border: solid $warning; padding: 0 1;
                         margin-bottom: 1; height: auto; }
@@ -66,7 +74,7 @@ class DoctorPane(Vertical):
         )
         with Horizontal(classes="toolbar"):
             yield Button("correr (d)", variant="primary", id="doc-run")
-            yield Select([(g, g) for g in _GROUPS], value="all", id="doc-group", allow_blank=False)
+            yield Select(_OPTIONS, value="all", id="doc-group", allow_blank=False)
             yield Static("sin correr", id="doc-summary")
         yield Static("", classes="stale", id="doc-stale")
         yield VerticalScroll(id="doc-results")
@@ -144,7 +152,7 @@ class DoctorPane(Vertical):
         for i, r in enumerate(report.results):
             icon, cls = _ICON[r.status]
             row = Static(
-                f" {icon}  {r.name:<28} {r.status.value:<5} {r.message}",
+                f" {icon}  {r.name:<28} {group_of(r.name):<12} {r.status.value:<5} {r.message}",
                 classes=f"check-row {cls}" + (" selected" if i == self.selected else ""),
                 markup=False,
             )
@@ -162,11 +170,11 @@ class DoctorPane(Vertical):
             parts.append(f"{report.failed_count} fail")
         if report.skip_count:
             parts.append(f"{report.skip_count} salteados")
-        suffix = (
-            ""
-            if self.console.state.doctor_group == "all"
-            else (f" · grupo {self.console.state.doctor_group}")
-        )
+        sel = self.console.state.doctor_group
+        if sel == "all":
+            suffix = ""
+        else:
+            suffix = f" · check {sel}" if sel in CHECK_NAMES else f" · grupo {sel}"
         self.query_one("#doc-summary", Static).update(
             " · ".join(parts) + f" · {report.elapsed_seconds:.1f}s{suffix}"
         )

@@ -25,11 +25,13 @@ lleva valores de propiedad resueltos. Las claves operativas (`base_url`,
 from __future__ import annotations
 
 __all__ = [
+    "CHECK_NAMES",
     "CheckResult",
     "CheckStatus",
     "DoctorReport",
     "check_as400",
     "check_cmis",
+    "group_of",
     "run_doctor",
 ]
 
@@ -131,6 +133,9 @@ _CHECK_GROUPS: dict[str, frozenset[str]] = {
             "cmis_connectivity",
             "as400_connectivity",
             "tracking_openable",
+            # 126: antes no pertenecía a ningún grupo (solo corría con
+            # `all`). SKIP cuando el sync está off, así no cambia veredictos.
+            "as400_sync",
         }
     ),
     "mapping": frozenset({"mapping_completeness"}),
@@ -148,9 +153,34 @@ _CHECK_GROUPS: dict[str, frozenset[str]] = {
 }
 
 
+# 126: los checks seleccionables, en el orden en que corren. Es la
+# fuente de verdad para el CLI (`--check`) y el selector de la consola.
+CHECK_NAMES: tuple[str, ...] = (
+    "log_dir_writable",
+    "cmis_connectivity",
+    "as400_connectivity",
+    "tracking_openable",
+    "as400_sync",
+    "mapping_completeness",
+    "metadata_sources",
+    "cm_type_alignment",
+    "cmis_folders_exist",
+    "cmis_properties_alignment",
+    "sample_dry_run",
+)
+
+
+def group_of(name: str) -> str:
+    """126: primer grupo (en orden de declaración) que contiene el check."""
+    for group, members in _CHECK_GROUPS.items():
+        if name in members:
+            return group
+    return "—"
+
+
 def _selected(name: str, selected: str) -> bool:
-    """True cuando ``name`` pertenece al grupo de filtro activo."""
-    if selected == "all":
+    """True cuando ``name`` es el filtro, o pertenece al grupo de filtro."""
+    if selected == "all" or selected == name:
         return True
     return name in _CHECK_GROUPS.get(selected, frozenset())
 

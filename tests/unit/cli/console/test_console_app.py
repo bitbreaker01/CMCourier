@@ -6,12 +6,12 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from textual.widgets import Input, Static, TabbedContent
+from textual.widgets import Input, Select, Static, TabbedContent
 
 import cmcourier.cli.console.app as app_module
 from cmcourier.cli.console.app import ConfirmScreen, ConsoleApp
 from cmcourier.cli.console.doctor_pane import DoctorPane
-from cmcourier.cli.doctor import CheckResult, CheckStatus, DoctorReport
+from cmcourier.cli.doctor import CHECK_NAMES, CheckResult, CheckStatus, DoctorReport
 from cmcourier.config.loader import load_config
 from tests.unit.cli.console.conftest import goto, wait_for
 
@@ -222,6 +222,41 @@ class TestDoctorFlow:
                 await pilot.pause()
                 stale = app.query_one("#doc-stale", Static)
                 assert stale.display
+
+        asyncio.run(_run())
+
+    def test_selector_visible_and_lists_individual_checks(self, tmp_path: Path) -> None:
+        """126 / E3: el Select tiene ancho real (antes 1fr dentro de un
+        Horizontal → ancho 1, invisible), no repite `all` y ofrece los
+        checks individuales además de los grupos."""
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "4")
+                await pilot.pause()
+                sel = app.query_one("#doc-group", Select)
+                assert sel.region.width > 10
+                values = [str(v) for _, v in sel._options]  # noqa: SLF001
+                assert len(values) == len(set(values))
+                assert "all" in values
+                assert "connections" in values
+                assert "log_dir_writable" in values
+                assert set(CHECK_NAMES) <= set(values)
+
+        asyncio.run(_run())
+
+    def test_help_lists_doctor_checks(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await pilot.press("question_mark")
+                await pilot.pause()
+                text = str(app.screen.query_one(Static).renderable)
+                for name in CHECK_NAMES:
+                    assert name in text
 
         asyncio.run(_run())
 

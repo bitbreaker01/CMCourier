@@ -35,7 +35,14 @@ from cmcourier.cli.console.monitor_pane import MonitorPane
 from cmcourier.cli.console.run_pane import RunPane
 from cmcourier.cli.console.runner import ConsoleRunManager, LaunchSpec
 from cmcourier.cli.console.state import ConsoleState
-from cmcourier.cli.doctor import CheckResult, CheckStatus, DoctorReport, run_doctor
+from cmcourier.cli.doctor import (
+    CHECK_NAMES,
+    CheckResult,
+    CheckStatus,
+    DoctorReport,
+    group_of,
+    run_doctor,
+)
 from cmcourier.config.schema import PipelineConfig
 from cmcourier.domain.exceptions import ConfigurationError
 from cmcourier.domain.models import BatchInfo
@@ -126,7 +133,7 @@ class HelpScreen(ModalScreen[None]):
 
 [b $accent]POR PANTALLA[/]
   [2] ↵ probar conexión del formulario     [3] a  guardar overrides
-  [4] d correr grupo · ↑↓ navegar · ↵ expandir
+  [4] d correr la selección · ↑↓ navegar · ↵ expandir
   [5] r lanzar                             [6] x  cancelar (drain) · +/- workers
   [7] ↑↓ navegar · ↵ detalle · R retry · E export
 
@@ -134,10 +141,18 @@ class HelpScreen(ModalScreen[None]):
   S0/S1 adquirir triggers · indexar RVABREP     S2/S3 mapear tipo CM · resolver metadata
   S4/S5 ensamblar PDF · subir por CMIS          S6/S7 tracking · idempotencia (no re-sube)
 
+[b $accent]CHECKS DEL DOCTOR[/] (selector de [4]: todos · por grupo · de a uno)
+{checks}
+
 cerrar: Esc o ?"""
 
+    @staticmethod
+    def _checks_block() -> str:
+        # 126: la lista sale de CHECK_NAMES, nunca re-tipeada (hallazgo A8).
+        return "\n".join(f"  {name:<28} grupo · {group_of(name)}" for name in CHECK_NAMES)
+
     def compose(self) -> ComposeResult:
-        yield Static(self.HELP, markup=True)
+        yield Static(self.HELP.format(checks=self._checks_block()), markup=True)
 
 
 class ConsoleApp(App[None]):
