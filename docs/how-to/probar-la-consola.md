@@ -146,6 +146,14 @@ avanzás (credenciales → doctor → lanzar).
   cooperativa: lo que está en vuelo termina, ningún worker toma trabajo
   nuevo. La cabecera dice `PAUSADA` y la barra superior `⏸ pausada`.
   Ojo: `--max-duration` sigue corriendo mientras está pausada.
+- **`+`** / **`-`** mueven el techo manual de workers en caliente (133),
+  sin confirmación. La cabecera muestra `workers <en uso>/<cap efectivo>`
+  y, si lo tocaste, `· techo manual N`. El techo es un `min` contra lo
+  que pide el AIMD: si el AIMD quiere 8 y vos pusiste 3, el pool queda
+  en 3; cuando subís el techo, el AIMD retoma desde ahí. Sin AIMD sólo
+  podés BAJAR (el pool de threads de S5 no crece más allá de
+  `cmis.workers`). Piso: 1 (2 en modo dual-lane, un slot por carril).
+  Es de la corrida: la siguiente arranca sin techo.
 - Al terminar aparece la tarjeta de cierre con el resultado.
 
 #### Pausa y re-autenticación CMIS en caliente (132)
@@ -308,8 +316,6 @@ docker compose -f alfresco-compose.yml -f alfresco-compose.local.yml down -v   #
 
 ## Qué NO hace todavía (por diseño de la v1)
 
-- **Techo manual de workers en caliente** desde el monitor: pendiente
-  (requiere que el AIMD respete un `min(user_cap, aimd_cap)`).
 - **ETA por ventana** en el monitor: usa el throughput acumulado del
   provider actual.
 - **Editar y guardar el YAML completo** desde la consola: próxima

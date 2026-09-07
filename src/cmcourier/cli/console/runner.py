@@ -278,6 +278,22 @@ class ConsoleRunManager:
             self.reauth_pending = False
         self.orchestrator.cancel_token.resume()
 
+    # 133: techo manual de workers — el clamp vive en el pipeline.
+
+    @property
+    def worker_cap(self) -> int | None:
+        return None if self.pipeline is None else self.pipeline.worker_cap
+
+    @property
+    def effective_workers(self) -> int | None:
+        return None if self.pipeline is None else self.pipeline.effective_workers
+
+    def adjust_workers(self, delta: int) -> int | None:
+        """Mueve el techo ``delta`` pasos; None si no hay pipeline (corrida idle)."""
+        if self.pipeline is None:
+            return None
+        return self.pipeline.adjust_worker_cap(delta)
+
     def _on_auth_expired(self) -> None:
         self.reauth_pending = True
         self.app.call_from_thread(self.app.on_auth_expired, self)

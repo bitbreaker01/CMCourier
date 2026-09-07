@@ -33,6 +33,8 @@ class _FakeProvider:
             failed_total=2,
             failures_by_type={"503 server": 2},
             s1_filtered=1,
+            pool_capacity=4,
+            pool_in_use=3,
         )
 
 
@@ -42,6 +44,7 @@ class _FakeManager:
         self.active = provider is not None
         self.paused = paused
         self.reauth_pending = False
+        self.worker_cap: int | None = None
         self.calls: list[str] = []
 
     def cancel(self) -> None:
@@ -55,6 +58,15 @@ class _FakeManager:
         self.calls.append("resume")
         self.paused = False
         self.reauth_pending = False
+
+    def adjust_workers(self, delta: int) -> int | None:
+        # 133: emula el clamp del pipeline (workers=4, sin AIMD)
+        if not self.active:
+            return None
+        self.calls.append(f"adjust{delta:+d}")
+        current = self.worker_cap if self.worker_cap is not None else 4
+        self.worker_cap = max(1, min(current + delta, 4))
+        return self.worker_cap
 
 
 def _seed_batch(tmp_path: Path, path: Path, *, fail: bool = True) -> str:
@@ -274,5 +286,74 @@ class TestBatches:
                 await pilot.pause()
                 info = pane._rows[0]  # noqa: SLF001
                 assert pane.is_resumable(info) is False
+
+        asyncio.run(_run())
+
+
+class TestWorkerCap133:
+    def test_minus_lowers_the_cap_and_header_shows_it(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            mgr = _FakeManager(_FakeProvider())
+            app.run_manager = mgr  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                await pilot.press("minus")
+                await pilot.pause()
+                assert mgr.calls == ["adjust-1"]
+                header = str(app.query_one("#mon-header", Static).renderable)
+                assert "workers 3/4" in header
+                assert "techo manual 3" in header
+
+        asyncio.run(_run())
+
+    def test_plus_and_equals_raise_the_cap(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            mgr = _FakeManager(_FakeProvider())
+            mgr.worker_cap = 2
+            app.run_manager = mgr  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                await pilot.press("plus")
+                await pilot.press("equals_sign")
+                await pilot.pause()
+                assert mgr.calls == ["adjust+1", "adjust+1"]
+                assert mgr.worker_cap == 4
+
+        asyncio.run(_run())
+
+    def test_keys_are_inert_outside_monitor_or_without_run(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            mgr = _FakeManager(_FakeProvider())
+            app.run_manager = mgr  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "1")
+                await pilot.press("minus")
+                await pilot.pause()
+                assert mgr.calls == []
+                idle = _FakeManager(None)
+                app.run_manager = idle  # type: ignore[assignment]
+                await goto(pilot, app, "6")
+                await pilot.press("minus")
+                await pilot.pause()
+                assert idle.calls == []
+
+        asyncio.run(_run())
+
+    def test_header_without_manual_cap_shows_only_pool(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            app.run_manager = _FakeManager(_FakeProvider())  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                header = str(app.query_one("#mon-header", Static).renderable)
+                assert "workers 3/4" in header
+                assert "techo manual" not in header
 
         asyncio.run(_run())

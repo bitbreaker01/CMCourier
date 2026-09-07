@@ -72,6 +72,19 @@ def test_resume_after_reauth_pushes_cmis_credentials_first() -> None:
     assert mgr.paused is False
 
 
+def test_adjust_workers_delegates_to_the_pipeline() -> None:
+    """133: el manager sólo delega; el clamp vive en el pipeline."""
+    mgr = _manager()
+    mgr.pipeline.adjust_worker_cap.return_value = 3
+    assert mgr.adjust_workers(-1) == 3
+    mgr.pipeline.adjust_worker_cap.assert_called_once_with(-1)
+
+
+def test_adjust_workers_without_run_is_none() -> None:
+    mgr = ConsoleRunManager(MagicMock())
+    assert mgr.adjust_workers(+1) is None
+
+
 def test_outcome_ignores_pause() -> None:
     mgr = _manager()
     mgr.pause()

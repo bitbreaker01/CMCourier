@@ -138,6 +138,7 @@ class HelpScreen(ModalScreen[None]):
   [2] ↵ probar conexión del formulario     [3] a  guardar overrides
   [4] d correr la selección · ↑↓ navegar · ↵ expandir
   [5] r lanzar                             [6] x cancelar (drain) · p pausar · r reanudar
+                                               +/- techo manual de workers (en caliente)
   [7] ↑↓ navegar · ↵ detalle · R retry · E export
   [8] s estado del sync · simular antes de aplicar (recover) · resolver por txn
 
@@ -190,6 +191,9 @@ class ConsoleApp(App[None]):
         Binding("r", "launch", "lanzar", show=False),
         Binding("x", "cancel_run", "cancelar corrida", show=False),
         Binding("p", "pause_run", "pausar corrida", show=False),
+        Binding("plus", "adjust_workers(1)", "+workers", show=False),
+        Binding("equals_sign", "adjust_workers(1)", "+workers", show=False),
+        Binding("minus", "adjust_workers(-1)", "-workers", show=False),
         Binding("s", "sync_status", "estado sync", show=False),
     ]
 
@@ -372,6 +376,27 @@ class ConsoleApp(App[None]):
         if not ok:
             return
         self.run_manager.pause()
+        self._refresh_run_state()
+
+    # ------------------------------------------- 133: techo manual de workers
+
+    def action_adjust_workers(self, delta: int) -> None:
+        """``+``/``-`` en [6] con corrida activa. Sin confirmación: es
+        reversible y el pipeline lo acota a ``[1, techo del pool]``."""
+        if self.q("#tabs", TabbedContent).active != "monitor" or not self.run_active:
+            return
+        mgr = self.run_manager
+        effective = mgr.adjust_workers(delta)
+        if effective is None:
+            return
+        cap = mgr.worker_cap
+        if cap is not None and cap > effective:
+            msg = f"workers: {effective} · techo del pool"
+        elif cap is not None:
+            msg = f"workers: {effective} (techo manual {cap})"
+        else:
+            msg = f"workers: {effective}"
+        self.notify(msg, timeout=3)
         self._refresh_run_state()
 
     def resume_run(self) -> None:

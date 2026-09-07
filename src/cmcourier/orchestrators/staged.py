@@ -234,6 +234,13 @@ class StagedPipeline:
         self._auth_expired_handler: Callable[[], None] | None = None
         self._reauth_lock = threading.Lock()
         self._cred_generation = 0
+        # 133: techo manual de `worker`s. El AIMD escribe ``_aimd_total`` y
+        # el operador ``_user_cap``; el pool ve ``min`` de ambos, acotado a
+        # ``[1, _pool_ceiling()]``. Un solo helper (``_apply_worker_budget``)
+        # aplica el resultado para que nunca se pisen.
+        self._aimd_total = self._workers
+        self._user_cap: int | None = None
+        self._budget_lock = threading.Lock()
         # 037: cache de metadata cross-batch. None cuando está
         # deshabilitado (default) — S3 siempre invoca
         # MetadataService.resolve (comportamiento pre-037).
@@ -382,17 +389,81 @@ class StagedPipeline:
         )
 
     def _current_total_workers(self) -> int:
-        """Devuelve el budget TOTAL actual de `worker`s para ambos modos (036)."""
+        """Devuelve el budget TOTAL actual de `worker`s para ambos modos (036).
+
+        133: es el presupuesto EFECTIVO (ya recortado por el techo
+        manual). Con un techo bajo el AIMD "cree" que el pool es chico y
+        propone ``cap+1``; cuando el techo se levanta, el pool sube a eso
+        y el AIMD sigue creciendo desde ahí. Aceptable y acotado.
+        """
         if self._lane_controller is not None:
             return self._lane_controller.snapshot().total_budget
         return self._concurrency_limit.capacity
 
     def _on_pool_resize(self, new_total: int) -> None:
-        """Hook AIMD para resize del pool. Despacha por modo (036)."""
+        """Hook AIMD para resize del pool. Despacha por modo (036).
+
+        133: no escribe al pool directo — actualiza ``_aimd_total`` y
+        re-aplica el ``min`` con el techo manual.
+        """
+        with self._budget_lock:
+            self._aimd_total = max(1, int(new_total))
+            self._apply_worker_budget()
+
+    def _effective_worker_budget(self) -> int:
+        """``min(aimd_total, user_cap)`` acotado a ``[1, _pool_ceiling()]`` (133)."""
+        budget = self._aimd_total
+        if self._user_cap is not None:
+            budget = min(budget, self._user_cap)
+        # Dual-lane: cada lane retiene al menos un slot → piso 2.
+        floor = 2 if self._lane_controller is not None else 1
+        return max(floor, min(budget, self._pool_ceiling()))
+
+    def _apply_worker_budget(self) -> int:
+        """Único punto que escribe la capacidad al semáforo / lane controller (133).
+
+        Llamar con ``_budget_lock`` tomado. Devuelve el presupuesto efectivo.
+        """
+        budget = self._effective_worker_budget()
         if self._lane_controller is not None:
-            self._lane_controller.set_total_budget(new_total)
+            self._lane_controller.set_total_budget(budget)
         else:
-            self._concurrency_limit.set_capacity(new_total)
+            self._concurrency_limit.set_capacity(budget)
+        return budget
+
+    @property
+    def worker_cap(self) -> int | None:
+        """Techo manual de `worker`s vigente, o None si no hay (133)."""
+        return self._user_cap
+
+    @property
+    def effective_workers(self) -> int:
+        """Presupuesto efectivo del pool en cualquiera de los dos modos (133)."""
+        return self._current_total_workers()
+
+    def set_worker_cap(self, cap: int | None) -> int:
+        """Fija (o quita con None) el techo manual; devuelve el presupuesto efectivo (133)."""
+        with self._budget_lock:
+            self._user_cap = None if cap is None else max(1, int(cap))
+            budget = self._apply_worker_budget()
+        _log.info(
+            "workers: techo manual %s → presupuesto efectivo %d",
+            "quitado" if cap is None else cap,
+            budget,
+        )
+        return budget
+
+    def adjust_worker_cap(self, delta: int) -> int:
+        """Mueve el techo manual ``delta`` pasos partiendo del efectivo actual (133).
+
+        Parte del EFECTIVO (no del cap anterior): si el AIMD bajó a 3 y el
+        operador aprieta ``-``, espera 2, no ``cap-1``. El resultado queda
+        acotado a ``[1, _pool_ceiling()]``.
+        """
+        with self._budget_lock:
+            target = self._effective_worker_budget() + int(delta)
+            self._user_cap = max(1, min(target, self._pool_ceiling()))
+            return self._apply_worker_budget()
 
     def _pool_ceiling(self) -> int:
         """057: la cantidad máxima de `thread`s que S5 alguna vez podría necesitar.

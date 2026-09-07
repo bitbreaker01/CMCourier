@@ -23,6 +23,7 @@ from cmcourier.tui.upload_tab import render_upload
 
 if TYPE_CHECKING:
     from cmcourier.cli.console.app import ConsoleApp
+    from cmcourier.tui.data_provider import TUISnapshot
 
 
 class MonitorPane(Vertical):
@@ -85,6 +86,7 @@ class MonitorPane(Vertical):
             f"[green]subidos {done}[/green]  "
             + (f"[red]fallidos {failed}[/red]  " if failed else f"fallidos {failed}  ")
             + f"salteados {skipped}  {snap.throughput_docs_per_s:.1f} docs/s"
+            + self._workers_fragment(mgr, snap)
         )
         breakdown = getattr(snap, "failures_by_type", None)
         if breakdown:
@@ -97,6 +99,21 @@ class MonitorPane(Vertical):
         if self.console.config.processing.mode == "streaming":
             body += "\n\n" + render_bucket(snap)
         self.query_one("#mon-body", Static).update(body)
+
+    @staticmethod
+    def _workers_fragment(mgr: object, snap: TUISnapshot) -> str:
+        """133: ``workers <en uso>/<cap efectivo>`` y el techo manual si lo hay."""
+        # El pipeline sabe el presupuesto en ambos modos (single/dual-lane);
+        # ``snap.pool_capacity`` sólo ve el semáforo único.
+        effective = getattr(mgr, "effective_workers", None)
+        capacity = int(effective if effective is not None else snap.pool_capacity)
+        if capacity <= 0:
+            return ""
+        frag = f"  workers {int(getattr(snap, 'pool_in_use', 0))}/{capacity}"
+        cap = getattr(mgr, "worker_cap", None)
+        if cap is not None:
+            frag += f" · [yellow]techo manual {cap}[/yellow]"
+        return frag
 
     def _bottleneck_line(self, snap: object) -> str:
         stages = getattr(snap, "stages", {}) or {}
