@@ -1,8 +1,11 @@
 """Capa de configuración: schema Pydantic + loader YAML + secretos por env-var.
 
-Único lector de variables de entorno del proceso: ``AS400_USERNAME``,
-``AS400_PASSWORD``, ``CMIS_USERNAME``, ``CMIS_PASSWORD``.
-Principio V de la Constitución.
+Único lector de variables de entorno del proceso: ``CMIS_USERNAME`` /
+``CMIS_PASSWORD`` más, por cada alias del registro ``connections:`` (129),
+``<ALIAS>_USERNAME`` / ``<ALIAS>_PASSWORD`` (alias en mayúsculas; las
+conexiones inline usan el alias implícito ``as400``). Ver
+:func:`cmcourier.config.schema.credential_env_vars`. Principio V de la
+Constitución.
 """
 
 from __future__ import annotations

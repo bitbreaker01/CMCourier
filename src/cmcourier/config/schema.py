@@ -13,8 +13,10 @@ que se crean en tiempo de ejecución (temp_dir, base SQLite).
 
 Principio V de la Constitución: este módulo es la única fuente
 declarativa de verdad para la superficie configurable del pipeline.
-El orchestrator y los adapters NO importan este módulo — la traducción
-ocurre en :mod:`cmcourier.config.wiring`.
+La traducción a objetos de dominio ocurre en :mod:`cmcourier.config.wiring`;
+los orchestrators, servicios y adapters que reciben sub-modelos de
+config (``ProcessingConfig``, ``As400SyncConfig``, ``MetadataConfigModel``)
+los tratan como valores inmutables, nunca como fuente de wiring.
 """
 
 from __future__ import annotations
@@ -102,6 +104,21 @@ def _validate_sql_identifier(value: str) -> str:
             "128 chars max)"
         )
         raise ValueError(msg)
+    return value
+
+
+def _validate_qualified_table(value: str | None) -> str | None:
+    """``table`` de una fuente de metadata: 1 a 3 identificadores separados
+    por punto (``CLIENTES``, ``RVILIB.CLIENTES``, ``db.dbo.clientes``).
+    Se interpola crudo en el ``SELECT ... FROM`` del prefetch, así que
+    aplica la misma regla que el resto de los identificadores (049)."""
+    if value is None:
+        return None
+    parts = value.split(".")
+    if len(parts) > 3:
+        raise ValueError(f"{value!r} is not a valid table identifier (at most db.schema.table)")
+    for part in parts:
+        _validate_sql_identifier(part)
     return value
 
 
@@ -419,6 +436,8 @@ class As400MetadataSourceConfig(BaseModel):
     table: str | None = Field(default=None, min_length=1)
     query: str | None = Field(default=None, min_length=1)
 
+    _validate_table = field_validator("table")(_validate_qualified_table)
+
     @model_validator(mode="after")
     def _exactly_one_table_or_query(self) -> As400MetadataSourceConfig:
         if bool(self.table) == bool(self.query):
@@ -442,6 +461,8 @@ class MssqlMetadataSourceConfig(BaseModel):
     connection: str
     table: str | None = Field(default=None, min_length=1)
     query: str | None = Field(default=None, min_length=1)
+
+    _validate_table = field_validator("table")(_validate_qualified_table)
 
     @model_validator(mode="after")
     def _exactly_one_table_or_query(self) -> MssqlMetadataSourceConfig:
@@ -558,6 +579,27 @@ class MetadataConfigModel(BaseModel):
     sources: list[MetadataSourceConfig] = Field(default_factory=list)
     prefetch_enabled: bool = True
     cache: MetadataCacheConfig = Field(default_factory=MetadataCacheConfig)
+
+    @model_validator(mode="after")
+    def _lookup_prefix_matches_source_kind(self) -> MetadataConfigModel:
+        """130: ``"<kind>:<alias>"`` debe apuntar a una fuente declarada con
+        ESE kind — un prefijo que miente (``mssql:`` sobre un CSV) no
+        avisa en runtime porque la resolución es por alias. Un alias no
+        declarado acá no es asunto del schema: lo reporta el resolver."""
+        kinds = {source.alias: source.kind for source in self.sources}
+        for field_name, field_config in self.field_sources.items():
+            for item in field_config.sources:
+                lookup = split_lookup_source_type(item.source_type)
+                if lookup is None:
+                    continue
+                prefix, alias = lookup
+                declared = kinds.get(alias)
+                if declared is not None and declared != prefix:
+                    raise ValueError(
+                        f"field_sources[{field_name}]: source_type {item.source_type!r} "
+                        f"but metadata.sources[{alias}] is kind {declared!r}"
+                    )
+        return self
 
 
 class SyntheticBandConfig(BaseModel):
@@ -1000,14 +1042,18 @@ class PipelineConfig(BaseModel):
     @model_validator(mode="after")
     def _check_connection_references(self) -> PipelineConfig:
         # Resolver cada sitio valida existencia + kind; el resultado se tira.
-        self.connection_refs()
+        # `include_disabled`: un sync apagado con alias roto se rechaza igual.
+        self.connection_refs(include_disabled=True)
         return self
 
-    def connection_refs(self) -> tuple[ConnectionRef, ...]:
-        """129 — una entrada por sitio que usa una conexión, en orden de config.
+    def connection_refs(self, *, include_disabled: bool = False) -> tuple[ConnectionRef, ...]:
+        """129 — una entrada por sitio que USA una conexión, en orden de config.
 
         Única fuente de verdad de "qué conexiones necesita esta config":
-        la consola, el doctor y `sync_ops` derivan de acá.
+        la consola, el doctor y `sync_ops` derivan de acá. Un
+        ``tracking.as400_sync`` con ``enabled: false`` no cuenta (el
+        pipeline jamás abre esa conexión) salvo ``include_disabled``, que
+        existe sólo para validar el alias.
         """
         sites: list[tuple[str, AnyConnectionConfig | str, ConnectionKind, str]] = []
         source = self.indexing.source
@@ -1033,7 +1079,7 @@ class PipelineConfig(BaseModel):
                     )
                 )
         sync = self.tracking.as400_sync
-        if sync.connection is not None:
+        if sync.connection is not None and (sync.enabled or include_disabled):
             sites.append(
                 ("tracking.as400_sync", sync.connection, "as400", "tracking.as400_sync.connection")
             )

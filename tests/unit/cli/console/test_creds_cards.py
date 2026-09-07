@@ -147,6 +147,56 @@ class TestCards:
         asyncio.run(_run())
 
 
+class TestRecompose:
+    """Antagonista 129-131 I1/I2: la rama de remonte de `rebuild_cards` hoy
+    es defensiva (los overrides 127 no cambian conexiones), pero si corre
+    NO puede destruir estado ni reventar el message-loop."""
+
+    def test_remount_keeps_tested_connections(self, tmp_path: Path) -> None:
+        """I1: `Input(value=...)` al montar dispara `Input.Changed`; eso NO debe
+        invalidar una conexión que sobrevivió al rebuild."""
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            (tmp_path / "b").mkdir()
+            registry, _ = _registry_config(tmp_path / "b")
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "2")
+                app.state.creds.set("cmis", "admin", "admin")
+                app.state.record_conn_result("cmis", ok=True, message="ok")
+                app.effective_config = lambda: registry  # type: ignore[method-assign]
+                await app.query_one(CredsPane).rebuild_cards()
+                await pilot.pause()
+                ids = [c.id for c in app.query_one(CredsPane).query(".card")]
+                assert ids == ["card-cmis", "card-clientes_sql", "card-rvi"]
+                assert app.state.conn["cmis"].status == "ok"
+                assert app.query_one("#user-cmis", Input).value == "admin"
+
+        asyncio.run(_run())
+
+    def test_late_worker_result_for_vanished_alias_does_not_raise(self, tmp_path: Path) -> None:
+        """I2: el callback del worker llega después de que la tarjeta se fue."""
+
+        async def _run() -> None:
+            config, path = _registry_config(tmp_path)
+            (tmp_path / "b").mkdir()
+            csv_only, _ = _make_config(tmp_path / "b")
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "2")
+                pane = app.query_one(CredsPane)
+                app.effective_config = lambda: csv_only  # type: ignore[method-assign]
+                await pane.rebuild_cards()
+                await pilot.pause()
+                assert list(app.state.conn) == ["cmis"]
+                pane._apply_result("rvi", _pass("rvi", app)[0], 12.0)
+                await pilot.pause()
+                assert list(app.state.conn) == ["cmis"]
+
+        asyncio.run(_run())
+
+
 class TestGates:
     def test_inicio_and_launch_require_every_alias(self, tmp_path: Path) -> None:
         """E1: cmis OK no alcanza; INICIO lista cada conexión con su estado."""

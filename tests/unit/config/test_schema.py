@@ -1511,6 +1511,109 @@ class TestConnectionRegistry:
         ref = config.connection_ref("tracking.as400_sync")
         assert ref is not None and ref.spec.host == "h"
 
+    def test_disabled_sync_does_not_require_its_connection(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        """Antagonista 129-131 B1: `enabled: false` con `connection` seteada
+        (la forma documentada en config-reference) NO exige credenciales —
+        el pipeline nunca abre esa conexión."""
+        data = self._data(fixture_paths, tmp_path)
+        data["connections"] = {"rvi": {"kind": "as400", "host": "h"}}
+        data["tracking"]["as400_sync"] = {"enabled": False, "connection": "rvi"}
+        config = PipelineConfig.model_validate(data)
+        assert config.connection_refs() == ()
+        assert config.required_aliases() == ()
+        assert config.connection_ref("tracking.as400_sync") is None
+
+    def test_disabled_sync_still_validates_its_alias(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        """Apagar el sync no es excusa para un alias roto: se valida igual."""
+        data = self._data(fixture_paths, tmp_path)
+        data["tracking"]["as400_sync"] = {"enabled": False, "connection": "nadie"}
+        with pytest.raises(ValidationError) as ei:
+            PipelineConfig.model_validate(data)
+        assert "tracking.as400_sync.connection" in str(ei.value)
+
+
+class TestMetadataSourceTableIdentifier:
+    """Antagonista 129-131 M2: `table` se interpola crudo en el SQL del
+    prefetch → DEBE ser un identificador (opcionalmente calificado)."""
+
+    @pytest.mark.parametrize("table", ["CLIENTES", "RVILIB.CLIENTES", "dbo.clientes", "db.dbo.t"])
+    def test_qualified_identifiers_accepted(self, table: str) -> None:
+        as400 = As400MetadataSourceConfig(
+            kind="as400", alias="c", as400_connection="rvi", table=table
+        )
+        mssql = MssqlMetadataSourceConfig(kind="mssql", alias="c", connection="sql", table=table)
+        assert as400.table == table and mssql.table == table
+
+    @pytest.mark.parametrize(
+        "table",
+        [
+            "dbo.clientes WHERE 1=1 UNION ALL SELECT name, 1 FROM sys.tables --",
+            "clientes;DROP TABLE x",
+            "a.b.c.d",
+            ".clientes",
+            "dbo.",
+        ],
+    )
+    def test_injection_shaped_tables_rejected(self, table: str) -> None:
+        with pytest.raises(ValidationError, match="identifier"):
+            MssqlMetadataSourceConfig(kind="mssql", alias="c", connection="sql", table=table)
+        with pytest.raises(ValidationError, match="identifier"):
+            As400MetadataSourceConfig(kind="as400", alias="c", as400_connection="rvi", table=table)
+
+
+class TestLookupPrefixMatchesSourceKind:
+    """Antagonista 129-131 M3: `source_type: "<kind>:<alias>"` debe apuntar a
+    una fuente declarada con ESE kind — si no, el prefijo miente."""
+
+    def _data(self, fixture_paths: dict[str, Path], tmp_path: Path) -> dict[str, Any]:
+        data = _build_full_data(
+            fixture_paths["trigger"],
+            fixture_paths["rvabrep"],
+            fixture_paths["modelo"],
+            fixture_paths["clients"],
+            fixture_paths["assembly_root"],
+            tmp_path,
+        )
+        data["metadata"]["field_sources"]["BAC_Nombre"] = {
+            "sources": [
+                {
+                    "source_type": "mssql:clients",
+                    "lookup_key_column": "CIF",
+                    "lookup_value_column": "Nombre",
+                }
+            ]
+        }
+        return data
+
+    def test_prefix_kind_must_match_declared_source(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        data = self._data(fixture_paths, tmp_path)  # `clients` es kind csv
+        with pytest.raises(ValidationError) as ei:
+            PipelineConfig.model_validate(data)
+        msg = str(ei.value)
+        assert "mssql:clients" in msg and "csv" in msg
+
+    def test_matching_prefix_passes(self, fixture_paths: dict[str, Path], tmp_path: Path) -> None:
+        data = self._data(fixture_paths, tmp_path)
+        data["metadata"]["field_sources"]["BAC_Nombre"]["sources"][0]["source_type"] = "csv:clients"
+        PipelineConfig.model_validate(data)
+
+    def test_undeclared_alias_left_to_the_service(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        """Alias no declarado en `sources` NO es asunto del schema (084: el
+        resolver lo reporta con contexto al arrancar)."""
+        data = self._data(fixture_paths, tmp_path)
+        data["metadata"]["field_sources"]["BAC_Nombre"]["sources"][0]["source_type"] = (
+            "mssql:fantasma"
+        )
+        PipelineConfig.model_validate(data)
+
 
 class TestMssqlMetadataSource:
     """130 — fuente de metadata ``kind: mssql`` (siempre por alias del registro)."""

@@ -83,6 +83,11 @@ leyendo `AS400_USERNAME` / `AS400_PASSWORD` sin cambios.
 devuelve la entrada de un sitio (`indexing`, `metadata:<alias de fuente>`,
 `tracking.as400_sync`). Doctor, consola y `sync_ops` derivan de ahí.
 
+Un `tracking.as400_sync` con `enabled: false` **no** cuenta aunque tenga
+`connection` seteada: el pipeline nunca abre esa conexión, así que ni el
+doctor la prueba ni la consola pide sus credenciales. El alias sí se valida
+igual al cargar (un alias inexistente falla aunque el sync esté apagado).
+
 ---
 
 ## Trigger (`trigger`)
@@ -276,7 +281,7 @@ Reglas:
 | `kind` | Literal `"as400"` (required) | — | — | — |
 | `alias` | str (required) | — | — | — |
 | `as400_connection` | `As400ConnectionConfig \| str` (required) | — | — | Inline o alias de `connections` (129). |
-| `table` | `str \| None` | `None` | `min_length=1` | Modo table. |
+| `table` | `str \| None` | `None` | 1–3 identificadores DB2 separados por punto | Modo table (`CLIENTES`, `RVILIB.CLIENTES`). Se interpola crudo en el `SELECT`, por eso se valida (049). |
 | `query` | `str \| None` | `None` | `min_length=1` | Modo query. |
 
 Exactamente uno de `table` / `query` (validator `_exactly_one_table_or_query`).
@@ -288,10 +293,10 @@ Exactamente uno de `table` / `query` (validator `_exactly_one_table_or_query`).
 | `kind` | Literal `"mssql"` (required) | — | — | — |
 | `alias` | str (required) | — | — | Nombre usado en `source_type: mssql:{alias}`. |
 | `connection` | str (required) | — | — | Alias de `connections` con `kind: mssql`. NO admite forma inline: SQL Server sólo existe a través del registro (129). |
-| `table` | `str \| None` | `None` | `min_length=1` | Modo table (p. ej. `dbo.clientes`). |
+| `table` | `str \| None` | `None` | 1–3 identificadores separados por punto | Modo table (p. ej. `dbo.clientes`, `db.dbo.clientes`). Se interpola crudo en el `SELECT`, por eso se valida (049). |
 | `query` | `str \| None` | `None` | `min_length=1` | Modo query. |
 
-Exactamente uno de `table` / `query`. Si `connection` apunta a una conexión de otro kind, `load_config` falla nombrando `metadata.sources[{alias}].connection` y "requires kind 'mssql'". En runtime el registro de fuentes recibe un `MssqlDataSource` (subclase de `OdbcDataSource`, misma base que AS400) bajo `alias`.
+Exactamente uno de `table` / `query`. El prefijo de `source_type` debe coincidir con el `kind` de la fuente declarada: `mssql:clientes` sobre una fuente `csv` falla al cargar (`field_sources[...]: source_type 'mssql:clientes' but metadata.sources[clientes] is kind 'csv'`). Si `connection` apunta a una conexión de otro kind, `load_config` falla nombrando `metadata.sources[{alias}].connection` y "requires kind 'mssql'". En runtime el registro de fuentes recibe un `MssqlDataSource` (subclase de `OdbcDataSource`, misma base que AS400) bajo `alias`.
 
 ### `MetadataCacheConfig`
 

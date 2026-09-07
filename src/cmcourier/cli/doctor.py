@@ -1,21 +1,23 @@
 """Validacion pre-flight del pipeline CMCourier.
 
-Seis checks corren en orden, cada uno como funcion privada que devuelve
-un :class:`CheckResult`. Las excepciones dentro de un check se atrapan y
-se convierten en resultados FAIL: :func:`run_doctor` NO puede levantar.
+Los checks de :data:`CHECK_NAMES` corren en ese orden, cada uno como
+funcion privada que devuelve un :class:`CheckResult`. Las excepciones
+dentro de un check se atrapan y se convierten en resultados FAIL:
+:func:`run_doctor` NO puede levantar.
 
-Orden:
-  1. ``cmis_connectivity``: warmup de CMIS + ``repositoryInfo``.
-  2. ``tracking_openable``: la DB SQLite en modo WAL abre en el path
-     configurado.
-  3. ``mapping_completeness``: el `Modelo Documental` tiene >=1 fila.
-  4. ``metadata_sources``: cada source CSV con alias tiene >=1 fila.
-  5. ``cm_type_alignment``: cada ``cm_object_type`` distinto del mapping
-     resuelve via `CMIS getTypeDefinition`. Se SKIPea si el check 1
-     fallo (no hay uploader funcionando).
-  6. ``sample_dry_run``: walk de S1 a S4 sobre el primer doc del primer
-     trigger, sin upload, y el PDF staged borrado al final. Se SKIPea
-     si hay cero triggers o cero docs.
+Grupos (:data:`_CHECK_GROUPS` / :func:`group_of`):
+  * ``connections``: ``log_dir_writable``, ``cmis_connectivity`` (warmup +
+    ``repositoryInfo``), ``as400_connectivity`` y ``mssql_connectivity``
+    (129/130: una fila por conexion del registro que la config USA),
+    ``tracking_openable`` (SQLite en WAL) y ``as400_sync`` (SKIP si
+    ``tracking.as400_sync.enabled`` es false).
+  * ``mapping``: ``mapping_completeness`` (>=1 fila del Modelo Documental).
+  * ``metadata``: ``metadata_sources`` (cada source con alias tiene >=1
+    fila) y ``sample_dry_run`` (S1..S4 sobre el primer doc, sin upload;
+    SKIP con cero triggers o cero docs).
+  * ``cm-types``: ``cm_type_alignment``; ``cm-targets``:
+    ``cmis_folders_exist`` y ``cmis_properties_alignment`` (SKIP si CMIS
+    no conecta).
 
 Principio VIII de la Constitucion: NINGUN message o details de check
 lleva valores de propiedad resueltos. Las claves operativas (`base_url`,
@@ -39,6 +41,7 @@ import contextlib
 import enum
 import logging
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -514,9 +517,13 @@ def _check_connections(
         return _skip(name, f"no {kind} connections in config")
     details: dict[str, str] = {}
     failures: list[str] = []
+    # Dos objetos inline distintos comparten el alias implícito `as400`:
+    # la fila de detalle se desambigua por host para no pisar ninguna.
+    alias_counts = Counter(ref.alias for ref, _ in groups)
     for ref, sites in groups:
         outcome = _probe_connection(ref, secrets)
-        details[ref.alias] = f"{outcome} · {' · '.join(sites)}"
+        key = ref.alias if alias_counts[ref.alias] == 1 else f"{ref.alias}@{ref.spec.host}"
+        details[key] = f"{outcome} · {' · '.join(sites)}"
         if outcome != "PASS":
             failures.append(f"{ref.alias} ({', '.join(sites)}): {outcome.removeprefix('FAIL: ')}")
     if failures:

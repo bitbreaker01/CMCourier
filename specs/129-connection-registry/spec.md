@@ -120,3 +120,18 @@ env vars en `missing_vars`.
 **E5 —** Doctor: config con dos conexiones `as400` (una en `indexing`, una
 en `metadata`), la segunda con credenciales faltantes → `as400_connectivity`
 es FAIL y el detalle nombra `metadata:<alias>` y sus env vars.
+
+## Hallazgos del antagonista (129–131) aplicados
+
+- **B1** `connection_refs()` sumaba `tracking.as400_sync` aunque
+  `enabled: false` (la forma que documenta `config-reference.yaml`): la
+  consola exigía credenciales de una conexión que el pipeline nunca abre
+  y el doctor daba FAIL. Ahora el sitio cuenta sólo si `enabled`; el
+  validador de referencias llama `connection_refs(include_disabled=True)`
+  para seguir rechazando un alias roto aunque el sync esté apagado.
+- **M1** Doctor: dos objetos inline distintos comparten el alias implícito
+  `as400` y `details[alias]` pisaba una fila; ahora la clave se
+  desambigua como `<alias>@<host>` cuando hay más de un grupo por alias.
+- **M6** Docstrings de `config/__init__.py`, `config/schema.py` y
+  `cli/doctor.py` actualizados al esquema `<ALIAS>_USERNAME/_PASSWORD` y
+  a los 12 checks reales.

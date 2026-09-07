@@ -75,6 +75,14 @@ class TestSessionCredentials:
         secrets = SessionCredentials().to_secrets()
         assert secrets.cmis == Credential("", "")
 
+    def test_set_strips_both_halves_like_load_secrets(self) -> None:
+        """Antagonista M4: la CLI (`load_secrets`) strippea usuario Y
+        contraseña; la consola debe mandar la MISMA credencial al AS400 —
+        una divergencia gasta intentos de lockout."""
+        creds = SessionCredentials()
+        creds.set("rvi", " u ", " p ")
+        assert creds.get("rvi") == Credential("u", "p")
+
 
 class TestConnectionInfos:
     def test_dedupes_by_alias_and_collects_sites(self) -> None:
@@ -124,6 +132,38 @@ class TestForConfig:
         assert not st.rebuild_conn(
             _Cfg(_mssql_ref("clientes_sql", "metadata:clientes"), _as400_ref("rvi", "indexing"))
         )  # type: ignore[arg-type]
+
+    def test_rebuild_prefills_new_aliases_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Antagonista M5: un alias que aparece tras el rebuild recibe el
+        prefill de `<ALIAS>_*` igual que los del arranque; uno ya tipeado no
+        se pisa."""
+        monkeypatch.setenv("CLIENTES_SQL_USERNAME", "sa")
+        monkeypatch.setenv("CLIENTES_SQL_PASSWORD", "pw")
+        monkeypatch.setenv("RVI_USERNAME", "env-user")
+        st = ConsoleState.for_config(
+            _Cfg(_as400_ref("rvi", "indexing")),  # type: ignore[arg-type]
+            creds=SessionCredentials(),
+        )
+        st.creds.set("rvi", "typed", "typed")
+        st.rebuild_conn(
+            _Cfg(_mssql_ref("clientes_sql", "metadata:clientes"), _as400_ref("rvi", "indexing"))
+        )  # type: ignore[arg-type]
+        assert st.creds.get("clientes_sql") == Credential("sa", "pw")
+        assert st.creds.get("rvi") == Credential("typed", "typed")
+
+    def test_vanished_alias_is_a_noop_everywhere(self) -> None:
+        """Antagonista I2: el callback del worker puede llegar DESPUÉS de que
+        la tarjeta desapareció — ningún método debe tirar KeyError."""
+        st = ConsoleState.for_config(
+            _Cfg(_as400_ref("rvi", "indexing")),  # type: ignore[arg-type]
+            creds=SessionCredentials(),
+        )
+        st.rebuild_conn(_Cfg(_mssql_ref("otro", "metadata:x")))  # type: ignore[arg-type]
+        st.invalidate_conn("rvi")
+        st.record_conn_result("rvi", ok=True, message="tarde")
+        st.reset_attempts("rvi")
+        assert st.as400_needs_lockout_confirm("rvi") is False
+        assert list(st.conn) == ["cmis", "otro"]
 
 
 class TestConnLifecycle:

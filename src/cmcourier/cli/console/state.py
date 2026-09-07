@@ -65,7 +65,16 @@ class SessionCredentials:
         return creds
 
     def set(self, alias: str, username: str, password: str) -> None:
-        self.credentials[alias] = Credential(username.strip(), password)
+        # Mismo strip que `load_secrets` (CLI): consola y CLI mandan la
+        # MISMA credencial al AS400 — una divergencia gasta intentos de lockout.
+        self.credentials[alias] = Credential(username.strip(), password.strip())
+
+    def prefill_missing(self, aliases: Iterable[str]) -> None:
+        """Prefill de entorno para alias que aparecen después del arranque
+        (``rebuild_conn``); los ya cargados no se pisan."""
+        fresh = self.from_env(alias for alias in aliases if alias not in self.credentials)
+        for alias, cred in fresh.credentials.items():
+            self.credentials.setdefault(alias, cred)
 
     def get(self, alias: str) -> Credential:
         return self.credentials.get(alias, _EMPTY)
@@ -179,6 +188,7 @@ class ConsoleState:
                 fresh[alias] = previous
         changed = list(fresh) != list(self.conn)
         self.conn = fresh
+        self.creds.prefill_missing(fresh)
         return changed
 
     def promote_overrides(self, draft: SessionOverrides) -> None:
@@ -197,19 +207,26 @@ class ConsoleState:
 
     # ------------------------------------------------- credenciales
 
+    # Todos los métodos por alias son no-op si la tarjeta ya no existe: el
+    # callback del worker puede llegar DESPUÉS de un `rebuild_conn`.
+
     def invalidate_conn(self, alias: str) -> None:
         """Editar un campo invalida la prueba y deja el doctor stale.
 
         El stale aplica aunque la conexión nunca se haya probado: el
         doctor corrió con las credenciales anteriores.
         """
-        c = self.conn[alias]
+        c = self.conn.get(alias)
+        if c is None:
+            return
         if c.status != "idle" or c.message:
             self.conn[alias] = ConnState(attempts=c.attempts, kind=c.kind)
         self.mark_doctor_stale("cambiaron las credenciales")
 
     def record_conn_result(self, alias: str, *, ok: bool, message: str) -> None:
-        c = self.conn[alias]
+        c = self.conn.get(alias)
+        if c is None:
+            return
         if ok:
             self.conn[alias] = ConnState(
                 status="ok", message=message, tested_at=time.time(), kind=c.kind
@@ -226,11 +243,13 @@ class ConsoleState:
 
     def as400_needs_lockout_confirm(self, alias: str) -> bool:
         """True cuando el PRÓXIMO intento sobre una conexión as400 sería el del lockout."""
-        c = self.conn[alias]
-        return c.kind == "as400" and c.attempts >= AS400_MAX_TRIES - 1
+        c = self.conn.get(alias)
+        return c is not None and c.kind == "as400" and c.attempts >= AS400_MAX_TRIES - 1
 
     def reset_attempts(self, alias: str) -> None:
-        self.conn[alias].attempts = 0
+        c = self.conn.get(alias)
+        if c is not None:
+            c.attempts = 0
 
     # ------------------------------------------------------ doctor
 

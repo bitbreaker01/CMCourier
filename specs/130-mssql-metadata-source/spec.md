@@ -127,3 +127,18 @@ llamaban `load_secrets()` sin config, así que ningún alias del registro
   (126 había habilitado `--check <nombre>` sin documentarlo).
 - El test live (E6) quedó escrito pero NO ejecutado: el host no tiene
   `msodbcsql18`. Corre con `CMCOURIER_MSSQL_LIVE=1` una vez instalado.
+
+## Hallazgos del antagonista (129–131) aplicados
+
+- **I4** El test live (E6) llamaba `get_by_fields_in(field, values)` sin el
+  `fixed_filters` posicional y cargaba `sample/config-local-mssql.yaml`,
+  que está gitignoreado: en otro clon fallaba antes de tocar SQL Server.
+  Ahora pasa `{}` y genera la config en `tmp_path` sobre los fixtures del
+  repo (`connections.clientes_sql` + fuente `mssql:clientes`).
+- **M2** `table` de las fuentes `as400` y `mssql` se interpola crudo en el
+  `SELECT ... FROM` del prefetch: ahora se valida como 1–3 identificadores
+  separados por punto (`_validate_qualified_table`, misma regla de 049).
+- **M3** `source_type: "<kind>:<alias>"` con un `kind` distinto al de la
+  fuente declarada en `metadata.sources` (p. ej. `mssql:` sobre un CSV)
+  se rechaza al cargar (`MetadataConfigModel`); un alias no declarado
+  sigue siendo asunto del resolver (084).

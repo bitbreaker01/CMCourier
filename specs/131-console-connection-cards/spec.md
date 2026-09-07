@@ -29,9 +29,12 @@ alias: `cmis` primero (título `CMIS · Alfresco`), después cada
 sitios que la usan (`indexing`, `metadata:clientes`, `tracking`). Los ids
 de widget son `<rol>-<alias>` y el ruteo parsea el prefijo con
 `removeprefix` (nunca `endswith`). El contador de intentos/lockout aparece
-sólo en tarjetas `as400`. Si la config cambia de conexiones por un
-override de sesión (127 puede cambiar el `indexing.source`), las tarjetas
-se recomponen al entrar a la pestaña.
+sólo en tarjetas `as400`. Si la config EFECTIVA cambia de conexiones, las
+tarjetas se recomponen al entrar a la pestaña sin perder lo ya probado.
+Nota (antagonista): hoy los overrides de 127 sólo tocan `processing`,
+`cmis`, `observability` y `trigger` — nunca `indexing.source`, `metadata`
+ni `tracking` — así que el remonte es una rama DEFENSIVA para cuando 127
+crezca; la premisa original de esta REQ era falsa.
 
 **REQ-003 — Prueba por alias.** `run_single_check(alias, console)` prueba
 `cmis` con `check_cmis` y cualquier otro alias con un nuevo
@@ -94,3 +97,23 @@ quedan en verde con las adaptaciones de firma (`as400_required` →
   asíncrono: hace falta `await pilot.pause()` antes de leer `creds`.
 - La pista de `[8] SYNC` nombra la tarjeta del alias del sync
   (`config.connection_ref("tracking.as400_sync")`).
+
+### Hallazgos del antagonista (129–131) aplicados
+
+- **B1** `connection_refs()` incluía `tracking.as400_sync` con
+  `enabled: false` → tarjeta fantasma, launcher bloqueado y doctor en FAIL
+  por una conexión que el pipeline nunca abre. Ahora sólo cuenta si
+  `enabled`; el validador de alias usa `include_disabled=True` para seguir
+  rechazando alias rotos aunque el sync esté apagado.
+- **I1** Un `Input(value=...)` recién montado postea `Input.Changed` y eso
+  invalidaba la conexión que sobrevivió al remonte. `on_input_changed`
+  ignora cambios cuyo valor coincide con lo ya guardado en `creds`.
+- **I2** `invalidate_conn` / `record_conn_result` / `reset_attempts` /
+  `as400_needs_lockout_confirm` son no-op para un alias sin slot (el
+  callback del worker puede llegar después de un rebuild); `_apply_result`
+  y `_start_test` también lo toleran.
+- **M5** `rebuild_conn` prefillea desde el entorno los alias nuevos
+  (`SessionCredentials.prefill_missing`) sin pisar los ya tipeados.
+- **M4** `SessionCredentials.set` strippea usuario Y contraseña, igual que
+  `load_secrets` (una divergencia gasta intentos de lockout en el AS400).
+- **M7** `run_single_check` usa `console.effective_config()`.

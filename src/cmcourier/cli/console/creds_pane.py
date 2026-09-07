@@ -22,7 +22,6 @@ from textual.app import ComposeResult
 from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import Button, Input, Label, Static
 
-from cmcourier.cli.console.overrides import apply_overrides
 from cmcourier.cli.console.state import AS400_MAX_TRIES, CMIS_ALIAS, ConnInfo, connection_infos
 from cmcourier.cli.doctor import CheckResult, CheckStatus, check_cmis, check_connection
 
@@ -32,10 +31,15 @@ if TYPE_CHECKING:
 _INPUT_ROLES = ("user", "pass")
 
 
-def _alias_of(widget_id: str) -> str | None:
-    """``user-<alias>`` / ``pass-<alias>`` → alias (los alias no llevan guiones)."""
+def _role_and_alias(widget_id: str) -> tuple[str, str] | None:
+    """``user-<alias>`` / ``pass-<alias>`` → (rol, alias); los alias no llevan guiones."""
     role, sep, alias = widget_id.partition("-")
-    return alias if sep and role in _INPUT_ROLES and alias else None
+    return (role, alias) if sep and role in _INPUT_ROLES and alias else None
+
+
+def _alias_of(widget_id: str) -> str | None:
+    parsed = _role_and_alias(widget_id)
+    return parsed[1] if parsed else None
 
 
 class CredsPane(Vertical):
@@ -84,8 +88,12 @@ class CredsPane(Vertical):
         return [cmis, *connection_infos(self.console.effective_config())]
 
     async def rebuild_cards(self) -> None:
-        """Al entrar a la pestaña: si los overrides (127) cambiaron qué
-        conexiones hacen falta, recompone la grilla; si no, sólo re-renderiza."""
+        """Al entrar a la pestaña: si la config efectiva cambió qué conexiones
+        hacen falta, recompone la grilla; si no, sólo re-renderiza.
+
+        Hoy los overrides (127) no tocan `indexing` / `metadata` / `tracking`,
+        así que la rama de remonte es defensiva — pero si corre, conserva el
+        estado probado (ver `on_input_changed`) y tolera workers tardíos."""
         if not self.console.state.rebuild_conn(self.console.effective_config()):
             self.render_all()
             return
@@ -152,8 +160,15 @@ class CredsPane(Vertical):
     # ------------------------------------------------------------ eventos
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        alias = _alias_of(event.input.id or "")
-        if alias is None:
+        parsed = _role_and_alias(event.input.id or "")
+        if parsed is None:
+            return
+        role, alias = parsed
+        cred = self.console.state.creds.get(alias)
+        stored = cred.username if role == "user" else cred.password
+        if event.value.strip() == stored:
+            # Un Input recién montado (rebuild_cards) postea Changed con el
+            # valor prefilled: no es una edición, no invalida lo probado.
             return
         self._store_inputs(alias)
         self.console.state.invalidate_conn(alias)
@@ -202,6 +217,9 @@ class CredsPane(Vertical):
 
     def _start_test(self, alias: str) -> None:
         state = self.console.state
+        slot = state.conn.get(alias)
+        if slot is None:
+            return
         if not state.creds.complete(alias):
             state.record_conn_result(
                 alias, ok=False, message="Credencial vacía — completá usuario y contraseña."
@@ -210,11 +228,13 @@ class CredsPane(Vertical):
                 state.conn[alias].attempts -= 1  # el vacío no gasta intento de lockout
             self._render_conn(alias)
             return
-        state.conn[alias].status = "testing"
+        slot.status = "testing"
         self._render_conn(alias)
         self.console.run_check_worker(alias, self._apply_result)
 
     def _apply_result(self, alias: str, result: CheckResult, elapsed_ms: float) -> None:
+        if alias not in self.console.state.conn:
+            return  # la tarjeta desapareció mientras el worker corría
         ok = result.status is CheckStatus.PASS
         msg = f"{result.message} · {elapsed_ms:.0f} ms" if ok else result.message
         self.console.state.record_conn_result(alias, ok=ok, message=msg)
@@ -258,7 +278,7 @@ def run_single_check(alias: str, console: ConsoleApp) -> tuple[CheckResult, floa
     start = time.monotonic()
     secrets = console.state.creds.to_secrets()
     # 127: misma config efectiva que el doctor y la corrida.
-    effective = apply_overrides(console.config, console.state.overrides)
+    effective = console.effective_config()
     if alias == CMIS_ALIAS:
         result = check_cmis(effective, secrets)
     else:

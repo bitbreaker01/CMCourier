@@ -115,6 +115,23 @@ class TestMssqlConnectivityCheck:
         assert "clientes_sql" not in as400.details
         assert "as400" not in mssql.details
 
+    def test_details_keep_one_row_per_distinct_inline_connection(self) -> None:
+        """Antagonista M1: dos objetos inline distintos comparten el alias
+        implícito `as400`; el drill-down de [4] no puede perder una fila."""
+        config = _StubConfig(
+            refs=(
+                ConnectionRef("as400", "as400", As400ConnectionConfig(host="host-a"), "indexing"),
+                ConnectionRef(
+                    "as400", "as400", As400ConnectionConfig(host="host-b"), "metadata:clientes"
+                ),
+            )
+        )
+        result = _check_as400_connectivity(config, _secrets())  # type: ignore[arg-type]
+        assert result.status == CheckStatus.FAIL
+        assert sorted(result.details) == ["as400@host-a", "as400@host-b"]
+        assert "indexing" in result.details["as400@host-a"]
+        assert "metadata:clientes" in result.details["as400@host-b"]
+
 
 class TestCheckConnection:
     """131 — chequeo puntual por ALIAS para el botón "probar" de la consola."""
