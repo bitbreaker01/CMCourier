@@ -15,6 +15,90 @@ abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
+## [0.111.0] — 2026-09-07 — **Consola: pausa y re-auth en caliente, techo manual de workers, ETA de corrida y overrides al YAML**
+
+Cierre de la deuda funcional que la consola anunciaba desde la 125: todo
+lo que la ayuda `?` prometía ahora existe. Specs 132–136, TDD estricto y
+revisión antagonista.
+
+### Added
+
+- **Spec 132 — pausa cooperativa y re-auth CMIS en caliente.**
+  `CancellationToken` gana un gate `pause()` / `resume()` /
+  `checkpoint()`: los workers de S5 se detienen en el próximo checkpoint
+  sin perder el documento en vuelo. `p` en `[6]` pausa, `r` reanuda. Un
+  `401` del CMIS ya no tumba la corrida: el pipeline se pausa solo, la
+  consola salta a `[2]` pidiendo credenciales nuevas y `r` las inyecta
+  (`set_cmis_credentials`) antes de reabrir el gate.
+- **Spec 133 — techo manual de workers.** `+` / `-` en `[6]` ajustan en
+  caliente un techo de operador sobre el presupuesto del AIMD:
+  efectivo = `max(piso, min(aimd, techo, capacidad del pool))`, piso 2
+  en dual-lane (un slot por carril). La cabecera muestra
+  `workers <en uso>/<efectivo>` y `techo manual N` cuando hay techo. Un
+  único punto de escritura (`_apply_worker_budget`) bajo lock: el AIMD
+  y el operador ya no se pisan.
+- **Spec 134 — tasa por ventana deslizante y ETA de corrida.**
+  `TUIDataProvider` muestrea `(t, procesados)` en cada `snapshot()` y
+  expone la tasa de los últimos 60 s; el acumulado se mantiene. Con el
+  `total` de `[5]` (o `--total`) hay ETA de corrida real:
+  `restantes / tasa_ventana`. Sin total no hay ETA por diseño: los
+  triggers se traen por olas y la fuente puede tener millones de filas.
+  Cabecera de `[6]`: `<acum> docs/s · <60 s> docs/s · ETA h:mm:ss de N`.
+- **Spec 135 — `w` escribe los overrides al YAML.** Parche textual de
+  los siete escalares de `[3]` que conserva comentarios y orden; antes
+  de tocar el archivo se recarga el resultado y se exige que sea
+  idéntico a `apply_overrides(config, overrides)` — si el YAML usa flow
+  style, anchors o claves duplicadas, se niega y el archivo queda
+  intacto. Backup `config.yaml.bak-<fecha>` y reemplazo atómico. Exige
+  borrador aplicado con `a`; tras escribir recarga la config, limpia los
+  overrides de sesión y refresca los `(yaml) …`. El pipeline elegido en
+  `[5]` no se persiste: es una decisión por corrida.
+- **Spec 136 — refresh de documentación.** `cmcourier console` entra en
+  `docs/reference/cli.md` y el tour de comandos; registro de conexiones
+  y SQL Server en el tutorial del YAML; `config-reference.yaml` al día
+  con el schema (header `0.111.0`); diagramas nuevos del subsistema de
+  sync y del flujo de la consola; `docs/explanation/operations-console.md`.
+
+### Changed
+
+- `docs/how-to/probar-la-consola.md`: pasos para pausa/re-auth, `+/-`,
+  la cabecera con dos tasas y ETA, y `w`. "Qué NO hace todavía" queda
+  reducido a "editar el YAML libremente" — con el tradeoff `ruamel.yaml`
+  anotado.
+
+### Fixed
+
+- **Revisión antagonista de 132–135.** Bloqueantes: carrera
+  `pause()`/`cancel()` en `CancellationToken` que dejaba la corrida
+  cancelada con la compuerta cerrada (`checkpoint()` bloqueado para
+  siempre, la consola sin poder salir); `w` sobre un YAML que era
+  symlink destruía el link en vez de escribir el archivo real; el
+  reemplazo atómico perdía el modo del archivo original (`0600` →
+  `0664`). Importantes: `+` con AIMD activo subía un paso y después era
+  no-op (ahora `+` también empuja el presupuesto del AIMD y el techo se
+  clampa a `pool_ceiling`); la espera de re-auth ya no se cobra a la
+  latencia de S5 (`StageTimer.exclude`) — envenenaba el p95 que lee el
+  AIMD; la auditoría toma el hash del YAML y los overrides al LANZAR,
+  no al cerrar (un `w` en el medio la falseaba); un YAML CRLF ya no sale
+  entero en LF; tras un `401` la tarjeta CMIS de `[2]` marca la sesión
+  rechazada, así `r` no reanuda con la credencial vieja sin avisar; un
+  `401` durante una pausa manual también dispara el aviso de
+  credenciales; cada episodio de re-auth se cierra al reanudar, así el
+  siguiente `401` vuelve a avisar; una excepción en el handler de
+  re-auth ya no mata al worker; la ventana de 60 s descarta la muestra
+  rancia tras un hueco de muestreo (pausa larga → tasa `—`, no un
+  promedio sobre el hueco); `reauth_pending` se limpia al terminar la
+  corrida. Menores: el mensaje de `+`/`-` explica quién sostiene el
+  número (techo del pool / AIMD / techo manual); la cabecera de `[6]`
+  deja de mostrar ventana y workers al completar; el bloque BUCKET sigue
+  al modo EFECTIVO de la corrida; el estado de `[3]` lista sólo los
+  escalares (el pipeline elegido en `[5]` no es asunto de `[3]`).
+- `cmcourier console --log-level` se perdía en el primer lanzamiento
+  desde `[5]`: el runner re-configuraba la observabilidad con `WARNING`
+  fijo. Ahora respeta el nivel con el que se abrió la consola.
+
+---
+
 ## [0.110.0] — 2026-09-07 — **Registro de conexiones, SQL Server como fuente de metadata y credenciales por alias**
 
 Plan B de la consola: una config ya no está atada a "un AS400 y punto".

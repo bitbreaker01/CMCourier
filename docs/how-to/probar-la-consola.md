@@ -168,7 +168,10 @@ avanzás (credenciales → doctor → lanzar).
   en 3; cuando subís el techo, el AIMD retoma desde ahí. Sin AIMD sólo
   podés BAJAR (el pool de threads de S5 no crece más allá de
   `cmis.workers`). Piso: 1 (2 en modo dual-lane, un slot por carril).
-  Es de la corrida: la siguiente arranca sin techo.
+  La notificación te dice quién sostiene el número: `techo del pool`
+  (no hay más threads), `el AIMD sostiene N` (tu techo es más alto que
+  lo que el AIMD quiere ahora) o `techo manual N` a secas. Es de la
+  corrida: la siguiente arranca sin techo.
 - La línea de conteo trae DOS tasas (134): `N docs/s` es el promedio
   desde el inicio y `N docs/s (60 s)` es la de los últimos 60 segundos —
   la que reacciona cuando tocás workers, pausás o el AIMD se mueve.
@@ -176,7 +179,11 @@ avanzás (credenciales → doctor → lanzar).
   corrida** (`ETA 0:12:30 de 5000`) sólo existe si pusiste `total` en
   `[5]`: sin total, los triggers se traen por olas y nadie sabe cuántos
   quedan (`ETA — (sin total)`). En pausa, la tasa de 60 s decae a 0 y la
-  ETA pasa a `—` hasta que reanudes.
+  ETA pasa a `—` hasta que reanudes; si el hueco de muestreo supera los
+  90 s (una pausa larga, o un rato en `[2]` cargando credenciales) la
+  ventana se descarta y vuelve a `—` hasta juntar muestras nuevas — nunca
+  un promedio sobre el hueco. Al completar, la cabecera deja de mostrar
+  ventana y workers: queda el promedio de la corrida.
 - Al terminar aparece la tarjeta de cierre con el resultado.
 
 #### Pausa y re-autenticación CMIS en caliente (132)
