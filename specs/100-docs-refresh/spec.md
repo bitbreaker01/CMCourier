@@ -1,5 +1,14 @@
 # 100 — Refresh de documentación: config + comandos al día
 
+> **Continuado en [136](../136-docs-refresh-console/spec.md).** Esta spec dejó
+> las referencias al día hasta la 0.100.0. Las 35 specs siguientes (101–135)
+> volvieron a abrir la brecha: la consola de operación (`cmcourier console`,
+> 123–135), el registro de conexiones `connections:` (129), la fuente de
+> metadata MSSQL (130), `--max-duration` (103) y el instalador offline (101)
+> quedaron sin documentar. La 136 los cubre y sube el header de
+> `config-reference.yaml` a `0.111.0`. También resuelve dos de los tres
+> pendientes de "Notas — qué quedó fuera" (ver el final de este archivo).
+
 ## Por qué
 
 Auditoría previa al handoff: la documentación de referencia quedó
@@ -95,7 +104,13 @@ nuevos. Queda para un cambio de docs futuro:
   no un inventario.
 * `docs/diagrams/file-imports-map.md` — incompleto: no incluye el
   subsistema de sync AS400 (`idempotency`, `reconciler`, `recovery`).
+  **Parcialmente resuelto en 136**: `docs/diagrams/sync-subsystem.md`
+  cubre el subsistema (claim / periodic / recover) a nivel conceptual;
+  el mapa de imports en sí sigue sin actualizar.
 * `docs/explanation/` — los archivos existentes describen
   comportamiento real y vigente; faltan explicaciones nuevas para los
   conceptos 095-099 (connection pool, modo periódico, cancelación
-  cooperativa).
+  cooperativa). **Parcialmente resuelto en 136**:
+  `docs/explanation/operations-console.md` cubre la cancelación
+  cooperativa (pausa / drain / re-auth 401); el connection pool
+  (`ThreadLocalConnectionPool`, 106/119) sigue sin explanation propia.

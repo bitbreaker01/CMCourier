@@ -44,8 +44,11 @@ Corre el pipeline end-to-end con triggers desde un CSV.
 | `--resume` | flag | `False` | Detecta `from-stage` leyendo el estado del batch. Requiere `--batch-id`. |
 | `--tui` / `--no-tui` | bool | `True` | Live TUI. Auto-off en headless si no es TTY. |
 | `--batches-in-flight` | int (1–2) | YAML | Override de `processing.batches_in_flight`. |
-| `--total` | int (≥ 1) | `None` | Procesar a lo sumo N triggers (smoke runs). |
+| `--total` | int (≥ 1) | `None` | Procesar a lo sumo N triggers (smoke runs). También es lo que habilita la ETA de corrida en la consola (134). |
+| `--max-duration` | str | `None` | Corta la corrida pasado ese wall-clock: `30m`, `2h`, `1h30m` (103). Drain ordenado, exit code `0`. |
 | `--log-level` | `DEBUG`/`INFO`/`WARNING`/`ERROR` | `INFO` | Verbosidad. |
+
+`--max-duration` (103) no aborta: dispara el mismo `CancellationToken` que `x` en la consola, así que los uploads en vuelo terminan y el batch queda reanudable. El corte se registra como `pipeline_stopped_by_deadline` en los metrics logs.
 
 Source: `cli/app.py:90-168`.
 
@@ -79,9 +82,98 @@ Pipeline one-shot para un único documento. Diagnóstico, no productivo.
 | `--tui` / `--no-tui` | bool | `True` | — |
 | `--batches-in-flight` | int (1–2) | YAML | — |
 | `--total` | int (≥ 1) | `None` | — |
+| `--max-duration` | str | `None` | `30m` / `2h` / `1h30m` (103). |
 | `--log-level` | choice | `INFO` | — |
 
 Source: `cli/app.py:313-421`.
+
+---
+
+## `console` — consola de operación (123–135)
+
+Abre la TUI de operación: credenciales, doctor, overrides, launcher, monitor, batches y sync en una sola pantalla. Es el reemplazo interactivo de encadenar `doctor` + `<pipeline> run` + `batch` + `sync` a mano.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--config` | Path (required) | — | Pipeline YAML. Se valida al abrir; si no carga, la consola no arranca. |
+| `--log-level` | `debug`/`info`/`warning`/`error` | `WARNING` | Verbosidad de la consola y de toda corrida lanzada desde `[5]`. Default `WARNING` — la TUI ocupa la terminal, un `INFO` a stdout la ensuciaría. |
+
+Necesita un TTY real — no funciona por un pipe ni en un editor sin terminal integrada; sin TTY sale con exit code `2`.
+
+> Con la TUI activa los logs van al archivo de `observability`, no a stdout: un `--log-level debug` es seguro para la pantalla y útil para diagnosticar una corrida lanzada desde la consola.
+
+### Pestañas
+
+`1`–`8` o `F1`–`F8`. Los `F`-keys tienen `priority=True`: funcionan **aun con el foco dentro de un campo de texto**, los dígitos no.
+
+| # | Pestaña | Qué hace |
+|---|---------|----------|
+| `1` | INICIO | Config, entorno, `trigger.kind`, `processing.mode`, estado por conexión, veredicto del doctor y la lista "siguiente paso". |
+| `2` | CREDENCIALES | Una tarjeta por conexión de la config efectiva (131) más `cmis`. Prueba de conexión por alias. Las credenciales viven en la sesión — nunca tocan disco. |
+| `3` | CONFIG | Overrides de sesión sobre el YAML, modelo *draft → applied* (124) y escritura al YAML con `w` (135). |
+| `4` | DOCTOR | El mismo `run_doctor` que el comando, con selector `all` / grupo / check individual (126). Corre en un worker, no congela la UI. |
+| `5` | CORRER | Launcher: elección de pipeline (127), parámetros por kind, `nueva` vs `reanudar`, `total` y `max-duration`. |
+| `6` | MONITOR | Corrida en vivo a 4 Hz: cabecera, PREP/UPLOAD, y en `streaming` también el bucket. |
+| `7` | BATCHES | Tabla de batches con su auditoría; detalle, retry y export. |
+| `8` | SYNC | La versión interactiva de `sync status` / `recover` / `resolve` (128). |
+
+### Teclas
+
+Copiadas de `HelpScreen.HELP` (`cli/console/app.py`) — la ayuda `?` dentro de la consola es la misma tabla.
+
+| Tecla | Ámbito | Acción |
+|-------|--------|--------|
+| `1`–`8` / `F1`–`F8` | global | Cambiar de pantalla. |
+| `?` | global | Ayuda (teclas + leyenda S0–S7 + lista de checks del doctor). |
+| `q` | global | Salir. Confirma si hay corrida — salir **no** la cancela, sigue en background. |
+| `Esc` | global | Cerrar modal / soltar el foco de un campo. |
+| `↵` | `[2]` | Probar la conexión de la tarjeta enfocada. |
+| `a` | `[3]` | Aplicar el borrador de overrides (draft → applied). |
+| `w` | `[3]` | Escribir los overrides **aplicados** al YAML (135). |
+| `d` | `[4]` | Correr la selección del doctor. |
+| `↑` `↓` | `[4]` `[7]` | Navegar la lista. |
+| `↵` | `[4]` | Expandir / colapsar el detalle del check. |
+| `r` | `[5]` | Lanzar la corrida. |
+| `x` | `[6]` | Cancelar con drain (confirma). |
+| `p` | `[6]` | Pausar la corrida (confirma) — 132. |
+| `r` | `[6]` | Reanudar la corrida pausada — 132. |
+| `+` / `=` / `-` | `[6]` | Mover el techo manual de workers en caliente, sin confirmación — 133. |
+| `↵` | `[7]` | Detalle del batch. |
+| `R` | `[7]` | Reintentar los fallidos (te lleva al launcher en modo reanudar). |
+| `E` | `[7]` | Exportar el reporte del batch. |
+| `s` | `[8]` | Estado del sync. |
+
+Ojo con `r`: en `[5]` lanza y en `[6]` reanuda. Es la misma acción (`action_launch`) ruteada por la pestaña activa.
+
+### Overrides de sesión vs. `w`
+
+`[3]` mantiene **dos** niveles. El *borrador* es lo que tipeás; lo *aplicado* es lo que la corrida y el doctor van a usar. `a` promueve borrador → aplicado (validando); nada llega a una corrida sin pasar por esa validación. Un borrador sin aplicar hace que `[5]` avise "overrides SIN GUARDAR" y use igual el valor del YAML.
+
+`w` es el tercer nivel, opcional: escribe lo **aplicado** al archivo. Sólo los siete escalares:
+
+| Override | Clave YAML |
+|----------|-----------|
+| `mode` | `processing.mode` |
+| `prep_workers` | `processing.prep_workers` |
+| `bucket_size` | `processing.streaming.bucket_size` |
+| `workers` | `cmis.workers` |
+| `auto_tune_enabled` | `cmis.auto_tune.enabled` |
+| `max_bandwidth_mbps` | `cmis.max_bandwidth_mbps` |
+| `unmask_pii` | `observability.unmask_pii` |
+
+El pipeline elegido en `[5]` (127) **no** se persiste: es una elección por corrida, no de configuración.
+
+El parche es sobre el texto, línea a línea — comentarios y formato quedan byte-idénticos. Antes de tocar el original la consola recarga el resultado con `load_config` y lo compara contra lo que debería quedar; si no coincide (flow style, anchors, claves duplicadas) se niega con un `PersistError` y el archivo queda intacto, sin backup a medias. Si pasa, hace `config.yaml.bak-YYYYmmdd-HHMMSS` al lado y reemplaza de forma atómica.
+
+### Lock de config
+
+`[5]` toma el **mismo lock** que `background`: `acquire_config_lock(config_path)` sobre `<runtime_dir>/cmcourier/<sha256(path)[:12]>.lock` (`$XDG_RUNTIME_DIR` o `/tmp` en POSIX, `tempfile.gettempdir()` en Windows), con `fcntl.flock(LOCK_EX | LOCK_NB)` o `msvcrt.locking(LK_NBLCK)`. Es **por config y por estación**: dos consolas sobre el mismo YAML colisionan y la segunda muestra el modal "Config bloqueada en esta estación"; el lock no ve otras máquinas — para eso está `tracking.as400_sync`.
+
+### Interlock de producción
+
+Con `environment: prd` en el YAML la consola muestra un badge rojo permanente y `[5]` exige tipear `PRD` antes de lanzar. `sync recover --apply` desde `[8]` pide la misma confirmación tipeada. Los comandos headless ignoran `environment` por completo.
+
+Source: `cli/app.py`, `cli/console/`. Guía paso a paso: [`how-to/probar-la-consola.md`](../how-to/probar-la-consola.md). El porqué de cada decisión: [`explanation/operations-console.md`](../explanation/operations-console.md).
 
 ---
 

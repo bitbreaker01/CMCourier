@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # This file documents the COMPLETE configurable surface of CMCourier as of
-# version 0.100.0. It is a *reference*, not a runnable config:
+# version 0.111.0. It is a *reference*, not a runnable config:
 #
 #   * Every path below is a PLACEHOLDER (`/path/to/...`). The schema uses
 #     pydantic FilePath / DirectoryPath for inputs that MUST already exist,
@@ -138,9 +138,11 @@ indexing:
     last_view_date_column: ABABDT          # (default: "ABABDT")
     total_pages_column: ABABUN             # (default: "ABABUN")
 
-  # batch_size — how many RVABREP rows S1 fetches per indexing batch.
-  # NOT the same as the top-level `batch_size` (see end of file).
-  batch_size: 50                           # (default: 50)  >= 1
+  # batch_size — DEAD KNOB since 121. It used to size the batched RVABREP
+  # lookup, which was removed; nothing reads it any more. Still ACCEPTED so
+  # existing YAMLs keep loading under `extra="forbid"`. NOT the same as the
+  # top-level `batch_size` (see end of file), which is very much alive.
+  batch_size: 50                           # (default: 50)  >= 1  — no effect (121)
 
 
 # -----------------------------------------------------------------------------
@@ -210,6 +212,16 @@ metadata:
         - source_type: rvabrep
           lookup_value_column: index2
       default_value: "000000"              # (default: null) used if no source matches
+    # lookup_value_source (084) — for `csv:` / `as400:` / `mssql:` sources ONLY,
+    # WHERE the lookup key comes from. Syntax "<scope>.<attr>" with scope
+    # `trigger` (cif, shortname, system_id) or `rvabrep` (txn_num, index1..7, …).
+    # Ignored by the `trigger` / `rvabrep` source types (they read directly).
+    BAC_Numero_Cuenta:
+      sources:
+        - source_type: "csv:clients"
+          lookup_value_column: Numero_Cuenta
+          lookup_key_column: TXN
+          lookup_value_source: "rvabrep.txn_num"  # (default: "trigger.cif")
     BAC_Nombre_Cliente:
       sources:
         - source_type: "csv:clients"
@@ -273,6 +285,35 @@ assembly:
   # successful S5_DONE (085). Default false → the orchestrator deletes
   # temp_dir/{txn}.pdf post-upload. true keeps it for debug/inspection.
   keep_staged_files: false                 # (default: false)
+
+  # synthetic_content (102) — STRESS TESTING ONLY. When enabled, S4 skips
+  # the real page files under `source_root` and builds a valid one-page PDF
+  # in memory, sized from a weighted band draw. Lets a multi-TB stress run
+  # happen without materialising multi-TB on disk. The same `txn_num`
+  # always yields the same PDF (deterministic given `seed`).
+  # NEVER enable this against a real migration: the uploaded bytes are
+  # synthetic, not the bank's documents.
+  synthetic_content:
+    enabled: false                         # (default: false → real files from source_root)
+    seed: 0                                # (default: 0) PRNG seed; same seed = same corpus
+    # size_mix — the weighted size bands. Empty (the default) uses the
+    # built-in 60/30/10 distribution shown below verbatim. `min` / `max`
+    # accept binary suffixes: b / kb / mb / gb (1 kb = 1024), case-insensitive;
+    # a bare number is bytes. Weights are relative, not percentages —
+    # they only have to be >= 0 and not all zero.
+    size_mix: []                           # (default: [] → the 3 bands below)
+      # - name: small                      # (REQUIRED) label of the band
+      #   weight: 60.0                     # (REQUIRED) >= 0, relative weight
+      #   min: 50kb                        # (REQUIRED) lower bound, inclusive
+      #   max: 1mb                         # (REQUIRED) upper bound, inclusive
+      # - name: medium
+      #   weight: 30.0
+      #   min: 1mb
+      #   max: 10mb
+      # - name: large
+      #   weight: 10.0
+      #   min: 10mb
+      #   max: 40mb
 
 
 # -----------------------------------------------------------------------------
@@ -452,8 +493,22 @@ processing:
   # native PDFs run inline (shutil.copy2 releases the GIL during I/O) while
   # paginated TIFF/JPEG go to the pool (img2pdf is CPU-bound). Avoids the
   # pickle/IPC/spawn overhead of the pool for non-CPU-bound docs — matters
-  # most on Windows where `spawn` is expensive. Default false (pre-094).
+  # most on Windows where `spawn` is expensive. 114 flipped the default to
+  # true; `false` restores the 094-off behaviour (everything to the pool).
   s4_smart_routing: true                   # (default: true, 114)
+
+
+# -----------------------------------------------------------------------------
+# environment  (optional)  — 123: which environment this config points at.
+# The headless commands IGNORE it entirely; it only drives the operations
+# console (`cmcourier console`):
+#   * "staging" (default) — green STAGING badge, plain launch confirmation.
+#   * "prd"               — permanent red ⚠ PRODUCCIÓN badge, and the launch
+#                           interlock in [5] CORRER requires typing `PRD`
+#                           before the run starts. `sync recover --apply`
+#                           from [8] asks for the same typed confirmation.
+# -----------------------------------------------------------------------------
+environment: staging                       # (default: "staging")  one of: staging | prd
 
 
 # -----------------------------------------------------------------------------

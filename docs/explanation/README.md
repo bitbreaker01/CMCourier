@@ -22,6 +22,7 @@ Cada explicación está pensada para alguien que ya leyó el README y entendió 
 | [`idempotency-and-retries.md`](idempotency-and-retries.md) | `rvabrep_txn_num` UNIQUE, la máquina de estados, `S1_SKIPPED`, política de retry por tipo de error |
 | [`pii-handling.md`](pii-handling.md) | Cómo se redacta PII en logs — central masking helper, denylist, `--unmask-pii` y por qué grita |
 | [`windows-vs-linux.md`](windows-vs-linux.md) | Portabilidad: qué funciona igual, qué pide `spawn`, qué pide WSL, dónde están los caveats |
+| [`operations-console.md`](operations-console.md) | Por qué una TUI de operación: draft/applied, pausa cooperativa, techo manual vs AIMD, por qué la ETA exige `total` |
 
 ## Convención
 

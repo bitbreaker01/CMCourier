@@ -52,7 +52,10 @@ Orientados a **problemas específicos**. Recetas: pre-requisitos → pasos → v
 | [`how-to/operator/tune-aimd-for-a-slow-link.md`](how-to/operator/tune-aimd-for-a-slow-link.md) | Ajustar `growth_factor`, `halve_factor`, `halve_threshold_ratio` |
 | [`how-to/operator/configure-heavy-light-lanes.md`](how-to/operator/configure-heavy-light-lanes.md) | Activar lanes para corpus mixto |
 | [`how-to/operator/wipe-staging-state.md`](how-to/operator/wipe-staging-state.md) | Limpiar staging entre corridas |
-| [`how-to/operator/interpret-the-tui-tabs.md`](how-to/operator/interpret-the-tui-tabs.md) | Atlas visual de las 5 tabs de la TUI |
+| [`how-to/operator/interpret-the-tui-tabs.md`](how-to/operator/interpret-the-tui-tabs.md) | Atlas visual de las 5 tabs de la TUI de corrida |
+| [`how-to/probar-la-consola.md`](how-to/probar-la-consola.md) | La consola de operación paso a paso contra un Alfresco local (incluye SQL Server) |
+| [`how-to/as400-sync.md`](how-to/as400-sync.md) | Habilitar y operar el sync NIARVILOG (`claim` vs `periodic`) |
+| [`how-to/build-offline-installer.md`](how-to/build-offline-installer.md) | Armar el bundle air-gapped para la estación del banco (101) |
 
 Índice: [`how-to/operator/README.md`](how-to/operator/README.md).
 
@@ -76,7 +79,7 @@ Orientada a **lookup rápido**. Tablas, schemas, listas exhaustivas. No se lee t
 
 | Documento | Cubre |
 |-----------|-------|
-| [`reference/cli.md`](reference/cli.md) | Todos los comandos, flags, exit codes |
+| [`reference/cli.md`](reference/cli.md) | Todos los comandos, flags, exit codes — incluida la consola (`console`): pestañas, teclas y lock |
 | [`reference/config-schema.md`](reference/config-schema.md) | Cada modelo Pydantic, cada campo, default y rango |
 | [`reference/tui-keybindings.md`](reference/tui-keybindings.md) | Atajos por tab del TUI |
 | [`reference/observability-fields.md`](reference/observability-fields.md) | Estructuras de telemetría (network, system, lanes) |
@@ -106,6 +109,7 @@ Orientadas al **por qué**. Tradeoffs, contexto histórico, principios. Léelos 
 | [`explanation/idempotency-and-retries.md`](explanation/idempotency-and-retries.md) | `rvabrep_txn_num`, state machine, retry policy |
 | [`explanation/pii-handling.md`](explanation/pii-handling.md) | Constitution Principle VIII en práctica |
 | [`explanation/windows-vs-linux.md`](explanation/windows-vs-linux.md) | Portabilidad: qué funciona, qué no |
+| [`explanation/operations-console.md`](explanation/operations-console.md) | La consola de operación (123–135): draft/applied, pausa cooperativa, techo manual vs AIMD, ETA |
 
 Índice: [`explanation/README.md`](explanation/README.md).
 
@@ -156,6 +160,8 @@ Mermaid (render nativo en GitHub). Acompañan a las explanations.
 | [`diagrams/s0-s7-flow.md`](diagrams/s0-s7-flow.md) | Vida de un documento |
 | [`diagrams/streaming-pipeline.md`](diagrams/streaming-pipeline.md) | Producer/bucket/consumer con lanes |
 | [`diagrams/state-machine.md`](diagrams/state-machine.md) | Estados de `migration_log.status` |
+| [`diagrams/sync-subsystem.md`](diagrams/sync-subsystem.md) | SQLite ↔ AS400 NIARVILOG: claim / periodic / recover |
+| [`diagrams/console-flow.md`](diagrams/console-flow.md) | Máquina de estados de la consola y su cadena de guardas |
 | [`diagrams/file-imports-map.md`](diagrams/file-imports-map.md) | Mapa de imports inter-módulo |
 
 Índice: [`diagrams/README.md`](diagrams/README.md).
@@ -215,5 +221,5 @@ Este archivo se actualiza con **cada cambio** que agregue, mueva o renombre un a
 Cuadrantes futuros (diferidos hasta que aparezca contenido natural):
 
 - **`docs/tutorials/`** ya existe y crece naturalmente.
-- **`docs/explanation/`** ya tiene 12 documentos — agregar uno nuevo cuando un concepto arquitectónico merezca walkthrough standalone (típicamente con la spec que lo introduce).
+- **`docs/explanation/`** ya tiene 13 documentos — agregar uno nuevo cuando un concepto arquitectónico merezca walkthrough standalone (típicamente con la spec que lo introduce).
 - **`docs/reference/`** crecerá cuando aparezcan más superficies estables (ej. una API HTTP, si alguna vez se shippea).
