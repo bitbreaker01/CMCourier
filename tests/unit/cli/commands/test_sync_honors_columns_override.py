@@ -1,7 +1,8 @@
 """086: el CLI ``cmcourier sync`` honra ``tracking.as400_sync.columns``.
 
 Pre-086 el ``_load_stores`` del módulo ``sync`` construía el
-``As400NiarvilogStore`` SIN pasar ``columns=``. Resultado: los
+``As400NiarvilogStore`` SIN pasar ``columns=`` (128: hoy la
+construcción vive en ``cli/sync_ops.build_sync_stores``). Resultado: los
 overrides de columnas en el YAML se ignoraban silenciosamente y el
 adapter usaba los defaults canónicos (FINREI, PMRREI, STSCOD…) —
 exactamente lo que rompía en producción con tablas NIARVILOG cuyos
@@ -18,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cmcourier.cli.commands import sync as sync_module
+import cmcourier.cli.sync_ops as sync_ops
 from cmcourier.config.schema import (
     As400ConnectionConfig,
     As400SyncConfig,
@@ -30,7 +31,7 @@ pytestmark = pytest.mark.unit
 
 
 def _fake_config_with_overrides() -> MagicMock:
-    """``PipelineConfig`` stub con sólo lo que ``_load_stores`` lee."""
+    """``PipelineConfig`` stub con sólo lo que ``build_sync_stores`` lee."""
     sync_cfg = As400SyncConfig(
         enabled=True,
         library="CUSTOMLIB",
@@ -55,9 +56,9 @@ def _fake_config_with_overrides() -> MagicMock:
 
 
 class TestSyncHonorsColumnsOverride:
-    def test_load_stores_passes_columns_from_yaml(self) -> None:
-        """086: ``_load_stores`` instancia ``As400NiarvilogStore`` con los
-        columns del YAML, no con los defaults canónicos."""
+    def test_build_sync_stores_passes_columns_from_yaml(self) -> None:
+        """086: ``build_sync_stores`` instancia ``As400NiarvilogStore`` con
+        los columns del YAML, no con los defaults canónicos."""
         captured: dict = {}
 
         def fake_ctor(**kwargs: object) -> MagicMock:
@@ -70,15 +71,13 @@ class TestSyncHonorsColumnsOverride:
         fake_secrets = MagicMock(as400_username="u", as400_password="p")
 
         with (
-            patch.object(sync_module, "load_config", return_value=fake_config),
-            patch.object(sync_module, "load_secrets", return_value=fake_secrets),
-            patch.object(sync_module, "As400NiarvilogStore", side_effect=fake_ctor),
-            patch.object(sync_module, "SQLiteTrackingStore", MagicMock()),
+            patch.object(sync_ops, "As400NiarvilogStore", side_effect=fake_ctor),
+            patch.object(sync_ops, "SQLiteTrackingStore", MagicMock()),
         ):
-            sync_module._load_stores(Path("/dev/null"))  # type: ignore[attr-defined]
+            sync_ops.build_sync_stores(fake_config, fake_secrets)
 
         assert "columns" in captured, (
-            "086 regression: _load_stores must pass `columns=` to As400NiarvilogStore"
+            "086 regression: build_sync_stores must pass `columns=` to As400NiarvilogStore"
         )
         cols = captured["columns"]
         assert cols.finished_at == "MY_FINISHED_COL", (

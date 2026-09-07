@@ -34,6 +34,7 @@ _TAB_BY_KEY = {
     "5": "correr",
     "6": "monitor",
     "7": "batches",
+    "8": "sync",
     "f1": "inicio",
     "f2": "credenciales",
     "f3": "config",
@@ -41,6 +42,7 @@ _TAB_BY_KEY = {
     "f5": "correr",
     "f6": "monitor",
     "f7": "batches",
+    "f8": "sync",
 }
 
 

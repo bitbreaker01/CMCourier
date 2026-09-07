@@ -1,6 +1,6 @@
 """ConsoleApp — el shell Textual de la consola de operación (123).
 
-Fase 1: navegación de 7 tabs con bindings globales (1-7 y F1-F7
+Fase 1: navegación de 8 tabs con bindings globales (1-8 y F1-F8
 `priority`, inmunes al foco en inputs), badge de entorno, ayuda con
 leyenda de stages, salida con confirmación, INICIO con la máquina de
 estados, y los paneles CREDENCIALES y DOCTOR funcionales. CONFIG /
@@ -36,6 +36,7 @@ from cmcourier.cli.console.overrides import apply_overrides
 from cmcourier.cli.console.run_pane import RunPane
 from cmcourier.cli.console.runner import ConsoleRunManager, LaunchSpec
 from cmcourier.cli.console.state import ConsoleState
+from cmcourier.cli.console.sync_pane import SyncPane
 from cmcourier.cli.doctor import (
     CHECK_NAMES,
     CheckResult,
@@ -48,7 +49,7 @@ from cmcourier.config.schema import PipelineConfig
 from cmcourier.domain.exceptions import ConfigurationError
 from cmcourier.domain.models import BatchInfo
 
-_TABS = ["inicio", "credenciales", "config", "doctor", "correr", "monitor", "batches"]
+_TABS = ["inicio", "credenciales", "config", "doctor", "correr", "monitor", "batches", "sync"]
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -128,8 +129,8 @@ class HelpScreen(ModalScreen[None]):
         Binding("question_mark", "dismiss", "cerrar"),
     ]
 
-    HELP = """[b $accent]TECLAS GLOBALES[/] (F1–F7 funcionan aun con foco en un campo)
-  1-7 / F1-F7   cambiar de pantalla        ?   esta ayuda
+    HELP = """[b $accent]TECLAS GLOBALES[/] (F1–F8 funcionan aun con foco en un campo)
+  1-8 / F1-F8   cambiar de pantalla        ?   esta ayuda
   q             salir (confirma si hay corrida)   Esc  cerrar modal / soltar foco
 
 [b $accent]POR PANTALLA[/]
@@ -137,6 +138,7 @@ class HelpScreen(ModalScreen[None]):
   [4] d correr la selección · ↑↓ navegar · ↵ expandir
   [5] r lanzar                             [6] x  cancelar (drain) · +/- workers
   [7] ↑↓ navegar · ↵ detalle · R retry · E export
+  [8] s estado del sync · simular antes de aplicar (recover) · resolver por txn
 
 [b $accent]STAGES S0–S7[/]
   S0/S1 adquirir triggers · indexar RVABREP     S2/S3 mapear tipo CM · resolver metadata
@@ -186,6 +188,7 @@ class ConsoleApp(App[None]):
         Binding("a", "apply_overrides", "guardar overrides", show=False),
         Binding("r", "launch", "lanzar", show=False),
         Binding("x", "cancel_run", "cancelar corrida", show=False),
+        Binding("s", "sync_status", "estado sync", show=False),
     ]
 
     def __init__(self, *, config: PipelineConfig, config_path: Path) -> None:
@@ -229,6 +232,8 @@ class ConsoleApp(App[None]):
                 yield MonitorPane(self)
             with TabPane("7·BATCHES", id="batches"):
                 yield BatchesPane(self)
+            with TabPane("8·SYNC", id="sync"):
+                yield SyncPane(self)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -274,6 +279,9 @@ class ConsoleApp(App[None]):
             self._render_inicio()
         elif active == "batches":
             self.q("BatchesPane", BatchesPane).reload()
+        elif active == "sync":
+            # 128: las credenciales pueden haber cambiado en [2].
+            self.q("SyncPane", SyncPane).refresh_availability()
         elif active == "monitor" and self.run_active:
             self.q("MonitorPane", MonitorPane).refresh_monitor()
 
@@ -312,6 +320,10 @@ class ConsoleApp(App[None]):
     def action_launch(self) -> None:
         if self.q("#tabs", TabbedContent).active == "correr":
             self.try_launch()
+
+    def action_sync_status(self) -> None:
+        if self.q("#tabs", TabbedContent).active == "sync":
+            self.q("SyncPane", SyncPane).run_status()
 
     def action_cancel_run(self) -> None:
         if self.q("#tabs", TabbedContent).active != "monitor" or not self.run_active:
