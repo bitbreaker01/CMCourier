@@ -123,7 +123,7 @@ class CredsPane(Vertical):
 
     def render_all(self) -> None:
         for alias in self.console.state.conn:
-            self._render_conn(alias)
+            self.render_conn(alias)
 
     def show_reauth_hint(self) -> None:
         """132: la corrida está pausada esperando una credencial CMIS nueva —
@@ -189,7 +189,7 @@ class CredsPane(Vertical):
             return
         self._store_inputs(alias)
         self.console.state.invalidate_conn(alias)
-        self._render_conn(alias)
+        self.render_conn(alias)
         self.console.refresh_status()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -243,10 +243,10 @@ class CredsPane(Vertical):
             )
             if state.conn[alias].attempts:
                 state.conn[alias].attempts -= 1  # el vacío no gasta intento de lockout
-            self._render_conn(alias)
+            self.render_conn(alias)
             return
         slot.status = "testing"
-        self._render_conn(alias)
+        self.render_conn(alias)
         self.console.run_check_worker(alias, self._apply_result)
 
     def _apply_result(self, alias: str, result: CheckResult, elapsed_ms: float) -> None:
@@ -257,7 +257,7 @@ class CredsPane(Vertical):
         self.console.state.record_conn_result(alias, ok=ok, message=msg)
         if ok:
             self.console.state.reset_attempts(alias)
-        self._render_conn(alias)
+        self.render_conn(alias)
         self.console.refresh_status()
         self.console.notify(
             f"Conexión {alias} {'OK' if ok else 'falló'}",
@@ -266,7 +266,8 @@ class CredsPane(Vertical):
 
     # ------------------------------------------------------------ render
 
-    def _render_conn(self, alias: str) -> None:
+    def render_conn(self, alias: str) -> None:
+        """Redibuja chip + mensaje de una tarjeta desde ``state.conn``."""
         c = self.console.state.conn.get(alias)
         if c is None or not self.query(f"#chip-{alias}"):
             return  # la tarjeta ya no existe (config efectiva cambió)

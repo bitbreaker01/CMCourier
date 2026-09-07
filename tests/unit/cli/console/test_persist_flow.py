@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.widgets import Button, Input
+from textual.widgets import Button, Input, Static
 
 from cmcourier.cli.console.app import ConfirmScreen, ConsoleApp
 from cmcourier.cli.console.config_pane import ConfigPane
@@ -50,6 +50,39 @@ class TestPersistFlow:
                 assert app.query_one("#ov-workers", Input).placeholder == "(yaml) 8"
                 assert app.query_one("#ov-workers", Input).value == ""
                 assert any("config.yaml.bak-" in m for m in _notes(app))
+
+        asyncio.run(_run())
+
+    def test_w_keeps_the_trigger_override_but_the_status_does_not_show_it(
+        self, tmp_path: Path
+    ) -> None:
+        """MINOR del antagonista: después de `w` quedaba "● aplicado a la
+        sesión: pipeline=csv" en [3] — el trigger (127) es asunto de [5]."""
+        from cmcourier.config.schema import LocalScanTriggerConfig
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                app.state.set_trigger_override(
+                    LocalScanTriggerConfig(kind="local_scan", scan_path=tmp_path)
+                )
+                await goto(pilot, app, "3")
+                app.query_one("#ov-workers", Input).value = "8"
+                app.query_one(ConfigPane).apply_draft()
+                await pilot.pause()
+                status = str(app.query_one("#cfg-status", Static).renderable)
+                assert "workers=8" in status and "pipeline=" not in status
+
+                await pilot.press("w")
+                await pilot.pause()
+                app.screen.query_one("#yes", Button).press()
+                await pilot.pause()
+                await pilot.pause()
+
+                assert app.state.overrides.trigger is not None  # [5] sigue eligiendo
+                assert not app.state.overrides.has_scalars()
+                assert str(app.query_one("#cfg-status", Static).renderable) == ""
 
         asyncio.run(_run())
 

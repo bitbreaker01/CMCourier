@@ -58,8 +58,22 @@ class _FakeManager:
         self.active = provider is not None
         self.paused = paused
         self.reauth_pending = False
+        self.report = None
+        self.exception: BaseException | None = None
         self.worker_cap: int | None = None
+        self.aimd_total = 4  # presupuesto del AIMD (sin AIMD = techo del pool)
+        self.pool_ceiling = 4
         self.calls: list[str] = []
+
+    @property
+    def effective_workers(self) -> int | None:
+        if not self.active:
+            return None
+        cap = self.worker_cap if self.worker_cap is not None else self.pool_ceiling
+        return max(1, min(cap, self.aimd_total, self.pool_ceiling))
+
+    def outcome(self) -> str:
+        return "cancelled"
 
     def cancel(self) -> None:
         self.calls.append("cancel")
@@ -78,9 +92,9 @@ class _FakeManager:
         if not self.active:
             return None
         self.calls.append(f"adjust{delta:+d}")
-        current = self.worker_cap if self.worker_cap is not None else 4
-        self.worker_cap = max(1, min(current + delta, 4))
-        return self.worker_cap
+        current = self.effective_workers or self.pool_ceiling
+        self.worker_cap = max(1, min(current + delta, self.pool_ceiling))
+        return self.effective_workers
 
 
 def _seed_batch(tmp_path: Path, path: Path, *, fail: bool = True) -> str:
@@ -252,6 +266,57 @@ class TestPauseResume132:
 
         asyncio.run(_run())
 
+    def test_on_auth_expired_marks_the_cmis_card_as_rejected(self, tmp_path: Path) -> None:
+        """Antagonista I6: la tarjeta CMIS seguía "ok · probada hace 3 min"
+        después del 401, y `r` reanudaba SIN preguntar porque el status era
+        ok. El servidor rechazó la sesión: la tarjeta lo tiene que decir."""
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            mgr = _FakeManager(_FakeProvider(), paused=True)
+            mgr.reauth_pending = True
+            app.run_manager = mgr  # type: ignore[assignment]
+            app.state.creds.set("cmis", "u", "p")
+            app.state.record_conn_result("cmis", ok=True, message="ok")
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                app.on_auth_expired(mgr)  # type: ignore[arg-type]
+                await pilot.pause()
+                await pilot.pause()
+                cmis = app.state.conn["cmis"]
+                assert cmis.status == "err"
+                assert "401" in cmis.message
+                card = str(app.query_one("#msg-cmis", Static).renderable)
+                assert "401" in card
+                app.set_focus(None)  # el hint enfocó el Input de password
+                await goto(pilot, app, "6")
+                await pilot.press("r")
+                await pilot.pause()
+                assert isinstance(app.screen, ConfirmScreen), "reanudar sin reprobar pregunta"
+                app.screen.dismiss(False)
+                await pilot.pause()
+
+        asyncio.run(_run())
+
+    def test_run_finished_clears_reauth_pending(self, tmp_path: Path) -> None:
+        """Antagonista I10: si la corrida termina (cancelada) con el 401
+        abierto, la pista de re-auth quedaba viva para la corrida siguiente."""
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            mgr = _FakeManager(_FakeProvider(), paused=True)
+            mgr.reauth_pending = True
+            app.run_manager = mgr  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                app.on_run_finished(mgr)  # type: ignore[arg-type]
+                await pilot.pause()
+                assert mgr.reauth_pending is False
+
+        asyncio.run(_run())
+
 
 class TestBatches:
     def test_lists_batches_with_audit(self, tmp_path: Path) -> None:
@@ -317,7 +382,7 @@ class TestWorkerCap133:
                 await pilot.pause()
                 assert mgr.calls == ["adjust-1"]
                 header = str(app.query_one("#mon-header", Static).renderable)
-                assert "workers 3/4" in header
+                assert "workers 3/3" in header  # en uso / presupuesto efectivo
                 assert "techo manual 3" in header
 
         asyncio.run(_run())
@@ -336,6 +401,39 @@ class TestWorkerCap133:
                 await pilot.pause()
                 assert mgr.calls == ["adjust+1", "adjust+1"]
                 assert mgr.worker_cap == 4
+
+        asyncio.run(_run())
+
+    def test_notify_explains_who_holds_the_workers(self, tmp_path: Path) -> None:
+        """Antagonista I1: el mensaje dice la CAUSA del efectivo — techo del
+        pool, AIMD sosteniendo por debajo del techo manual, o techo manual."""
+
+        def _last_notice(app: ConsoleApp) -> str:
+            return list(app._notifications)[-1].message  # noqa: SLF001
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            mgr = _FakeManager(_FakeProvider())
+            app.run_manager = mgr  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                await pilot.press("minus")  # cap 3 < techo 4, AIMD 4 → manual
+                await pilot.pause()
+                assert _last_notice(app) == "workers: 3 (techo manual 3)"
+                mgr.aimd_total = 2  # el AIMD bajó por debajo del techo manual
+                await pilot.press("minus")  # cap = efectivo(2) - 1 = 1
+                await pilot.pause()
+                assert _last_notice(app) == "workers: 1 (techo manual 1)"
+                mgr.worker_cap = 3
+                mgr.aimd_total = 2
+                await pilot.press("plus")  # el fake no empuja el AIMD: cap 3, efectivo 2
+                await pilot.pause()
+                assert _last_notice(app) == "workers: 2 (techo manual 3 · el AIMD sostiene 2)"
+                mgr.aimd_total = 4
+                await pilot.press("plus")  # cap 4 = techo del pool
+                await pilot.pause()
+                assert _last_notice(app) == "workers: 4 · techo del pool"
 
         asyncio.run(_run())
 
@@ -401,3 +499,13 @@ class TestWindowEta134:
     def test_header_complete_has_no_eta(self, tmp_path: Path) -> None:
         header = self._header(tmp_path, _FakeProvider(complete=True, planned_total=200))
         assert "ETA" not in header
+
+    def test_header_complete_drops_window_and_workers(self, tmp_path: Path) -> None:
+        """MINOR del antagonista: con la corrida terminada la "tasa de 60 s"
+        decae a 0 tick a tick y el pool ya no existe — ninguno informa nada."""
+        header = self._header(
+            tmp_path, _FakeProvider(complete=True, planned_total=200, window_rate=0.4)
+        )
+        assert "(60 s)" not in header
+        assert "workers" not in header
+        assert "3.4 docs/s" in header  # el promedio de la corrida sí queda

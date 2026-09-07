@@ -234,6 +234,10 @@ class StagedPipeline:
         self._auth_expired_handler: Callable[[], None] | None = None
         self._reauth_lock = threading.Lock()
         self._cred_generation = 0
+        # Episodio abierto (número) o None. NO se gatea en ``is_paused()``:
+        # una pausa manual previa al 401 dejaría al handler sin disparar.
+        self._reauth_episode: int | None = None
+        self._reauth_episodes_opened = 0
         # 133: techo manual de `worker`s. El AIMD escribe ``_aimd_total`` y
         # el operador ``_user_cap``; el pool ve ``min`` de ambos, acotado a
         # ``[1, _pool_ceiling()]``. Un solo helper (``_apply_worker_budget``)
@@ -358,14 +362,29 @@ class StagedPipeline:
                 return False
             if self._cred_generation != generation:
                 return True
-            if not self._cancel_token.is_paused():
-                self._cancel_token.pause()
+            if self._reauth_episode is None:
+                self._reauth_episodes_opened += 1
+                self._reauth_episode = self._reauth_episodes_opened
                 fire = True
             else:
                 fire = False
+            episode = self._reauth_episode
+            self._cancel_token.pause()  # idempotente: puede estar pausada a mano
         if fire and self._auth_expired_handler is not None:
-            self._auth_expired_handler()
-        return self._cancel_token.checkpoint()
+            try:
+                self._auth_expired_handler()
+            except Exception:  # noqa: BLE001 — el TUI no puede matar al worker
+                _log.exception(
+                    "el handler de re-autenticación falló; la corrida queda "
+                    "pausada — reanudá con credenciales nuevas desde la consola"
+                )
+        proceed = self._cancel_token.checkpoint()
+        with self._reauth_lock:
+            # Cerrar SOLO nuestro episodio: si otro worker ya abrió el
+            # siguiente (401 con las credenciales nuevas), no lo pisamos.
+            if self._reauth_episode == episode:
+                self._reauth_episode = None
+        return proceed
 
     # --------------------------------------------------- wiring del auto-tune
 
@@ -441,6 +460,11 @@ class StagedPipeline:
         """Presupuesto efectivo del pool en cualquiera de los dos modos (133)."""
         return self._current_total_workers()
 
+    @property
+    def pool_ceiling(self) -> int:
+        """Máximo que el pool puede llegar a tener (``cmis.workers`` o ``max_threads``)."""
+        return self._pool_ceiling()
+
     def set_worker_cap(self, cap: int | None) -> int:
         """Fija (o quita con None) el techo manual; devuelve el presupuesto efectivo (133)."""
         with self._budget_lock:
@@ -459,10 +483,18 @@ class StagedPipeline:
         Parte del EFECTIVO (no del cap anterior): si el AIMD bajó a 3 y el
         operador aprieta ``-``, espera 2, no ``cap-1``. El resultado queda
         acotado a ``[1, _pool_ceiling()]``.
+
+        Con ``+`` también empuja el presupuesto del AIMD hasta el techo
+        nuevo: el AIMD lee el efectivo y converge a ``cap+1``, así que
+        subir sólo el techo era un no-op después del primer paso (el
+        ``min`` seguía atado al AIMD). El operador pide "más" y obtiene
+        más; el AIMD retoma desde ahí si S5 se degrada.
         """
         with self._budget_lock:
             target = self._effective_worker_budget() + int(delta)
             self._user_cap = max(1, min(target, self._pool_ceiling()))
+            if delta > 0:
+                self._aimd_total = max(self._aimd_total, self._user_cap)
             return self._apply_worker_budget()
 
     def _pool_ceiling(self) -> int:
@@ -1419,7 +1451,7 @@ class StagedPipeline:
                     object_type_id = item.mapping.cmis_type or item.mapping.cm_object_type
                     folder_path = item.mapping.cmis_folder or item.mapping.cm_folder
                     cm_object_id = self._upload_with_reauth(
-                        item, batch_id, txn, folder_path, object_type_id
+                        item, batch_id, txn, folder_path, object_type_id, timer=timer
                     )
                 except (CMISClientError, CMISServerError, RetriesExhaustedError) as exc:
                     timer.mark_failed()
@@ -1477,12 +1509,16 @@ class StagedPipeline:
         txn: str,
         folder_path: str,
         object_type_id: str,
+        *,
+        timer: StageTimer | None = None,
     ) -> str:
         """132: el upload de S5 con hasta dos episodios de re-autenticación.
 
         Sin handler registrado es una sola llamada al uploader (headless).
         Con handler, un 401 pausa la corrida y espera credenciales nuevas;
         si llegan, reintenta el MISMO doc dentro del mismo slot y timer.
+        La espera se le descuenta al ``timer`` — es tiempo del operador,
+        no del upload, y el p95 de S5 alimenta al AIMD.
         Al tercer 401 consecutivo (o si cancelan durante la espera) la
         excepción sube y el doc se marca ``S5_FAILED`` como siempre."""
         assert item.staged_file is not None
@@ -1515,8 +1551,13 @@ class StagedPipeline:
                     episodes,
                     self._MAX_REAUTH_EPISODES,
                 )
-                if not self._await_reauth(generation):
-                    raise
+                waited_from = time.monotonic()
+                try:
+                    if not self._await_reauth(generation):
+                        raise
+                finally:
+                    if timer is not None:
+                        timer.exclude(time.monotonic() - waited_from)
 
     @staticmethod
     def _record_s4_substages(

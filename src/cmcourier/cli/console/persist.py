@@ -61,21 +61,26 @@ def persist_overrides(
     if not changed:
         raise PersistError("no hay nada que escribir: los overrides aplicados están vacíos")
 
-    original = config_path.read_text(encoding="utf-8")
-    lines = original.splitlines(keepends=True)
-    if lines and not lines[-1].endswith("\n"):
-        lines[-1] += "\n"
+    # B2 del antagonista: si el YAML es un symlink, el reemplazo atómico
+    # pisaría el link y el archivo real no cambiaría. Trabajamos sobre el real.
+    config_path = config_path.resolve()
+    original = config_path.read_bytes().decode("utf-8")
+    # I5: conservar el terminador de línea del archivo (CRLF de Windows).
+    eol = "\r\n" if "\r\n" in original else "\n"
+    lines = original.split(eol)
+    if lines and lines[-1] == "":
+        lines.pop()  # el archivo terminaba en newline (lo reponemos al unir)
     for field, path in _PATHS:
         value = getattr(ov, field)
         if value is not None:
             lines = _patch(lines, path, _render(value))
-    patched = "".join(lines)
+    patched = eol.join(lines) + eol
 
     # El trigger (127) es una elección del launcher, no del YAML.
     expected = apply_overrides(config, replace(ov, trigger=None))
     tmp = config_path.with_name(f".{config_path.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(patched, encoding="utf-8")
+        tmp.write_bytes(patched.encode("utf-8"))
         try:
             loaded = load_config(tmp)
         except Exception as exc:  # noqa: BLE001 — cualquier fallo de carga cierra
@@ -88,6 +93,7 @@ def persist_overrides(
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         backup = config_path.with_name(f"{config_path.name}.bak-{stamp}")
         shutil.copy2(config_path, backup)
+        shutil.copymode(config_path, tmp)  # B3: un YAML 0600 no sale 0664
         tmp.replace(config_path)  # atómico: mismo directorio
     finally:
         tmp.unlink(missing_ok=True)
@@ -103,7 +109,10 @@ def _render(value: object) -> str:
 
 
 def _patch(lines: list[str], path: tuple[str, ...], value: str) -> list[str]:
-    """Reemplaza / inserta ``path`` en ``lines``. Best effort: la verificación decide."""
+    """Reemplaza / inserta ``path`` en ``lines`` (sin terminador de línea).
+
+    Best effort: la verificación semántica de ``persist_overrides`` decide.
+    """
     start, end, indent = 0, len(lines), 0
     for depth, key in enumerate(path):
         hit = _find_key(lines, start, end, indent, key)
@@ -112,8 +121,8 @@ def _patch(lines: list[str], path: tuple[str, ...], value: str) -> list[str]:
             # Falta desde acá: insertar el sub-árbol al final del bloque padre.
             insert_at = _block_end(lines, start, end)
             missing = path[depth:]
-            new = [f"{' ' * (indent + 2 * i)}{k}:\n" for i, k in enumerate(missing[:-1])]
-            new.append(f"{' ' * (indent + 2 * (len(missing) - 1))}{missing[-1]}: {value}\n")
+            new = [f"{' ' * (indent + 2 * i)}{k}:" for i, k in enumerate(missing[:-1])]
+            new.append(f"{' ' * (indent + 2 * (len(missing) - 1))}{missing[-1]}: {value}")
             return lines[:insert_at] + new + lines[insert_at:]
         idx, rest = hit
         if last:
@@ -121,7 +130,7 @@ def _patch(lines: list[str], path: tuple[str, ...], value: str) -> list[str]:
             m = re.search(r"\s+#.*$", rest)
             if m:
                 comment = m.group(0)
-            lines[idx] = f"{' ' * indent}{key}: {value}{comment}\n"
+            lines[idx] = f"{' ' * indent}{key}: {value}{comment}"
             return lines
         # Bloque intermedio: sus hijos van hasta la próxima clave con indent <= actual.
         start = idx + 1
@@ -138,7 +147,7 @@ def _find_key(
     lines: list[str], start: int, end: int, indent: int, key: str
 ) -> tuple[int, str] | None:
     for i in range(start, end):
-        m = _KEY_RE.match(lines[i].rstrip("\n"))
+        m = _KEY_RE.match(lines[i])
         if m and len(m.group("indent")) == indent and m.group("key") == key:
             return i, m.group("rest")
     return None

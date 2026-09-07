@@ -199,10 +199,15 @@ class ConsoleApp(App[None]):
         Binding("s", "sync_status", "estado sync", show=False),
     ]
 
-    def __init__(self, *, config: PipelineConfig, config_path: Path) -> None:
+    def __init__(
+        self, *, config: PipelineConfig, config_path: Path, log_level: str = "WARNING"
+    ) -> None:
         super().__init__()
         self.config = config
         self.config_path = config_path
+        # `console --log-level`: el runner re-configura la observabilidad en
+        # cada lanzamiento (unmask_pii es de proceso) y tiene que respetarlo.
+        self.log_level = log_level
         self.state = ConsoleState.for_config(config)
         self.run_manager = ConsoleRunManager(self)
         self._batches_store: SQLiteTrackingStore | None = None
@@ -443,8 +448,14 @@ class ConsoleApp(App[None]):
         if effective is None:
             return
         cap = mgr.worker_cap
-        if cap is not None and cap > effective:
+        ceiling = mgr.pool_ceiling
+        # El mensaje dice la CAUSA del efectivo: si tocó el techo del pool
+        # no hay más para pedir; si el AIMD lo sostiene por debajo del
+        # techo manual, el operador tiene que saber que no fue él.
+        if ceiling is not None and effective >= ceiling:
             msg = f"workers: {effective} · techo del pool"
+        elif cap is not None and cap > effective:
+            msg = f"workers: {effective} (techo manual {cap} · el AIMD sostiene {effective})"
         elif cap is not None:
             msg = f"workers: {effective} (techo manual {cap})"
         else:
@@ -487,6 +498,16 @@ class ConsoleApp(App[None]):
     def on_auth_expired(self, manager: ConsoleRunManager) -> None:
         """132: llega (vía call_from_thread) cuando un worker recibió 401.
         La corrida ya está pausada; acá sólo se guía al operador."""
+        # I6: la tarjeta CMIS decía "ok · probada hace 3 min" y `r`
+        # reanudaba sin preguntar. El servidor rechazó la sesión: la
+        # tarjeta pasa a err hasta que se vuelva a probar.
+        self.state.record_conn_result(
+            "cmis",
+            ok=False,
+            message="Sesión rechazada por el servidor (401) — probá la credencial nueva.",
+        )
+        with contextlib.suppress(NoMatches):
+            self.q("CredsPane", CredsPane).render_conn("cmis")
         self.notify(
             "Sesión CMIS rechazada (401) — corrida PAUSADA. Cargá la credencial "
             "nueva en [2] y reanudá con r en [6].",
@@ -702,6 +723,9 @@ class ConsoleApp(App[None]):
         self.refresh_status()
 
     def on_run_finished(self, manager: ConsoleRunManager) -> None:
+        # I10: un 401 abierto muere con la corrida — la pista de re-auth no
+        # tiene que sobrevivir a la corrida siguiente.
+        manager.reauth_pending = False
         outcome = manager.outcome()
         report = manager.report
         done = sum(r.s5_done for r in report.chunks) if report else 0

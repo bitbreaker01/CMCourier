@@ -54,8 +54,12 @@ class CancellationToken:
     def pause(self) -> None:
         """Cierra la compuerta: los workers se detienen en el próximo
         ``checkpoint``. Idempotente; no hace nada si ya está cancelado."""
-        if not self._cancelled.is_set():
-            self._running.clear()
+        self._running.clear()
+        if self._cancelled.is_set():
+            # Carrera pause()/cancel(): cancel setea _cancelled ANTES de
+            # _running, así que este orden (clear → chequear → reabrir)
+            # nunca deja la compuerta cerrada con la corrida cancelada.
+            self._running.set()
 
     def resume(self) -> None:
         """Abre la compuerta. Idempotente."""
@@ -69,5 +73,9 @@ class CancellationToken:
         """Punto seguro de los workers: bloquea mientras la corrida esté
         pausada; devuelve ``False`` si fue cancelada (antes o durante la
         espera) y ``True`` si puede seguir."""
-        self._running.wait()
+        # Espera con timeout: aunque la compuerta quedara cerrada por un
+        # bug futuro, una cancelación nunca deja workers colgados.
+        while not self._running.wait(1.0):
+            if self._cancelled.is_set():
+                return False
         return not self._cancelled.is_set()

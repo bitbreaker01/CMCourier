@@ -768,6 +768,7 @@ class StageTimer:
 
     __slots__ = (
         "_batch_id",
+        "_excluded_s",
         "_outcome",
         "_pipeline",
         "_recorder",
@@ -792,6 +793,7 @@ class StageTimer:
         self._txn_num = txn_num
         self._outcome = "OK"
         self._start_monotonic = 0.0
+        self._excluded_s = 0.0
 
     def mark_failed(self) -> None:
         """Llamar desde dentro del bloque ``with`` cuando el caller atrapa una
@@ -799,6 +801,13 @@ class StageTimer:
         atrapada parece un éxito desde el punto de vista de ``__exit__``.
         """
         self._outcome = "FAIL"
+
+    def exclude(self, seconds: float) -> None:
+        """Descuenta tiempo que NO es trabajo de la etapa (132: la espera
+        de credenciales nuevas tras un 401). Sin esto, un doc que esperó
+        40 s al operador entra al p95 de S5 como un upload de 40 s y el
+        AIMD recorta workers al reanudar."""
+        self._excluded_s += max(0.0, seconds)
 
     def __enter__(self) -> StageTimer:
         self._start_monotonic = time.monotonic()
@@ -810,7 +819,8 @@ class StageTimer:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        duration_ms = (time.monotonic() - self._start_monotonic) * 1000.0
+        elapsed_s = time.monotonic() - self._start_monotonic
+        duration_ms = max(0.0, elapsed_s - self._excluded_s) * 1000.0
         if exc_type is not None:
             self._outcome = "FAIL"
         self._recorder.record_stage(stage=self._stage, duration_ms=duration_ms)

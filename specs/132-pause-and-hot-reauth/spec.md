@@ -22,9 +22,10 @@ de decirle al pipeline "frená, esperá, seguí".
 `checkpoint` BLOQUEA mientras la corrida esté pausada y devuelve `False`
 si fue cancelada (antes o durante la espera), `True` si puede seguir.
 `cancel()` sigue siendo de un solo sentido y despierta a los que esperan
-en la compuerta. Los diez sitios de poll (`_stage_s0_s1`, `_s2_one`,
-`_s3_one`, `_s4_one`, `_upload_one`, los loops de chunks de
-`MultiBatchOrchestrator` y el `_prep_loop` de `StreamingOrchestrator`)
+en la compuerta. Los ocho sitios de poll (`_stage_s0_s1`, `_s2_one`,
+`_s3_one`, `_s4_one`, `_upload_one`, los loops `_run_sequential` y
+`_prep_loop` de `MultiBatchOrchestrator` y el `_prep_loop` de
+`StreamingOrchestrator`)
 pasan de `is_cancelled()` a `checkpoint()`: un worker pausado se queda
 parado ANTES de tomar trabajo nuevo (y antes del slot del semáforo); lo
 que ya está en vuelo termina. Nada se descarta.

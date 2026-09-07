@@ -96,3 +96,22 @@ def test_pause_after_cancel_does_not_block() -> None:
     token.cancel()
     token.pause()
     assert token.checkpoint() is False
+
+
+def test_pause_racing_with_cancel_never_leaves_the_gate_closed() -> None:
+    """Antagonista 0.111.0 B1: pause() leía el flag y recién después cerraba;
+    si cancel() se colaba en el medio, la compuerta quedaba cerrada para
+    siempre. Simulamos el estado post-carrera y exigimos que checkpoint
+    salga con False en vez de colgarse."""
+    token = CancellationToken()
+    token._running.clear()  # la pausa "ganó" después del cancel
+    token._cancelled.set()
+    assert token.checkpoint() is False
+
+
+def test_pause_after_cancel_reopens_the_gate() -> None:
+    token = CancellationToken()
+    token.cancel()
+    token.pause()
+    assert token._running.is_set() is True
+    assert token.is_paused() is False

@@ -543,7 +543,7 @@ def console_command(config_path: Path, log_level: str) -> None:
         sys.exit(2)
     from cmcourier.cli.console.app import ConsoleApp  # noqa: PLC0415 — import pesado, lazy
 
-    ConsoleApp(config=config, config_path=config_path).run()
+    ConsoleApp(config=config, config_path=config_path, log_level=log_level).run()
 
 
 # ---------------------------------------------------------------------------

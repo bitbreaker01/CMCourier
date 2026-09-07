@@ -103,6 +103,23 @@ class TestWindowRate:
         clock.now += 40
         assert provider.snapshot().throughput_window_docs_per_s == pytest.approx(0.0)
 
+    def test_stale_window_after_a_sampling_gap_is_dropped(self, tmp_path: Path) -> None:
+        """Antagonista I9: si el TUI dejó de muestrear (terminal suspendida,
+        timer frenado) la muestra sobreviviente podía tener 3 min y la
+        "tasa de 60 s" cubría 190 s. Con un hueco > 1.5× ventana se
+        descarta y se vuelve a empezar."""
+        provider, clock, pool = _provider(tmp_path)
+        provider.snapshot()
+        clock.now += 10
+        _complete(pool, 20)
+        provider.snapshot()
+        clock.now += 190  # hueco sin muestras
+        _complete(pool, 60)
+        assert provider.snapshot().throughput_window_docs_per_s is None
+        clock.now += 5
+        _complete(pool, 5)
+        assert provider.snapshot().throughput_window_docs_per_s == pytest.approx(1.0)
+
     def test_processed_comes_from_chunks_when_present(self, tmp_path: Path) -> None:
         chunks = [
             ChunkState(chunk_idx=0, batch_id="b-0", status="DONE", s5_done=30, s5_failed=2),

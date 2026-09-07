@@ -230,7 +230,7 @@ class ConfigPane(Vertical):
         applied = self.console.state.overrides
         if self.draft_dirty():
             status.update("▲ borrador sin guardar — apretá a para que aplique a la próxima corrida")
-        elif not applied.is_empty():
-            status.update(f"● aplicado a la sesión: {applied.summary()}")
+        elif applied.has_scalars():
+            status.update(f"● aplicado a la sesión: {applied.scalar_summary()}")
         else:
             status.update("")

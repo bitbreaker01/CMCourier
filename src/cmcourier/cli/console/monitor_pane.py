@@ -98,17 +98,20 @@ class MonitorPane(Vertical):
         header += self._bottleneck_line(snap)
         self.query_one("#mon-header", Static).update(header)
         body = render_prep(snap) + "\n\n" + render_upload(snap)
-        if self.console.config.processing.mode == "streaming":
+        # El modo que corre es el EFECTIVO de la corrida (overrides de [3]),
+        # no el del YAML — y el provider lo sabe: con `mode=streaming`
+        # aplicado, el bloque BUCKET tiene que aparecer.
+        if snap.mode == "streaming":
             body += "\n\n" + render_bucket(snap)
         self.query_one("#mon-body", Static).update(body)
 
     @staticmethod
     def _window_fragment(snap: TUISnapshot) -> str:
         """134: tasa de los últimos 60 s + ETA de corrida (sólo con total)."""
+        if snap.is_complete:
+            return ""  # la ventana decae a 0 tick a tick; el promedio de la corrida basta
         rate = snap.throughput_window_docs_per_s
         frag = f" · {rate:.1f} docs/s (60 s)" if rate is not None else " · — docs/s (60 s)"
-        if snap.is_complete:
-            return frag
         if snap.planned_total is None:
             return frag + " · ETA — (sin total)"
         if snap.eta_run_s is None:
@@ -119,6 +122,8 @@ class MonitorPane(Vertical):
     @staticmethod
     def _workers_fragment(mgr: object, snap: TUISnapshot) -> str:
         """133: ``workers <en uso>/<cap efectivo>`` y el techo manual si lo hay."""
+        if snap.is_complete:
+            return ""  # el pool ya no existe: el último valor sería ruido
         # El pipeline sabe el presupuesto en ambos modos (single/dual-lane);
         # ``snap.pool_capacity`` sólo ve el semáforo único.
         effective = getattr(mgr, "effective_workers", None)

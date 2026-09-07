@@ -59,8 +59,14 @@ AIMD llama `_on_pool_resize(6)` → la capacidad efectiva sigue en 2;
   AIMD bajó a 3 y el operador aprieta `-`, espera 2, no `cap-1`.
 - `_current_total_workers` (lo que lee el AIMD) sigue devolviendo el
   efectivo: con un techo bajo el AIMD "cree" que el pool es chico y
-  propone `cap+1`; cuando el techo se levanta, el pool sube a eso. Es
-  aceptable y acotado — documentado en el docstring.
+  converge a `cap+1` (un `+1` por tick DESDE EL CAP, no desde donde
+  estaba antes). Por eso `adjust_worker_cap(+n)` también empuja
+  `_aimd_total` hasta el techo nuevo (revisión antagonista I1): si no,
+  `+` era un no-op después del primer paso porque el `min` seguía
+  atado al AIMD. `-` no toca el AIMD.
+- El mensaje de `+`/`-` dice la CAUSA del efectivo: `techo del pool` si
+  llegó al máximo, `el AIMD sostiene N` si el techo manual está por
+  encima del efectivo, `techo manual C` si el cap es quien manda.
 - Dual-lane: `LaneController.set_total_budget` clampea a 2 (un slot por
   carril), así que el piso del efectivo ahí es 2, no 1. El efectivo que
   devuelven `set_worker_cap`/`adjust_worker_cap` refleja ese piso.

@@ -69,6 +69,11 @@ class SessionOverrides:
             parts.append(f"pipeline={self.trigger.kind}")
         return ", ".join(parts) if parts else "ninguno"
 
+    def scalar_summary(self) -> str:
+        """Sólo los escalares de [3] — el trigger (127) se elige y se muestra en [5]."""
+        parts = [f"{k}={v}" for k, v in self._scalar_items()]
+        return ", ".join(parts) if parts else "ninguno"
+
     def to_json(self) -> str:
         payload: dict[str, object] = dict(self._scalar_items())
         if self.trigger is not None:

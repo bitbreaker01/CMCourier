@@ -276,7 +276,7 @@ class TestMarkupSafety:
                 app.state.record_conn_result("cmis", ok=False, message=nasty)
                 from cmcourier.cli.console.creds_pane import CredsPane
 
-                app.query_one(CredsPane)._render_conn("cmis")  # noqa: SLF001
+                app.query_one(CredsPane).render_conn("cmis")
                 await pilot.pause()  # el render no debe explotar
                 from textual.widgets import Static
 

@@ -358,6 +358,84 @@ def test_401_after_fresh_credentials_retries_without_pausing(tmp_path) -> None:
     assert pipeline.cancel_token.is_paused() is False
 
 
+def test_reauth_wait_is_not_charged_to_s5_latency(tmp_path) -> None:
+    """Antagonista I3: la espera de credenciales ocurría DENTRO del
+    StageTimer de S5 y envenenaba el p95 que lee el AIMD (un doc de 40 s
+    "de upload" → el AIMD recortaba workers al reanudar)."""
+    pipeline, item, _calls = _pipeline_with_401_then_ok(tmp_path)
+
+    def handler() -> None:
+        threading.Timer(0.4, pipeline.cancel_token.resume).start()
+
+    pipeline.set_auth_expired_handler(handler)
+
+    assert pipeline._upload_one(item, "B1") == "done"
+
+    p95_ms, count = pipeline._metrics.current_stage_p95_with_count("S5")
+    assert count == 1
+    assert p95_ms < 300, f"S5 cobró la espera de re-auth: p95={p95_ms:.0f} ms"
+
+
+def test_401_during_manual_pause_still_fires_the_handler(tmp_path) -> None:
+    """Antagonista I7: con la corrida pausada a mano ANTES del 401, el
+    handler se gateaba en ``is_paused()`` y nunca avisaba — el operador
+    reanudaba y el doc volvía a fallar por credenciales viejas."""
+    pipeline, item, _calls = _pipeline_with_401_then_ok(tmp_path)
+    fired: list[int] = []
+    pipeline.set_auth_expired_handler(lambda: fired.append(1))
+    pipeline.cancel_token.pause()  # pausa manual, la compuerta ya está cerrada
+
+    # Entramos por _upload_with_reauth directo: la compuerta de entrada de
+    # _upload_one frenaría al worker antes del POST (otro escenario).
+    t = threading.Thread(
+        target=lambda: pipeline._upload_with_reauth(item, "B1", "TXN_C", "/f", "t"),
+        daemon=True,
+    )
+    t.start()
+    t.join(1.0)
+    assert t.is_alive()
+    assert fired == [1]
+
+    pipeline.cancel_token.resume()
+    t.join(3.0)
+    assert not t.is_alive()
+
+
+def test_reauth_episode_closes_on_resume_so_the_next_401_fires_again(tmp_path) -> None:
+    """Complemento de I7: el episodio se cierra al reanudar; un 401 posterior
+    (credenciales nuevas también vencidas) vuelve a avisar."""
+    pipeline, item, _calls = _pipeline_with_401_then_ok(tmp_path, failures=2)
+    fired: list[int] = []
+
+    def handler() -> None:
+        fired.append(1)
+        pipeline.cancel_token.resume()
+
+    pipeline.set_auth_expired_handler(handler)
+    assert pipeline._upload_one(item, "B1") == "done"
+    assert fired == [1, 1]
+
+
+def test_handler_exception_does_not_kill_the_worker(tmp_path) -> None:
+    """Antagonista I8: si el handler del TUI explota, el worker no muere
+    con el slot tomado — la corrida queda pausada y espera igual."""
+    pipeline, item, _calls = _pipeline_with_401_then_ok(tmp_path)
+
+    def handler() -> None:
+        raise RuntimeError("el TUI se cayó")
+
+    pipeline.set_auth_expired_handler(handler)
+
+    t, results = _run_upload_in_thread(pipeline, item)
+    t.join(1.0)
+    assert t.is_alive(), "el worker sigue esperando en la compuerta"
+    assert pipeline.cancel_token.is_paused() is True
+
+    pipeline.cancel_token.resume()
+    t.join(3.0)
+    assert results == ["done"]
+
+
 def test_second_episode_fires_handler_again(tmp_path) -> None:
     pipeline, item, _calls = _pipeline_with_401_then_ok(tmp_path, failures=2)
     fired: list[int] = []

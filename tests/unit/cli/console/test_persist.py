@@ -127,6 +127,39 @@ class TestSafety:
         assert not list(tmp_path.glob("config.yaml.bak-*"))
         assert not list(tmp_path.glob(".config.yaml.*"))
 
+    def test_symlink_writes_through_to_the_real_file(self, tmp_path: Path) -> None:
+        """Antagonista B2: Path.replace sobre un symlink lo pisaba y el real quedaba igual."""
+        config, real = _make_config(tmp_path)
+        link = tmp_path / "link.yaml"
+        link.symlink_to(real)
+
+        result = persist_overrides(link, config, SessionOverrides(workers=8))
+
+        assert link.is_symlink()
+        assert load_config(real).cmis.workers == 8
+        assert result.backup_path.parent == real.parent
+        assert result.backup_path.name.startswith("config.yaml.bak-")
+
+    def test_preserves_file_mode(self, tmp_path: Path) -> None:
+        """Antagonista B3: el archivo nuevo salía con el umask, no con el modo original."""
+        config, yaml_path = _make_config(tmp_path)
+        yaml_path.chmod(0o600)
+        persist_overrides(yaml_path, config, SessionOverrides(workers=8))
+        assert yaml_path.stat().st_mode & 0o777 == 0o600
+
+    def test_preserves_crlf_line_endings(self, tmp_path: Path) -> None:
+        """Antagonista I5: read_text/write_text normalizaban y el archivo entero cambiaba."""
+        config, yaml_path = _make_config(tmp_path)
+        crlf = yaml_path.read_text().replace("\n", "\r\n").encode()
+        yaml_path.write_bytes(crlf)
+        persist_overrides(yaml_path, config, SessionOverrides(workers=8, mode="streaming"))
+        data = yaml_path.read_bytes()
+        assert b"\r\n" in data
+        assert data.count(b"\n") == data.count(b"\r\n")
+        assert b"  workers: 8\r\n" in data
+        assert data.endswith(b"processing:\r\n  mode: streaming\r\n")
+        assert load_config(yaml_path).cmis.workers == 8
+
     def test_duplicate_key_refuses_to_write(self, tmp_path: Path) -> None:
         """PyYAML se queda con la última: parcheamos la primera → mismatch → cerrado."""
         config, yaml_path = _make_config(tmp_path)

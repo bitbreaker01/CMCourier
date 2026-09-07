@@ -97,6 +97,19 @@ class TestWithAimd:
         p.set_worker_cap(2)
         assert p._current_total_workers() == 2  # noqa: SLF001
 
+    def test_plus_pushes_the_aimd_budget_too(self) -> None:
+        """Antagonista I1: el AIMD converge al cap+1 (lee el efectivo), así que
+        subir sólo el techo era un no-op tras el primer paso. ``+`` empuja
+        también el presupuesto del AIMD; ``-`` no lo toca."""
+        p = self._aimd()
+        p.set_worker_cap(2)
+        p._on_pool_resize(3)  # noqa: SLF001 — el AIMD ya convergió a cap+1
+        assert p.adjust_worker_cap(+1) == 3
+        assert p.adjust_worker_cap(+1) == 4
+        assert p.adjust_worker_cap(+1) == 5
+        assert p.adjust_worker_cap(-2) == 3
+        assert p.pool_ceiling == 8
+
 
 class TestDualLane:
     def test_cap_goes_through_the_lane_controller(self) -> None:

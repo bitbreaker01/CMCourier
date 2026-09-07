@@ -176,6 +176,26 @@ class TestStageTimer:
         ]
         assert "FAIL" in outcomes
 
+    def test_exclude_discounts_wall_time(self, tmp_path: Path) -> None:
+        """132/I3: la espera de re-auth no es trabajo de la etapa."""
+        recorder = _make_recorder(tmp_path)
+        recorder.start_batch(pipeline="csv-trigger", batch_id="b1")
+        with StageTimer(recorder, pipeline="csv-trigger", stage="S5", batch_id="b1") as t:
+            time.sleep(0.05)
+            t.exclude(0.05)
+        summary = recorder._stage_buckets["S5"].summary()  # type: ignore[attr-defined]
+        assert summary["count"] == 1
+        assert summary["sum_ms"] < 20
+
+    def test_exclude_never_goes_negative(self, tmp_path: Path) -> None:
+        recorder = _make_recorder(tmp_path)
+        recorder.start_batch(pipeline="csv-trigger", batch_id="b1")
+        with StageTimer(recorder, pipeline="csv-trigger", stage="S5", batch_id="b1") as t:
+            t.exclude(10.0)
+            t.exclude(-5.0)
+        summary = recorder._stage_buckets["S5"].summary()  # type: ignore[attr-defined]
+        assert summary["sum_ms"] == 0.0
+
 
 # ---------------------------------------------------------------------------
 # MetricsRecorder.close_batch

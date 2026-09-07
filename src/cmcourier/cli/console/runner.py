@@ -99,6 +99,8 @@ class ConsoleRunManager:
         # 132: True entre el aviso de "sesión CMIS rechazada" y el resume
         # que empuja la credencial nueva al pipeline.
         self.reauth_pending = False
+        self._audit_config_hash = ""
+        self._audit_overrides_json = "{}"
 
     @property
     def active(self) -> bool:
@@ -131,7 +133,7 @@ class ConsoleRunManager:
         effective = apply_overrides(app.config, app.state.overrides)
         self.effective = effective
         # M7: unmask_pii es de proceso — se re-aplica al lanzar.
-        configure_observability(effective.observability, "WARNING", tui_active=True)
+        configure_observability(effective.observability, app.log_level, tui_active=True)
         self._lock_cm = acquire_config_lock(app.config_path)
         self._lock_cm.__enter__()
         try:
@@ -141,6 +143,11 @@ class ConsoleRunManager:
             raise
         self.pipeline = pipeline
         self.reauth_pending = False
+        # I4: la auditoría describe el config que la corrida USÓ. Si el
+        # operador escribe el YAML con `w` (135) mientras corre, el hash y
+        # los overrides al cierre ya no serían los de esta corrida.
+        self._audit_config_hash = hashlib.sha256(app.config_path.read_bytes()).hexdigest()[:12]
+        self._audit_overrides_json = app.state.overrides.to_json()
         # 132: un 401 en S5 pausa la corrida y avisa acá (worker thread).
         pipeline.set_auth_expired_handler(self._on_auth_expired)
         self.provider = build_data_provider(
@@ -229,7 +236,6 @@ class ConsoleRunManager:
             set_outcome = getattr(store, "set_batch_outcome", None)
             if record_audit is None or set_outcome is None:
                 return
-            config_hash = hashlib.sha256(self.app.config_path.read_bytes()).hexdigest()[:12]
             outcome = self.outcome()
             for batch_id in self._batch_ids():
                 record_audit(
@@ -238,8 +244,8 @@ class ConsoleRunManager:
                     station=platform.node(),
                     pipeline_kind=str(getattr(self.effective.trigger, "kind", "?")),
                     environment=self.effective.environment,
-                    config_hash=config_hash,
-                    overrides_json=self.app.state.overrides.to_json(),
+                    config_hash=self._audit_config_hash,
+                    overrides_json=self._audit_overrides_json,
                     doctor_verdict=self.app.state.doctor_verdict(),
                 )
                 set_outcome(batch_id, outcome)
@@ -295,6 +301,10 @@ class ConsoleRunManager:
     @property
     def effective_workers(self) -> int | None:
         return None if self.pipeline is None else self.pipeline.effective_workers
+
+    @property
+    def pool_ceiling(self) -> int | None:
+        return None if self.pipeline is None else self.pipeline.pool_ceiling
 
     def adjust_workers(self, delta: int) -> int | None:
         """Mueve el techo ``delta`` pasos; None si no hay pipeline (corrida idle)."""

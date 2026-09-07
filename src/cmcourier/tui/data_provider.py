@@ -416,6 +416,13 @@ class TUIDataProvider:
             self._window.popleft()
         t0, c0 = self._window[0]
         dt = now - t0
+        if dt > self._window_s * 1.5:
+            # Hueco de muestreo (terminal suspendida, timer frenado): la
+            # muestra sobreviviente ya no representa "los últimos 60 s".
+            # Se descarta y la ventana arranca de nuevo desde ahora.
+            while len(self._window) > 1:
+                self._window.popleft()
+            return None
         if dt < 1.0:
             return None
         return max(0, processed - c0) / dt
