@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 from textual.app import ComposeResult
-from textual.containers import Grid, Horizontal, Vertical
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Input, Label, Select, Static
 
 from cmcourier.cli.console.overrides import TriggerOverride, apply_overrides
@@ -52,7 +52,9 @@ def _csv_list(raw: str) -> list[str]:
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
-class RunPane(Vertical):
+class RunPane(VerticalScroll):
+    # VerticalScroll: con el selector de pipeline (127) el formulario supera
+    # las ~24 filas y `#run-launch` se iba de la pantalla (antagonista 128).
     DEFAULT_CSS = """
     RunPane { padding: 1 2; }
     RunPane Grid { grid-size: 2; grid-gutter: 1 2; height: auto; }

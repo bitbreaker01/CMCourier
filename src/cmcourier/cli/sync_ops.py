@@ -15,6 +15,7 @@ from __future__ import annotations
 
 __all__ = [
     "StatusResult",
+    "build_as400_store",
     "SyncOpError",
     "build_sync_stores",
     "sync_recover",
@@ -30,7 +31,7 @@ from cmcourier.adapters.tracking import SQLiteTrackingStore
 from cmcourier.adapters.tracking.as400_niarvilog import As400NiarvilogStore
 from cmcourier.config.loader import Secrets
 from cmcourier.config.schema import PipelineConfig
-from cmcourier.config.wiring import _niarvilog_columns_from_schema, build_as400_recovery
+from cmcourier.config.wiring import build_as400_recovery, niarvilog_columns_from_schema
 from cmcourier.services.recovery import RecoveryResult
 
 
@@ -44,40 +45,47 @@ class StatusResult:
 
 
 def sync_unavailable_reason(config: PipelineConfig, secrets: Secrets) -> str | None:
-    """``None`` si se puede operar el sync; si no, el motivo en claro."""
+    """``None`` si se puede operar el sync; si no, el motivo en claro.
+
+    Los textos son los históricos del CLI ``sync`` (E5 de 128: mismos
+    mensajes) — la consola les agrega su propia pista de navegación.
+    """
     sync_cfg = config.tracking.as400_sync
     if not sync_cfg.enabled:
         return (
-            "tracking.as400_sync.enabled=false — el sync con NIARVILOG está "
-            "deshabilitado en el YAML; estas operaciones no aplican a esta config."
+            "tracking.as400_sync.enabled=false; "
+            "`sync` commands require AS400 sync to be enabled in the YAML."
         )
     if sync_cfg.connection is None:
-        return "tracking.as400_sync.connection falta en el YAML."
+        return "tracking.as400_sync.connection is missing"
     if not secrets.as400_username or not secrets.as400_password:
-        return "Faltan las credenciales AS400 (AS400_USERNAME / AS400_PASSWORD)."
+        return "AS400 credentials missing in environment (set AS400_USERNAME / AS400_PASSWORD)."
     return None
 
 
-def build_sync_stores(
-    config: PipelineConfig, secrets: Secrets
-) -> tuple[SQLiteTrackingStore, As400NiarvilogStore]:
-    """Construye los stores. Asume ``sync_unavailable_reason`` == None."""
+def build_as400_store(config: PipelineConfig, secrets: Secrets) -> As400NiarvilogStore:
+    """Construye SOLO el store AS400. Asume ``sync_unavailable_reason`` == None."""
     sync_cfg = config.tracking.as400_sync
     assert sync_cfg.connection is not None
-    sqlite = SQLiteTrackingStore(config.tracking.db_path)
-    as400 = As400NiarvilogStore(
+    return As400NiarvilogStore(
         connection=sync_cfg.connection,
         username=secrets.as400_username,
         password=secrets.as400_password,
         library=sync_cfg.library,
         table=sync_cfg.table,
         # 086: honrar el override de columnas del YAML (el CLI pre-086 no lo hacía).
-        columns=_niarvilog_columns_from_schema(sync_cfg.columns),
+        columns=niarvilog_columns_from_schema(sync_cfg.columns),
         stale_in_progress_minutes=sync_cfg.stale_in_progress_minutes,
         retry_attempts=sync_cfg.retry_attempts,
         retry_base_delay_s=sync_cfg.retry_base_delay_s,
     )
-    return sqlite, as400
+
+
+def build_sync_stores(
+    config: PipelineConfig, secrets: Secrets
+) -> tuple[SQLiteTrackingStore, As400NiarvilogStore]:
+    """Construye ambos stores. Asume ``sync_unavailable_reason`` == None."""
+    return SQLiteTrackingStore(config.tracking.db_path), build_as400_store(config, secrets)
 
 
 def _require_available(config: PipelineConfig, secrets: Secrets) -> None:
@@ -90,11 +98,10 @@ def sync_status(config: PipelineConfig, secrets: Secrets) -> StatusResult:
     """Cleanup de in_progress vencidos + prueba de conectividad. Read-only
     salvo por el cleanup (que es idempotente)."""
     _require_available(config, secrets)
-    sqlite, as400 = build_sync_stores(config, secrets)
+    as400 = build_as400_store(config, secrets)  # el SQLite no hace falta acá
     try:
         return StatusResult(stale_cleaned=as400.cleanup_stale_in_progress())
     finally:
-        sqlite.close()
         as400.close()
 
 
@@ -108,10 +115,15 @@ def sync_recover(
     """099: recupera filas faltantes en NIARVILOG. ``apply=False`` = dry-run."""
     _require_available(config, secrets)
     sqlite = SQLiteTrackingStore(config.tracking.db_path)
-    recovery = build_as400_recovery(config, secrets, sqlite_store=sqlite)
+    try:
+        recovery = build_as400_recovery(config, secrets, sqlite_store=sqlite)
+    except Exception:
+        sqlite.close()
+        raise
     try:
         return recovery.recover(batch_id=batch_id, apply=apply)
     finally:
+        recovery.close()  # store AS400 + fuente RVABREP del wiring
         sqlite.close()
 
 

@@ -100,8 +100,7 @@ class TestRecover:
                 pane.query_one("#sy-dry", Button).press()
                 assert await _wait_for(pilot, lambda: apply_btn.disabled is False)
                 assert calls == [{"batch_id": "batch-1", "apply": False}]
-                out = str(pane.query_one("#sy-out", Static).renderable)
-                assert "a recuperar=2" in out
+                assert "a recuperar=2" in pane.output_text()
                 # cambiar el batch_id invalida el dry-run
                 pane.query_one("#sy-batch", Input).value = "batch-2"
                 assert await _wait_for(pilot, lambda: apply_btn.disabled is True)
@@ -132,8 +131,7 @@ class TestRecover:
                 await goto(pilot, app, "8")
                 pane = app.query_one(SyncPane)
                 pane.query_one("#sy-dry", Button).press()
-                out = pane.query_one("#sy-out", Static)
-                assert await _wait_for(pilot, lambda: "already_present=1" in str(out.renderable))
+                assert await _wait_for(pilot, lambda: "already_present=1" in pane.output_text())
                 assert pane.query_one("#sy-apply", Button).disabled is True
 
         asyncio.run(_run())
@@ -160,7 +158,9 @@ class TestResolve:
                 await goto(pilot, app, "8")
                 pane = app.query_one(SyncPane)
                 pane.query_one("#sy-txn", Input).value = "0000007"
+                assert pane.query_one("#sy-objid", Input).display is False
                 pane.query_one("#sy-prefer").value = "local"  # type: ignore[attr-defined]
+                assert await _wait_for(pilot, lambda: pane.query_one("#sy-objid", Input).display)
                 # sin cm_object_id: no llama y avisa
                 pane.query_one("#sy-resolve", Button).press()
                 await pilot.pause()
@@ -171,7 +171,6 @@ class TestResolve:
                 app.screen.query_one("#yes", Button).press()
                 assert await _wait_for(pilot, lambda: len(calls) == 1)
                 assert calls[0] == {"txn": "0000007", "prefer": "local", "cm_object_id": "cmis-9"}
-                out = pane.query_one("#sy-out", Static)
-                assert await _wait_for(pilot, lambda: "resolved 0000007" in str(out.renderable))
+                assert await _wait_for(pilot, lambda: "resolved 0000007" in pane.output_text())
 
         asyncio.run(_run())

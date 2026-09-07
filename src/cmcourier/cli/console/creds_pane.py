@@ -19,6 +19,7 @@ from textual.app import ComposeResult
 from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import Button, Input, Label, Static
 
+from cmcourier.cli.console.overrides import apply_overrides
 from cmcourier.cli.console.state import AS400_MAX_TRIES
 from cmcourier.cli.doctor import CheckResult, CheckStatus, check_as400, check_cmis
 
@@ -212,5 +213,6 @@ def run_single_check(which: str, console: ConsoleApp) -> tuple[CheckResult, floa
     start = time.monotonic()
     secrets = console.state.creds.to_secrets()
     fn = check_cmis if which == "cmis" else check_as400
-    result = fn(console.config, secrets)
+    # 127: misma config efectiva que el doctor y la corrida.
+    result = fn(apply_overrides(console.config, console.state.overrides), secrets)
     return result, (time.monotonic() - start) * 1000.0

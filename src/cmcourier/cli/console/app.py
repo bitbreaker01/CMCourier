@@ -21,6 +21,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Select, Static, TabbedContent, TabPane
@@ -591,7 +592,19 @@ class ConsoleApp(App[None]):
         effective = apply_overrides(self.config, self.state.overrides)
 
         def work() -> None:
-            report = run_doctor(effective, self.state.creds.to_secrets(), selected=group)
+            try:
+                report = run_doctor(effective, self.state.creds.to_secrets(), selected=group)
+            except Exception as exc:  # noqa: BLE001 — el worker nunca revienta la UI
+                report = DoctorReport(
+                    results=(
+                        CheckResult(
+                            name="doctor",
+                            status=CheckStatus.FAIL,
+                            message=f"{type(exc).__name__}: {exc}",
+                        ),
+                    ),
+                    elapsed_seconds=0.0,
+                )
             self.call_from_thread(apply_cb, report, group)
 
         self.run_worker(work, thread=True, exclusive=True)
@@ -617,18 +630,30 @@ class ConsoleApp(App[None]):
         st = self.state
         env = "⚠ PRODUCCIÓN" if self.config.environment == "prd" else "staging"
         steps = st.next_steps(as400_required=self.as400_required())
+        markup = Content.from_markup
+        kind = getattr(self.config.trigger, "kind", "?")
         lines = [
-            f"[b]config[/b]  {self.config_path}",
-            f"[b]entorno[/b] {env}    [b]trigger[/b] {getattr(self.config.trigger, 'kind', '?')}"
-            f"    [b]modo[/b] {self.config.processing.mode}",
-            "",
-            "[b $accent]SIGUIENTE PASO[/]",
-            *[("  [green]✔[/green] " if done else "  [b]→[/b] ") + text for done, text in steps],
-            "",
-            "[b $accent]CONEXIONES[/]",
-            f"  CMIS   {st.conn['cmis'].status:<8} {st.conn['cmis'].message[:70]}",
-            f"  AS400  {st.conn['as400'].status:<8} "
-            + ("(no requerida para esta config) " if not self.as400_required() else "")
-            + st.conn["as400"].message[:60],
+            markup(f"[b]config[/b]  {self.config_path}"),
+            markup(
+                f"[b]entorno[/b] {env}    [b]trigger[/b] {kind}"
+                f"    [b]modo[/b] {self.config.processing.mode}"
+            ),
+            Content(""),
+            markup("[b $accent]SIGUIENTE PASO[/]"),
+            *[
+                markup("  [green]✔[/green] " if done else "  [b]→[/b] ") + Content(text)
+                for done, text in steps
+            ],
+            Content(""),
+            markup("[b $accent]CONEXIONES[/]"),
+            # Los mensajes de conexión son cuerpos de error EXTERNOS (`[IBM][...]`,
+            # JSON): van como Content plano — `textual.markup.escape` NO cubre tags
+            # en mayúscula y el parser sí los traga (bug de Textual 5.3).
+            Content(f"  CMIS   {st.conn['cmis'].status:<8} {st.conn['cmis'].message[:70]}"),
+            Content(
+                f"  AS400  {st.conn['as400'].status:<8} "
+                + ("(no requerida para esta config) " if not self.as400_required() else "")
+                + st.conn["as400"].message[:60]
+            ),
         ]
-        self.q("#inicio-body", Static).update("\n".join(lines))
+        self.q("#inicio-body", Static).update(Content("\n").join(lines))

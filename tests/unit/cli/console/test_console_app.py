@@ -283,3 +283,23 @@ class TestMarkupSafety:
                 assert nasty in str(app.query_one("#msg-cmis", Static).renderable)
 
         asyncio.run(_run())
+
+    def test_inicio_escapes_connection_messages(self, tmp_path: Path) -> None:
+        """Antagonista 128: [1] INICIO interpola los mensajes de conexión
+        (`[IBM][...]`, JSON) en un Static CON markup → deben ir escapados."""
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                nasty = "[IBM][System i Access ODBC Driver] rawPassword [mandatory]"
+                app.state.record_conn_result("cmis", ok=False, message=nasty)
+                app._render_inicio()  # noqa: SLF001
+                await pilot.pause()
+                from textual.widgets import Static
+
+                body = app.query_one("#inicio-body", Static)
+                # renderable = markup crudo (escapado); el texto visible lo recupera intacto
+                assert nasty[:70] in body.render().plain  # type: ignore[union-attr]
+
+        asyncio.run(_run())

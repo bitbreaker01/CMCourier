@@ -400,10 +400,10 @@ class TestNiarvilogColumnsWiring049:
 
     def test_translator_maps_all_fields(self) -> None:
         from cmcourier.config.schema import NiarvilogColumnsModel
-        from cmcourier.config.wiring import _niarvilog_columns_from_schema
+        from cmcourier.config.wiring import niarvilog_columns_from_schema
 
         model = NiarvilogColumnsModel(status_column="ESTADO", txn_num_column="NUMTRX")
-        cols = _niarvilog_columns_from_schema(model)
+        cols = niarvilog_columns_from_schema(model)
         assert cols.status == "ESTADO"
         assert cols.txn_num == "NUMTRX"
         # untouched → canonical defaults

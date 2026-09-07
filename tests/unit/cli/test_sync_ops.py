@@ -7,7 +7,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import cmcourier.cli.sync_ops as ops
-from cmcourier.cli.sync_ops import SyncOpError, sync_resolve, sync_unavailable_reason
+from cmcourier.cli.sync_ops import (
+    SyncOpError,
+    sync_recover,
+    sync_resolve,
+    sync_status,
+    sync_unavailable_reason,
+)
 from cmcourier.config.loader import Secrets
 
 pytestmark = pytest.mark.unit
@@ -71,3 +77,69 @@ class TestResolve:
             )
         as400.mark_uploaded_by_txn.assert_called_once_with(trnnum="7", cm_object_id="cmis-1")
         assert "cmis-1" in msg
+        sqlite.close.assert_called_once()
+        as400.close.assert_called_once()
+
+    def test_prefer_local_with_txn_missing_raises_and_closes(self) -> None:
+        sqlite, as400 = self._stores(None)
+        with (
+            patch.object(ops, "build_sync_stores", return_value=(sqlite, as400)),
+            pytest.raises(SyncOpError, match="not present"),
+        ):
+            sync_resolve(_config(), _secrets(), txn="7", prefer="local", cm_object_id="cmis-1")
+        as400.mark_uploaded_by_txn.assert_not_called()
+        sqlite.close.assert_called_once()
+        as400.close.assert_called_once()
+
+    def test_prefer_as400_rejects_non_terminal_row(self) -> None:
+        sqlite, as400 = self._stores(MagicMock(stscod="I", objidn=""))
+        with (
+            patch.object(ops, "build_sync_stores", return_value=(sqlite, as400)),
+            pytest.raises(SyncOpError, match="STSCOD"),
+        ):
+            sync_resolve(_config(), _secrets(), txn="7", prefer="as400", cm_object_id=None)
+        as400.close.assert_called_once()
+
+
+class TestStatus:
+    def test_status_uses_only_as400_and_closes_it(self) -> None:
+        as400 = MagicMock()
+        as400.cleanup_stale_in_progress.return_value = 3
+        with (
+            patch.object(ops, "build_as400_store", return_value=as400),
+            patch.object(ops, "SQLiteTrackingStore") as sqlite_cls,
+        ):
+            result = sync_status(_config(), _secrets())
+        assert result.stale_cleaned == 3
+        sqlite_cls.assert_not_called()
+        as400.close.assert_called_once()
+
+    def test_status_unavailable_raises(self) -> None:
+        with pytest.raises(SyncOpError, match="as400_sync"):
+            sync_status(_config(enabled=False), _secrets())
+
+
+class TestRecover:
+    def test_recover_closes_recovery_and_sqlite(self) -> None:
+        recovery, sqlite = MagicMock(), MagicMock()
+        recovery.recover.return_value = "result"
+        with (
+            patch.object(ops, "SQLiteTrackingStore", return_value=sqlite),
+            patch.object(ops, "build_as400_recovery", return_value=recovery) as build,
+        ):
+            out = sync_recover(_config(), _secrets(), batch_id="b1", apply=False)
+        assert out == "result"
+        assert build.call_args.kwargs["sqlite_store"] is sqlite
+        recovery.recover.assert_called_once_with(batch_id="b1", apply=False)
+        recovery.close.assert_called_once()
+        sqlite.close.assert_called_once()
+
+    def test_recover_closes_sqlite_when_build_fails(self) -> None:
+        sqlite = MagicMock()
+        with (
+            patch.object(ops, "SQLiteTrackingStore", return_value=sqlite),
+            patch.object(ops, "build_as400_recovery", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError),
+        ):
+            sync_recover(_config(), _secrets(), batch_id=None, apply=False)
+        sqlite.close.assert_called_once()

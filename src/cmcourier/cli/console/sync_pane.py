@@ -10,13 +10,15 @@ from __future__ import annotations
 
 __all__ = ["SyncPane"]
 
+import contextlib
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal, TypeVar
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, Input, Select, Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
+from textual.widgets import Button, Input, Log, Select, Static
 
 from cmcourier.adapters.tracking.as400_niarvilog import As400CoordinationError
 from cmcourier.cli.sync_ops import (
@@ -38,10 +40,13 @@ _PREFER_OPTIONS = [
     ("as400 manda (read-only)", "as400"),
     ("local manda (escribe en AS400)", "local"),
 ]
-_MAX_OUT_LINES = 40
+_MAX_OUT_LINES = 200
 
 
-class SyncPane(Vertical):
+class SyncPane(VerticalScroll):
+    """``VerticalScroll``: los tres bloques + la salida superan las 24
+    filas de una terminal chica (hallazgo del antagonista 128)."""
+
     DEFAULT_CSS = """
     SyncPane { padding: 1 2; }
     SyncPane .intro { color: $text-muted; margin-bottom: 1; }
@@ -54,8 +59,7 @@ class SyncPane(Vertical):
     SyncPane .frow Input { width: 34; }
     SyncPane .frow Select { width: 40; }
     SyncPane .frow Button { margin-left: 1; }
-    SyncPane #sy-out { height: 1fr; border: solid $surface-lighten-2; padding: 0 1;
-                       overflow-y: auto; }
+    SyncPane #sy-out { height: 10; border: solid $surface-lighten-2; padding: 0 1; }
     """
 
     def __init__(self, console: ConsoleApp) -> None:
@@ -66,7 +70,6 @@ class SyncPane(Vertical):
         # E4: `aplicar` sólo tras un dry-run del MISMO batch_id con filas.
         self._dry_batch: str | None = None
         self._dry_rows = 0
-        self._out: list[str] = []
 
     # ------------------------------------------------------------ layout
 
@@ -99,9 +102,11 @@ class SyncPane(Vertical):
             with Horizontal(classes="frow"):
                 yield Input(placeholder="cm_object_id (solo con local)", id="sy-objid")
                 yield Button("resolver", id="sy-resolve")
-        yield Static("", id="sy-out", markup=False)
+        # ``Log``: texto plano (sin markup), auto-scroll al final y tope de líneas.
+        yield Log(id="sy-out", max_lines=_MAX_OUT_LINES, auto_scroll=True)
 
     def on_mount(self) -> None:
+        self._sync_objid_visibility()
         self.refresh_availability()
 
     # ------------------------------------------------------------ disponibilidad
@@ -116,7 +121,7 @@ class SyncPane(Vertical):
             avail.update(f"✔ sync habilitado · {sync_cfg.library}.{sync_cfg.table}")
             avail.remove_class("off")
         else:
-            hint = "  → cargalas en [2] CREDENCIALES" if "credenciales" in reason else ""
+            hint = "  → cargalas en [2] CREDENCIALES" if "credentials" in reason else ""
             avail.update(f"✘ {reason}{hint}")
             avail.add_class("off")
         self._sync_buttons()
@@ -137,10 +142,13 @@ class SyncPane(Vertical):
 
     def _log(self, text: str) -> None:
         stamp = time.strftime("%H:%M:%S")
+        out = self.query_one("#sy-out", Log)
         for line in text.splitlines() or [""]:
-            self._out.append(f"{stamp}  {line}")
-        del self._out[:-_MAX_OUT_LINES]
-        self.query_one("#sy-out", Static).update("\n".join(self._out))
+            out.write_line(f"{stamp}  {line}")
+
+    def output_text(self) -> str:
+        """Salida acumulada (para tests y para copiar)."""
+        return "\n".join(self.query_one("#sy-out", Log).lines)
 
     def _run(self, label: str, op: Callable[[], _T], on_ok: Callable[[_T], None]) -> None:
         """Corre `op` en worker thread; errores al panel, nunca a la UI."""
@@ -150,11 +158,13 @@ class SyncPane(Vertical):
 
         def done(result: _T | None, error: str | None) -> None:
             self._busy = False
-            if error is not None:
-                self._log(f"✘ {label}: {error}")
-            elif result is not None:
-                on_ok(result)
-            self._sync_buttons()
+            # En teardown los widgets pueden no estar: nunca reventar el worker.
+            with contextlib.suppress(NoMatches):
+                if error is not None:
+                    self._log(f"✘ {label}: {error}")
+                else:
+                    on_ok(result)  # type: ignore[arg-type]
+                self._sync_buttons()
 
         def work() -> None:
             try:
@@ -305,3 +315,11 @@ class SyncPane(Vertical):
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "sy-batch":
             self._sync_buttons()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "sy-prefer":
+            self._sync_objid_visibility()
+
+    def _sync_objid_visibility(self) -> None:
+        # cm_object_id sólo tiene sentido con `local manda`.
+        self.query_one("#sy-objid", Input).display = self._prefer() == "local"

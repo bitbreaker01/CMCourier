@@ -716,8 +716,14 @@ def _check_cmis_properties_alignment(config: PipelineConfig, secrets: Secrets) -
 def _check_sample_dry_run(config: PipelineConfig, secrets: Secrets) -> CheckResult:
     if isinstance(config.trigger, SingleDocTriggerConfig):
         return _skip("sample_dry_run", "trigger_kind_single_doc_requires_cli_args")
+    # Sin process pool: el dry-run camina S4 in-process y el pool de
+    # ``build_pipeline`` sólo se apaga en ``atexit`` — en la consola, cada
+    # corrida del doctor dejaría N procesos vivos (antagonista 128).
+    no_pool = config.model_copy(
+        update={"processing": config.processing.model_copy(update={"s4_use_processes": False})}
+    )
     try:
-        pipeline = build_pipeline(config, secrets)
+        pipeline = build_pipeline(no_pool, secrets)
     except Exception as exc:  # noqa: BLE001
         return _fail("sample_dry_run", exc, {"stage": "construction"})
     # Re-extraemos los colaboradores que necesitamos (el orchestrator los esconde).
@@ -732,7 +738,10 @@ def _check_sample_dry_run(config: PipelineConfig, secrets: Secrets) -> CheckResu
     descriptor = (
         str(config.trigger.csv_path) if isinstance(config.trigger, CsvTriggerConfig) else ""
     )
-    return _dry_run_first_doc(services, source_descriptor=descriptor)
+    try:
+        return _dry_run_first_doc(services, source_descriptor=descriptor)
+    finally:
+        pipeline.tracking_store.close()
 
 
 # ---------------------------------------------------------------------------

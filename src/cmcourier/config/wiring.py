@@ -272,7 +272,7 @@ def _build_idempotency_coordinator(
         password=secrets.as400_password,
         library=sync_cfg.library,
         table=sync_cfg.table,
-        columns=_niarvilog_columns_from_schema(sync_cfg.columns),
+        columns=niarvilog_columns_from_schema(sync_cfg.columns),
         stale_in_progress_minutes=sync_cfg.stale_in_progress_minutes,
         retry_attempts=sync_cfg.retry_attempts,
         retry_base_delay_s=sync_cfg.retry_base_delay_s,
@@ -317,7 +317,7 @@ def build_as400_recovery(
         password=secrets.as400_password,
         library=sync_cfg.library,
         table=sync_cfg.table,
-        columns=_niarvilog_columns_from_schema(sync_cfg.columns),
+        columns=niarvilog_columns_from_schema(sync_cfg.columns),
         stale_in_progress_minutes=sync_cfg.stale_in_progress_minutes,
         retry_attempts=sync_cfg.retry_attempts,
         retry_base_delay_s=sync_cfg.retry_base_delay_s,
@@ -332,6 +332,7 @@ def build_as400_recovery(
         as400_store=as400_store,
         indexing_service=indexing_service,
         mapping_service=build_mapping_service(config.mapping),
+        rvabrep_source=rvabrep_src,
     )
 
 
@@ -516,7 +517,7 @@ def _indexing_columns_from_schema(model: IndexingColumnsModel) -> IndexingColumn
     )
 
 
-def _niarvilog_columns_from_schema(model: NiarvilogColumnsModel) -> NiarvilogColumns:
+def niarvilog_columns_from_schema(model: NiarvilogColumnsModel) -> NiarvilogColumns:
     return NiarvilogColumns(
         system_id=model.system_id_column,
         txn_num=model.txn_num_column,

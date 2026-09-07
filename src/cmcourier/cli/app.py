@@ -37,7 +37,7 @@ from cmcourier.cli.commands.diagnose import diagnose_command
 from cmcourier.cli.commands.inspect import inspect_group
 from cmcourier.cli.commands.mock import mock_group
 from cmcourier.cli.commands.sync import sync_group
-from cmcourier.cli.doctor import DoctorReport, run_doctor
+from cmcourier.cli.doctor import CHECK_NAMES, DoctorReport, run_doctor
 from cmcourier.cli.logging_setup import configure as configure_logging
 from cmcourier.config.loader import load_config, load_secrets
 from cmcourier.config.schema import CsvTriggerConfig, PipelineConfig
@@ -478,9 +478,11 @@ def single_doc_run_command(
 @click.option(
     "--check",
     "selected_check",
-    type=click.Choice(["connections", "mapping", "metadata", "cm-types", "cm-targets", "all"]),
+    type=click.Choice(
+        ["connections", "mapping", "metadata", "cm-types", "cm-targets", "all", *CHECK_NAMES]
+    ),
     default="all",
-    help="Run only the named check group (default: all).",
+    help="Run only the named check group, or a single check by name (default: all).",
 )
 @click.option("--log-level", type=click.Choice(_LOG_LEVELS, case_sensitive=False), default="INFO")
 def doctor_command(config_path: Path, selected_check: str, log_level: str) -> None:

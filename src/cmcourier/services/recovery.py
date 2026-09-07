@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from cmcourier.adapters.tracking.as400_niarvilog import As400NiarvilogStore
 from cmcourier.adapters.tracking.sqlite import SQLiteTrackingStore, UploadedRecord
 from cmcourier.domain.exceptions import IDRViNotMappedError
+from cmcourier.domain.ports import IDataSource
 from cmcourier.services.indexing import IndexingService
 from cmcourier.services.mapping import MappingService
 
@@ -60,11 +61,20 @@ class As400Recovery:
         as400_store: As400NiarvilogStore,
         indexing_service: IndexingService,
         mapping_service: MappingService,
+        rvabrep_source: IDataSource | None = None,
     ) -> None:
         self._sqlite = sqlite_store
         self._as400 = as400_store
         self._indexing = indexing_service
         self._mapping = mapping_service
+        self._rvabrep_source = rvabrep_source
+
+    def close(self) -> None:
+        """128: cierra lo que el wiring construyó para esta recovery (el
+        store AS400 y la fuente RVABREP). El SQLite es del caller."""
+        self._as400.close()
+        if self._rvabrep_source is not None:
+            self._rvabrep_source.close()
 
     def recover(self, *, batch_id: str | None = None, apply: bool = False) -> RecoveryResult:
         """Reconcilia SQLite → AS400 por txn.
