@@ -135,12 +135,15 @@ Para un servidor de migración **sin internet** no se usa `pip install` — se
 arma un bundle autocontenido en una máquina con internet y se transfiere:
 
 ```bash
-bash installer/build-offline-bundle.sh        # destino Linux
-# .\installer\build-offline-bundle.ps1         # destino Windows
+bash installer/build-offline-bundle.sh --python-version 3.11              # destino Linux
+# .\installer\build-offline-bundle.ps1 -PythonVersion 3.11                 # destino Windows (desde Windows)
+# pwsh -File installer/build-offline-bundle.ps1 -PythonVersion 3.11        # destino Windows (desde Linux/macOS)
 ```
 
-El `.zip` resultante incluye CMCourier, todas las dependencias y un
-`install.{sh,bat}`. Detalle completo en
+`X.Y` tiene que ser la versión EXACTA de Python del servidor. El `.zip`
+resultante incluye CMCourier, todas las dependencias y un `install.{sh,bat}`
+que comprueba esa versión antes de instalar. Prerequisitos del servidor,
+verificación del bundle y detalle completo en
 [`docs/how-to/build-offline-installer.md`](docs/how-to/build-offline-installer.md).
 
 ### Smoke test
