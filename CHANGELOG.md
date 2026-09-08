@@ -15,6 +15,106 @@ abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
+## [0.112.0] — 2026-09-07 — **Consola: editor de conexiones con alias y editor de configuración completo**
+
+Plan C de la consola: la configuración ENTERA se administra desde la
+TUI. Lo que 0.111.0 dejaba como "editar el YAML libremente — pendiente"
+ahora existe, sobre un único escritor del archivo que conserva
+comentarios, orden y estilo. Specs 137–140, TDD estricto y revisión
+antagonista.
+
+### Added
+
+- **Spec 137 — `YamlDocument`: un solo escritor del YAML.**
+  `config/yaml_doc.py` envuelve `ruamel.yaml` en modo round-trip:
+  `get` / `set` / `delete` / `append` por path, `apply_edits`, y
+  `write(verify=…)` que escribe a un `.tmp` en el mismo directorio,
+  recarga el resultado con `load_config`, hace backup
+  `<archivo>.bak-<fecha>` y reemplaza de forma atómica respetando
+  symlinks y modo del archivo. Preserva comentarios, orden de claves,
+  comillas, `CRLF` y la indentación detectada del archivo; los
+  `None` salen como `null`; una clave nueva de primer nivel entra con
+  una línea en blanco antes. `persist_overrides` (`w` en `[3]`) ahora
+  se apoya en él.
+- **Spec 138 — conexiones con alias desde `[2]`.** `n` abre el modal
+  de conexión nueva (alias, kind `as400` / `mssql`, un input por campo
+  del schema con validación previa: alias `[a-z][a-z0-9_]{0,31}` no
+  reservado y no repetido, `port` 1..65535, booleanos `true/false/sí/no`)
+  y permite apuntar en el mismo paso los sitios compatibles
+  (`indexing.source`, `metadata.sources[i]`, `tracking.as400_sync`).
+  Cada tarjeta gana **editar** (campo por campo: conserva el estilo y
+  los comentarios del alias), **quitar** (bloqueado con la lista de
+  sitios si alguno lo usa) y, para una conexión inline, **mover al
+  registro** con alias. Al YAML van `kind` y los campos no vacíos —
+  los defaults del schema no se escriben. Tras escribir se recarga la
+  config, se marca el doctor como desactualizado y se reconstruyen las
+  tarjetas; las credenciales de sesión ya cargadas se conservan.
+- **Spec 139 — `[9] YAML`: editor de configuración generado del
+  schema.** `schema_form.py` recorre `PipelineConfig` por introspección
+  pydantic (secciones anidadas, discriminadores `kind`, listas de
+  modelos, `Literal`, `Optional`, restricciones `ge/le/min_length`,
+  descripciones como ayuda) y arma un formulario colapsable por
+  sección. `v` valida el borrador con pydantic y marca cada error en su
+  campo; `w` pide confirmación y escribe SÓLO lo que cambió
+  (`diff_edits` → `Edit`s por path; los ítems de lista se reemplazan
+  índice a índice y se borran de mayor a menor), con backup y
+  verificación por recarga. `connections` se administra en `[2]`: en
+  `[9]` una conexión inline se ve como `(inline — editar en [2])`. Si
+  el formulario está limpio, cambiar de pestaña o escribir desde `[2]`
+  / `[3]` lo recarga del archivo.
+- **Spec 140 — documentación del editor.** Guía de la consola con
+  "Editar conexiones desde `[2]`", "Editar el archivo completo desde
+  `[9]`" y un ejercicio guiado nuevo; `cli.md` con la pestaña `9·YAML`,
+  las teclas `n` / `v` / `w` y la sección "Archivos que escribe la
+  consola"; `config-reference.yaml` (header `0.112.0`);
+  `operations-console.md` con "Un solo escritor del YAML"; el diagrama
+  de flujo de la consola gana `[9]`.
+
+### Changed
+
+- Las pestañas son nueve: `1–9` / `F1–F9`. `w` se despacha por pestaña
+  activa (`[3]` overrides, `[9]` formulario); `u` en `[9]` descarta el
+  borrador y vuelve a lo que hay en disco.
+- `w` en `[3]` ya no se niega ante YAML en flow style, anchors o
+  claves repetidas en distintos padres: `ruamel` los conserva. Sigue
+  rechazando claves duplicadas (`YamlDocumentError`).
+- `[2]` muestra una tarjeta por alias declarado en `connections:`
+  aunque ningún sitio lo use todavía ("sin uso — asignala a un sitio
+  desde editar"); antes sólo aparecían las conexiones referenciadas.
+- `cmcourier doctor` / `[4]`: `check_connection` resuelve un alias
+  declarado pero no referenciado contra `connections:` en vez de
+  fallar con "no está en la config".
+- Dependencia nueva: `ruamel.yaml >= 0.18, < 0.19` (también en el
+  hook de `mypy` de pre-commit).
+
+### Fixed
+
+- **Revisión antagonista de 137–139.** Bloqueante: editar un alias
+  cuyo bloque era un ancla YAML (`rvi: &base` / `otro: *base`)
+  reescribía TAMBIÉN la otra conexión — ruamel devuelve el mismo nodo —
+  y el toast decía "editada"; `YamlDocument` ahora se niega a mutar un
+  nodo compartido por un alias ("editalo a mano"). Importantes: vaciar
+  un campo heredado por merge key (`<<: *base`) no borraba nada
+  (ahora es un error explícito); `plan_delete` ignoraba un
+  `tracking.as400_sync` deshabilitado que referenciaba el alias, así
+  que la baja pasaba el guard amistoso y caía en el error de pydantic
+  (el sitio cuenta si está habilitado O tiene `connection`); "quitar"
+  prometía descartar las credenciales de sesión del alias y no lo
+  hacía (una recreación del alias nacía con la contraseña vieja —
+  riesgo de lockout AS400); la cabecera de `[9]` decía "1 cambios" y
+  `w` "sin cambios" cuando el operador volvía al valor original de un
+  escalar entrecomillado (`to_plain` ahora devuelve tipos builtin, sin
+  `ScalarString`/`ScalarInt`/`TaggedScalar` vivos); cambiar un `kind`
+  en `[9]` vaciaba el bloque sin vuelta atrás — tecla `u` descarta el
+  borrador de `[9]`. Menores: `port` con dígitos Unicode (`²`)
+  reventaba el modal en vez de marcar el campo; `persist_overrides`
+  envuelve `OSError` en `PersistError`; `plan_move_inline` era código
+  muerto (el botón "mover al registro" pasa por el modal y
+  `plan_write`, escribiendo sólo los campos no vacíos); un archivo con
+  EOL mixto se escribe entero en CRLF, ahora documentado.
+
+---
+
 ## [0.111.0] — 2026-09-07 — **Consola: pausa y re-auth en caliente, techo manual de workers, ETA de corrida y overrides al YAML**
 
 Cierre de la deuda funcional que la consola anunciaba desde la 125: todo
