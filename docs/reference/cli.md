@@ -104,7 +104,7 @@ Necesita un TTY real — no funciona por un pipe ni en un editor sin terminal in
 
 ### Pestañas
 
-`1`–`9` o `F1`–`F9`. Los `F`-keys tienen `priority=True`: funcionan **aun con el foco dentro de un campo de texto**, los dígitos no.
+`1`–`9`,`0` o `F1`–`F10`. Los `F`-keys tienen `priority=True`: funcionan **aun con el foco dentro de un campo de texto**, los dígitos no. La décima pantalla no puede ser la tecla "10", así que usa el `0` (y `F10`) — `_TABS` la agrega al final, los ids existentes no se mueven.
 
 | # | Pestaña | Qué hace |
 |---|---------|----------|
@@ -117,6 +117,7 @@ Necesita un TTY real — no funciona por un pipe ni en un editor sin terminal in
 | `7` | BATCHES | Tabla de batches con su auditoría; detalle, retry y export. |
 | `8` | SYNC | La versión interactiva de `sync status` / `recover` / `resolve` (128). |
 | `9` | YAML | Formulario generado del schema sobre el YAML completo (137–139): `v` valida, `w` escribe (con backup), `u` descarta el borrador. `connections` se administra en `[2]`, acá es de sólo lectura. |
+| `0` | PRUEBA | Tiro de prueba (141): sube UN documento sintético a un código CM puntual y muestra la respuesta CRUDA del servidor — sin tracking, sin reintentos. |
 
 ### Teclas
 
@@ -124,7 +125,7 @@ Copiadas de `HelpScreen.HELP` (`cli/console/app.py`) — la ayuda `?` dentro de 
 
 | Tecla | Ámbito | Acción |
 |-------|--------|--------|
-| `1`–`9` / `F1`–`F9` | global | Cambiar de pantalla. |
+| `1`–`9`,`0` / `F1`–`F10` | global | Cambiar de pantalla. |
 | `?` | global | Ayuda (teclas + leyenda S0–S7 + lista de checks del doctor). |
 | `q` | global | Salir. Confirma si hay corrida — salir **no** la cancela, sigue en background. |
 | `Esc` | global | Cerrar modal / soltar el foco de un campo. |
@@ -147,8 +148,11 @@ Copiadas de `HelpScreen.HELP` (`cli/console/app.py`) — la ayuda `?` dentro de 
 | `v` | `[9]` | Validar el YAML editado contra el schema — pinta los errores por fila (139). |
 | `w` | `[9]` | Escribir el formulario editado al YAML completo, con confirmación y backup (139). |
 | `u` | `[9]` | Descartar los cambios del formulario y volver al archivo en disco (139). |
+| `↵` | `[0]` | Validar el código CM tipeado en el campo (141). |
+| `s` | `[0]` | Generar el documento sintético y subirlo (141) — sólo con `[0]` activa; en `[8]` la misma tecla corre el estado del sync. |
+| `d` | `[0]` | Borrar el último documento de prueba subido (141) — sólo con `[0]` activa; en `[4]` la misma tecla corre la selección del doctor. |
 
-Ojo con `r`: en `[5]` lanza y en `[6]` reanuda. Es la misma acción (`action_launch`) ruteada por la pestaña activa.
+Ojo con `r`: en `[5]` lanza y en `[6]` reanuda. Es la misma acción (`action_launch`) ruteada por la pestaña activa. Lo mismo pasa con `s` (`action_sync_status`, `[8]`/`[0]`) y con `d` (`action_doctor_run`, `[4]`/`[0]`): una sola `Binding` global, despachada según la pestaña activa.
 
 ### Overrides de sesión vs. `w`
 
@@ -198,6 +202,18 @@ El formulario sale del schema (`build_form` sobre `PipelineConfig`) contra un di
 
 Diferencia con `[3]`: `[3]` sólo toca siete escalares de rendimiento/observabilidad, con el modelo *borrador → aplicado* de sesión (`a` / `w`). `[9]` edita el archivo completo contra el schema — cualquier clave, no sólo esos siete —, sin ese nivel intermedio: lo que ves en el formulario es lo que `w` va a escribir. Las dos pestañas comparten el mismo escritor (`YamlDocument`, con su backup) pero son caminos independientes.
 
+### Tiro de prueba (`[0]`)
+
+`[0] PRUEBA` (141) sube UN documento sintético a un código de Content Manager puntual, sin pasar por triggers ni por el pipeline. No hay override de sesión ni escritura al YAML acá — es puro I/O contra CMIS.
+
+1. **Validar** (`Input#code` + `↵`, o el botón "validar (↵)") busca el código con `MappingService.get_by_cm_code`. Sin match: `#code-err` con hasta 5 sugerencias por similitud (`difflib.get_close_matches` sobre `cm_codes()`). Con match: el panel `#target` (`IDRVI`, `CMISType`, `CMISFolder` — con `Select#row` si varias filas del mapping apuntan al mismo `IDCM`) y un `Input#m-<n>` por metadato requerido. Con credenciales CMIS de sesión, además se consulta `get_type_definition` / `verify_folder_exists` en un worker (`tipo ✓/✗ · carpeta ✓/✗`); sin credenciales, el aviso es "sin credenciales CMIS — validado sólo contra el mapping ([2])". Un `✗` **no** bloquea el upload.
+2. **Generar y subir** (`Select#fmt`: `pdf`/`tiff`/`jpeg`/`png`, default `pdf`; `Input#size`: `parse_size`, default `200kb`, rango 1 KB–50 MB) — tecla `s` o el botón. Exige credenciales CMIS de sesión (si faltan, salta a `[2]`, como `[5]`) y que no haya una corrida activa. `validate_values` marca campos con error y no sube si falta algún requerido. En `prd` pide tipear `PRD` (mismo mecanismo que `[5]`); en staging confirma con el nombre del documento y el destino.
+3. El upload corre en `run_worker(thread=True)` y llama `CmisUploader.upload_raw`: UN solo POST `createDocument` con el multipart de siempre — **sin reintentos, sin re-auth, sin backoff**. Un 401/4xx/5xx se muestra tal cual en pantalla; sólo una falla de transporte (`httpx.HTTPError`, timeout) sube como excepción.
+4. **`#result`** (`TextArea` de sólo lectura) vuelca la respuesta CRUDA: `HTTP <status> <reason> · <elapsed> ms · <name> (<size>)`, luego `## headers`, `## body` (completo — el pipeline lo trunca a 1024 caracteres, acá no) y `## curl` (el equivalente, contraseña enmascarada). `size_note` aparece como aviso amarillo si el archivo sintético no llegó al tamaño pedido.
+5. **`#history`** guarda hasta 20 intentos de la sesión (más reciente arriba). Tecla `d` (o el botón "borrar" de una línea) borra el último intento con `objectId` vía `delete_object` (Browser Binding, `cmisaction=delete`, `allVersions=true`); la línea pasa a `(borrado)` y pierde el botón.
+
+El documento **no pasa por tracking ni por idempotencia**: no aparece en `[7]` BATCHES ni en `migration_log` — la pantalla lo dice en una línea de pista.
+
 ### Archivos que escribe la consola
 
 Toda escritura al YAML desde la consola —overrides de `[3]` (135), conexiones de `[2]` (138) o el formulario de `[9]` (139)— pasa por el mismo escritor (`config/yaml_doc.py`, 137):
@@ -208,6 +224,8 @@ Toda escritura al YAML desde la consola —overrides de `[3]` (135), conexiones 
 4. Reemplaza el original por el temporal de forma atómica (mismo directorio, permisos copiados del original).
 
 Ninguno de los tres caminos deja el archivo a medias: si la verificación falla, no hay ni backup ni cambio.
+
+`[0] PRUEBA` (141) es aparte y no toca el YAML: al apretar `s`, genera el documento sintético directo en `assembly.temp_dir` (el mismo directorio de trabajo que usa el ensamblado de S4) con el nombre `PRUEBA-<IDCM>-<fecha>.<ext>`, lo sube con `upload_raw` y lo borra del disco en un `finally` apenas termina el POST — suba bien o falle.
 
 ### Lock de config
 

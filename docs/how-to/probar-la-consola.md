@@ -58,7 +58,7 @@ uv run cmcourier console --config sample/config-local.yaml
 ```
 
 Deberías ver la barra superior con **`STAGING`** en verde, el reloj a la
-derecha, y nueve pestañas (`1`-`9` o `F1`-`F9`). Abajo, el footer con las teclas (azul =
+derecha, y diez pestañas (`1`-`9`,`0` o `F1`-`F10`). Abajo, el footer con las teclas (azul =
 global, gris = de la pantalla actual).
 
 En cualquier momento: **`?`** abre la ayuda completa (incluye la leyenda
@@ -319,6 +319,74 @@ opcionalmente, se **escribe** con `w`. `[9]` edita cualquier clave del
 YAML directo, sin ese nivel intermedio — lo que ves en el formulario es
 lo que `w` va a escribir. Y `connections` no se toca desde ninguna de las
 dos: eso es `[2]`.
+
+### Probar un código antes de la corrida (`[0]`)
+
+`[0] PRUEBA` (141) sube UN documento sintético a un código de Content
+Manager puntual — sin triggers, sin RVABREP, sin el pipeline completo —
+y te muestra la respuesta CRUDA del servidor. Sirve para confirmar que
+un código está mapeado, que los metadatos que exige son los que creés,
+y sobre todo para ver qué contesta el servidor cuando algo sale mal, sin
+la resiliencia (reintentos, re-auth, body truncado) que el pipeline le
+pone en el medio.
+
+1. Andá a **`0`** (o `F10`). Escribí `ZZ99` en el campo "código CM" y
+   apretá **`↵`**: `#code-err` dice "ZZ99 no está en el mapping de esta
+   config" con hasta 5 sugerencias por similitud — no hay nada más que
+   mirar sin un código real.
+2. Borrá y escribí `CN01` (el código de `sample/MapeoRVI_CM.csv` para
+   este banco), `↵`. Aparece el panel del destino: `IDRVI FB01`,
+   `CMISType D:cmcourier:bacDoc`, `CMISFolder /cmcourier-staging/CN01`
+   (los mismos valores del CSV), y un `Input` por cada metadato
+   requerido que `sample/MetadatosCM.csv` declara para `CN01`: `CIF`,
+   `Nombre_Cliente`, `Short_Name`, `Fvenc_Inicio`, `Fvenc_Fin`. Si ya
+   cargaste las credenciales CMIS en `[2]`, además ves `tipo ✓ · carpeta
+   ✓` — la consola ya consultó el servidor en un worker; sin
+   credenciales dice "sin credenciales CMIS — validado sólo contra el
+   mapping ([2])" y eso **no** bloquea nada — el punto de la pantalla es
+   ver la respuesta del servidor, no adivinarla desde el CSV.
+3. Completá los cinco campos con cualquier valor (por ejemplo `12345678`,
+   `Cliente de prueba`, `PRUEBA`, `2024-01-01`, `2025-01-01`). Dejá el
+   formato en `pdf` (tamaño exacto, sin sorpresas) y el tamaño en
+   `200kb` (el default) — un PDF sintético de 204 800 bytes con `%PDF`
+   al inicio.
+4. Apretá **`s`** (o el botón "generar y subir (s)"). Con este YAML
+   (`environment: staging`) confirmás con "subir"; contra un YAML con
+   `environment: prd` te pediría además tipear `PRD`, igual que `[5]`.
+5. Leé `#result`. La primera línea es `HTTP 201 Created · NN ms ·
+   PRUEBA-CN01-<fecha>.pdf (204800 bytes)`. Debajo:
+   - `## headers` — los headers de la respuesta, crudos, uno por línea.
+   - `## body` — el JSON completo de `createDocument` (indentado), con
+     el `cmis:objectId` real. Nada truncado: el pipeline corta esto a
+     1024 caracteres, acá lo ves entero.
+   - `## curl` — el comando exacto para reproducir el mismo POST desde
+     una terminal, con la contraseña tapada (`-u admin:***`); todo lo
+     demás va tal cual lo tipeaste, porque lo tipeaste vos en esta
+     sesión.
+6. **Provocá un 4xx a propósito** para ver la diferencia: subí de nuevo
+   dejando un metadato vacío (el campo se marca "requerido" y no sale
+   el request), o —si tenés margen para tocar el YAML— apuntá
+   `CMISFolder` a una carpeta que no existe y mirá cómo el `## body` te
+   devuelve el error real de Alfresco/IBM CM en vez de una excepción
+   genérica.
+7. `#history` (máx. 20 líneas, más reciente arriba) queda con
+   `<hora> CN01 PRUEBA-CN01-<fecha>.pdf → 201 [<objectId>]` y un botón
+   **`borrar`**. Apretá **`d`** (borra el último intento con
+   `objectId`, sin necesidad de clickear el botón): confirmación →
+   `delete_object` → `#result` muestra la respuesta del delete y la
+   línea del historial pasa a `(borrado)`.
+
+Tres cosas para no perder de vista:
+
+- **No pasa por tracking**: el documento no aparece en `[7]` BATCHES ni
+  en `migration_log` (la pista está en la pantalla). Por eso conviene
+  borrarlo con `d` en vez de dejarlo colgado en el Content Manager.
+- **Sin reintentos ni re-auth**: `upload_raw` hace UN solo POST. Un
+  401/4xx/5xx se muestra tal cual — no hay backoff, no hay recuperación
+  de 409 buscando el objeto existente. Es la contracara de lo que hace
+  el pipeline, a propósito.
+- Sin credenciales CMIS, `s` te manda directo a `[2]`; con una corrida
+  activa, avisa "hay una corrida activa" y no sube.
 
 ---
 

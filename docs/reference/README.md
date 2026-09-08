@@ -8,7 +8,7 @@ Material de consulta — tablas, schemas, listas. Está pensado para escaneo rá
 
 | Doc | Cuándo abrirlo |
 |-----|----------------|
-| [`cli.md`](cli.md) | Cuando necesitás recordar el nombre exacto de un comando, una flag o un exit code. Incluye `console`: las 8 pestañas, la tabla de teclas y el lock de config. |
+| [`cli.md`](cli.md) | Cuando necesitás recordar el nombre exacto de un comando, una flag o un exit code. Incluye `console`: las 10 pestañas, la tabla de teclas y el lock de config. |
 | [`config-schema.md`](config-schema.md) | Cuando estás escribiendo el YAML y necesitás saber qué keys son válidas, sus defaults y sus rangos. |
 | [`config-reference.yaml`](config-reference.yaml) | El YAML anotado con **todas** las opciones, sus defaults y sus rangos, en un solo archivo copiable. |
 | [`tui-keybindings.md`](tui-keybindings.md) | Atajos de teclado de la TUI de corrida, una tabla por tab. Las de la consola están en [`cli.md`](cli.md#console--consola-de-operación-123135). |

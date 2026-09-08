@@ -71,7 +71,7 @@ cmcourier console --config prod.yaml
 
 Sólo dos flags: `--config` (required) y `--log-level` (default `WARNING`; la TUI ocupa la terminal). Necesita un TTY real — por un pipe no arranca.
 
-Arriba vas a ver la barra con el badge de entorno (verde `STAGING`, o rojo `⚠ PRODUCCIÓN` si el YAML dice `environment: prd`), y nueve pestañas que se cambian con `1`–`9` o `F1`–`F9`. En cualquier momento `?` abre la ayuda con todas las teclas y `q` sale.
+Arriba vas a ver la barra con el badge de entorno (verde `STAGING`, o rojo `⚠ PRODUCCIÓN` si el YAML dice `environment: prd`), y diez pestañas que se cambian con `1`–`9`,`0` o `F1`–`F10`. En cualquier momento `?` abre la ayuda con todas las teclas y `q` sale.
 
 ### El recorrido corto
 
@@ -100,6 +100,8 @@ Si la sesión CMIS expira a mitad de corrida, la consola **no quema documentos**
 **`7` BATCHES** te da la tabla con la auditoría de cada corrida (quién, dónde, con qué config), `↵` para el detalle, `R` para reintentar los fallidos y `E` para exportar. **`8` SYNC** es `sync status | recover | resolve` con botones.
 
 **`9` YAML.** El archivo completo, como un formulario generado del schema (137–139): `v` valida, `w` escribe con confirmación y backup, `u` descarta el borrador. `connections` sigue siendo cosa de `[2]` — acá se ve, no se edita.
+
+**`0` PRUEBA.** Un tiro de prueba (141): subís UN documento sintético a un código CM puntual sin pasar por triggers ni por el pipeline entero. Validás el código contra el mapping (`↵`), tipeás a mano los metadatos requeridos, elegís formato y tamaño del archivo sintético, y `s` lo sube con UN solo POST — sin reintentos, sin re-auth — mostrando la respuesta CRUDA del servidor: headers, body completo (el pipeline lo trunca a 1024 caracteres; acá no) y el curl equivalente. El documento no pasa por tracking ni por idempotencia — no aparece en `[7]` ni en `migration_log` — así que lo borrás vos con `d` cuando termines.
 
 > El paso a paso completo, con un Alfresco en Docker y qué apretar en cada pantalla, está en [`how-to/probar-la-consola.md`](../how-to/probar-la-consola.md). La referencia seca de teclas y flags, en [`reference/cli.md`](../reference/cli.md#console--consola-de-operación-123135). El porqué de cada decisión de diseño, en [`explanation/operations-console.md`](../explanation/operations-console.md).
 

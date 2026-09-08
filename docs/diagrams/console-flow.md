@@ -4,7 +4,7 @@
 
 `cmcourier console` (123–135) no es un menú: es una máquina de estados con guardas. El operador no puede lanzar una corrida sin haber pasado por las credenciales y por el doctor, no puede escribir el YAML sin haber aplicado los overrides, y no puede aplicar un `recover` sin haber simulado antes. Cada una de esas barreras existe porque el camino equivocado cuesta caro contra producción.
 
-Este diagrama muestra el orden real, no las nueve pestañas sueltas.
+Este diagrama muestra el orden real, no las diez pestañas sueltas.
 
 ## El recorrido de una corrida
 
@@ -161,6 +161,20 @@ flowchart LR
 ```
 
 `connections:` sólo se edita desde `[2]`: en `[9]` aparece de sólo lectura, y un sitio con una conexión inline se muestra como `(inline — editar en [2])`.
+
+## El tiro de prueba, aparte de la corrida
+
+`[0] PRUEBA` (141) no entra en la máquina de estados de arriba: no pasa por el launcher, no exige un doctor aprobado y no deja rastro en el tracking. Habla directo con CMIS, un solo POST por vez.
+
+```mermaid
+flowchart LR
+    C0(["[0] código CM validado<br/>+ metadatos + formato/tamaño"]) --> CMIS[("CMIS<br/>createDocument / delete")]
+    CMIS --> R0["#result: HTTP status · headers<br/>· body completo · curl"]
+    CMIS -.->|"objectId"| H0["#history (máx. 20)"]
+    H0 -.->|"d"| CMIS
+```
+
+Sin flecha hacia `Batches` ni hacia `migration_log`: lo que sube `[0]` no existe para el pipeline salvo que el operador lo suba de nuevo por un canal real. El único camino de vuelta es el propio operador borrándolo con `d`.
 
 ## Convenciones de estos diagramas
 
