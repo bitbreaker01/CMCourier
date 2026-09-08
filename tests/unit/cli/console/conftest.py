@@ -36,6 +36,7 @@ _TAB_BY_KEY = {
     "7": "batches",
     "8": "sync",
     "9": "yaml",
+    "0": "prueba",
     "f1": "inicio",
     "f2": "credenciales",
     "f3": "config",
@@ -45,6 +46,7 @@ _TAB_BY_KEY = {
     "f7": "batches",
     "f8": "sync",
     "f9": "yaml",
+    "f10": "prueba",
 }
 
 

@@ -62,7 +62,7 @@ from cmcourier.domain.exceptions import (
     CMISServerError,
     RetriesExhaustedError,
 )
-from cmcourier.domain.models import StagedFile
+from cmcourier.domain.models import RawResponse, StagedFile
 from cmcourier.domain.ports import IUploader
 from cmcourier.observability.pii import mask_dict
 
@@ -564,6 +564,124 @@ class CmisUploader(IUploader):
                 )
                 raise
         return self._parse_object_id(resp)
+
+    # ------------------------------------------------ 141: tiro de prueba
+
+    def upload_raw(
+        self,
+        file: StagedFile,
+        folder_path: str,
+        object_type_id: str,
+        document_name: str,
+        mime_type: str,
+        properties: Mapping[str, str],
+    ) -> RawResponse:
+        """141 REQ-003: UN solo POST ``createDocument``, respuesta CRUDA.
+
+        Sin reintentos, sin re-auth, sin `back-off`: un 401 / 4xx / 5xx
+        se DEVUELVE como :class:`RawResponse` — el punto de la pantalla
+        ``[0]`` es leer qué contestó el servidor, no esconderlo detrás
+        de una excepción truncada a 1024 caracteres. Sólo las fallas de
+        transporte suben como :class:`CMISServerError`.
+        """
+        url = self._service_url(f"root/{folder_path.strip('/')}")
+        curl = self._raw_curl(url, object_type_id, document_name, mime_type, properties)
+        with file.path.open("rb") as handle:
+            data_fields, file_field = self._build_multipart_for_upload(
+                handle, document_name, mime_type, object_type_id, properties
+            )
+            encoder = MultipartEncoder(fields={**data_fields, "content": file_field})
+            chunk_bytes = self._cfg.upload_chunk_bytes
+
+            def _read_chunk(enc: MultipartEncoder = encoder, size: int = chunk_bytes) -> bytes:
+                return bytes(enc.read(size))
+
+            return self._raw_call(
+                curl,
+                lambda: self._client.post(
+                    url,
+                    content=iter(_read_chunk, b""),
+                    headers={
+                        "Content-Type": encoder.content_type,
+                        "Content-Length": str(encoder.len),
+                    },
+                    timeout=self._request_timeout(),
+                ),
+            )
+
+    def _raw_curl(
+        self,
+        url: str,
+        object_type_id: str,
+        document_name: str,
+        mime_type: str,
+        properties: Mapping[str, str],
+    ) -> str:
+        """141: el curl equivalente del POST de prueba.
+
+        Nada se enmascara salvo la contraseña (que
+        ``_build_curl_equivalent`` tapa siempre): los valores los tipeó
+        el operador en esta sesión y ya los tiene en pantalla.
+        """
+        return self._build_curl_equivalent(
+            url=url,
+            object_type_id=object_type_id,
+            masked_properties={
+                "cmis:name": document_name,
+                "cmis:contentStreamMimeType": mime_type,
+                **dict(properties),
+            },
+        )
+
+    def delete_object(self, object_id: str) -> RawResponse:
+        """141 REQ-003: borra el objeto recién subido (Browser Binding).
+
+        ``allVersions=true`` porque el documento de prueba se crea con
+        una sola versión y no queremos dejar huérfanos en el CM.
+        """
+        url = self._service_url("root")
+        fields = {"cmisaction": "delete", "objectId": object_id, "allVersions": "true"}
+        curl = " ".join(
+            [
+                "curl -u admin:*** -X POST",
+                *[f"-F '{key}={value}'" for key, value in fields.items()],
+                f"'{url}?objectId={object_id}'",
+            ]
+        )
+        return self._raw_call(
+            curl,
+            lambda: self._client.post(
+                url,
+                params={"objectId": object_id},
+                data=fields,
+                timeout=self._request_timeout(),
+            ),
+        )
+
+    @staticmethod
+    def _raw_call(curl: str, send: Callable[[], httpx.Response]) -> RawResponse:
+        """Ejecuta *send* y envuelve la respuesta SIN interpretarla.
+
+        El único caso que se levanta es la falla de transporte: no hay
+        respuesta que mostrar, así que se lanza ``CMISServerError`` con
+        el curl equivalente en el contexto para que el operador lo
+        reproduzca a mano.
+        """
+        t0 = time.monotonic()
+        try:
+            resp = send()
+        except httpx.HTTPError as exc:
+            error = CMISServerError(status_code=0, response_body=f"{type(exc).__name__}: {exc}")
+            error.context["curl"] = curl
+            raise error from exc
+        return RawResponse(
+            status_code=resp.status_code,
+            reason=resp.reason_phrase,
+            headers=dict(resp.headers),
+            body=resp.text,
+            elapsed_ms=int((time.monotonic() - t0) * 1000.0),
+            curl=curl,
+        )
 
     def _try_recover_409(
         self,

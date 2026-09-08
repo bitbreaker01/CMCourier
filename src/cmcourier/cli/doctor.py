@@ -31,6 +31,7 @@ __all__ = [
     "CheckResult",
     "CheckStatus",
     "DoctorReport",
+    "build_uploader",
     "check_cmis",
     "check_connection",
     "group_of",
@@ -418,7 +419,10 @@ def _open_mssql(
     )
 
 
-def _build_uploader(config: PipelineConfig, secrets: Secrets) -> CmisUploader:
+def build_uploader(config: PipelineConfig, secrets: Secrets) -> CmisUploader:
+    """141: público — la consola arma el mismo :class:`CmisUploader` que el
+    doctor para el tiro de prueba de ``[0]`` (mismas perillas de `cmis`,
+    mismas credenciales de sesión)."""
     return CmisUploader(
         CmisConfig(
             base_url=config.cmis.base_url,
@@ -432,6 +436,11 @@ def _build_uploader(config: PipelineConfig, secrets: Secrets) -> CmisUploader:
             retry_base_delay_s=config.cmis.retry_base_delay_s,
         )
     )
+
+
+# Alias del nombre privado previo a 141 — los call sites internos siguen
+# funcionando sin tocar cinco líneas por gusto.
+_build_uploader = build_uploader
 
 
 def _try(stage: str, fn: Callable[[], T]) -> T | CheckResult:

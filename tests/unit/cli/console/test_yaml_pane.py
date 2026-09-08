@@ -447,6 +447,7 @@ class TestShell:
                 assert app.query_one(YamlPane).rows
                 await pilot.press("question_mark")
                 assert await wait_for(pilot, lambda: isinstance(app.screen, HelpScreen))
-                assert "[9]" in HelpScreen.HELP and "F1–F9" in HelpScreen.HELP
+                # 141: la cabecera pasó a F1–F10 al sumarse la pestaña [0].
+                assert "[9]" in HelpScreen.HELP and "F1–F10" in HelpScreen.HELP
 
         asyncio.run(_run())

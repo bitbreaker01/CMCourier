@@ -154,6 +154,10 @@ class MappingService:
     ) -> None:
         self._columns = columns or MappingColumnsConfig()
         self._cache: dict[str, CMMapping] = {}
+        # 141 REQ-001: índice secundario ``IDCM -> [CMMapping, ...]``, poblado
+        # en la MISMA pasada que el de ``IDRVI`` (una fila descartada por
+        # ``IDRVI`` duplicado o vacío tampoco entra acá).
+        self._by_cm_code: dict[str, list[CMMapping]] = {}
         if metadata_source is None:
             self._load(source)
         else:
@@ -183,8 +187,8 @@ class MappingService:
                 )
                 continue
 
-            self._cache[id_rvi] = self._row_to_mapping_split(
-                row, id_rvi, required_index, cmis_property_id_index
+            self._remember(
+                self._row_to_mapping_split(row, id_rvi, required_index, cmis_property_id_index)
             )
 
         if skipped:
@@ -307,7 +311,7 @@ class MappingService:
                 )
                 continue
 
-            self._cache[id_rvi] = self._row_to_mapping(row, id_rvi)
+            self._remember(self._row_to_mapping(row, id_rvi))
 
         if skipped:
             _logger.info(
@@ -334,6 +338,33 @@ class MappingService:
             required_metadata_fields=_parse_metadata_list(row.get(self._columns.col_metadata_list)),
             cmis_type=cmis_type,
         )
+
+    def _remember(self, mapping: CMMapping) -> None:
+        """141 REQ-001: cachea la fila en los DOS índices a la vez.
+
+        El índice por ``IDRVI`` es el de siempre; el de ``IDCM``
+        (``id_corto``) acumula todas las filas que apuntan al mismo
+        código, en orden de aparición en la fuente. Las filas con
+        ``id_corto`` vacío no entran al índice secundario — no hay
+        código CM que buscar.
+        """
+        self._cache[mapping.id_rvi] = mapping
+        if mapping.id_corto:
+            self._by_cm_code.setdefault(mapping.id_corto, []).append(mapping)
+
+    def get_by_cm_code(self, id_cm: str) -> tuple[CMMapping, ...]:
+        """141 REQ-001: todas las filas cuyo ``IDCM`` es *id_cm*.
+
+        Comparación exacta después de ``strip()``; tupla vacía cuando el
+        código no está en el mapping. Varias filas ``IDRVI`` pueden
+        apuntar al mismo ``IDCM`` con distinto ``CMISType`` /
+        ``CMISFolder``: se devuelven todas, en orden de aparición.
+        """
+        return tuple(self._by_cm_code.get(id_cm.strip(), ()))
+
+    def cm_codes(self) -> tuple[str, ...]:
+        """141 REQ-001: los códigos CM conocidos, ordenados y sin repetir."""
+        return tuple(sorted(self._by_cm_code))
 
     def get_mapping(self, id_rvi: str) -> CMMapping:
         """Devuelve el :class:`CMMapping` para *id_rvi*; lanza si no hay match."""

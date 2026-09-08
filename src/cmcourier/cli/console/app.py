@@ -35,6 +35,7 @@ from cmcourier.cli.console.doctor_pane import DoctorPane
 from cmcourier.cli.console.monitor_pane import MonitorPane
 from cmcourier.cli.console.overrides import apply_overrides
 from cmcourier.cli.console.persist import PersistError, persist_overrides
+from cmcourier.cli.console.practice_pane import PracticePane
 from cmcourier.cli.console.run_pane import RunPane
 from cmcourier.cli.console.runner import ConsoleRunManager, LaunchSpec
 from cmcourier.cli.console.state import ConsoleState
@@ -62,7 +63,12 @@ _TABS = [
     "batches",
     "sync",
     "yaml",
+    # 141: la pestaña del tiro de prueba va AL FINAL — los ids existentes
+    # no se mueven, así que ninguna tecla vieja cambia de destino.
+    "prueba",
 ]
+# La décima pantalla no puede ser la tecla "10": usa el 0 (y F10).
+_TAB_KEYS = [*(str(i + 1) for i in range(9)), "0"]
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -142,8 +148,8 @@ class HelpScreen(ModalScreen[None]):
         Binding("question_mark", "dismiss", "cerrar"),
     ]
 
-    HELP = """[b $accent]TECLAS GLOBALES[/] (F1–F9 funcionan aun con foco en un campo)
-  1-9 / F1-F9   cambiar de pantalla        ?   esta ayuda
+    HELP = """[b $accent]TECLAS GLOBALES[/] (F1–F10 funcionan aun con foco en un campo)
+  1-9,0 / F1-F10   cambiar de pantalla     ?   esta ayuda
   q             salir (confirma si hay corrida)   Esc  cerrar modal / soltar foco
 
 [b $accent]POR PANTALLA[/]
@@ -155,6 +161,7 @@ class HelpScreen(ModalScreen[None]):
   [7] ↑↓ navegar · ↵ detalle · R retry · E export
   [8] s estado del sync · simular antes de aplicar (recover) · resolver por txn
   [9] v validar · w escribir (backup) · u descartar · connections se edita en [2]
+  [0] ↵ validar código · s generar y subir · d borrar el último subido
 
 [b $accent]STAGES S0–S7[/]
   S0/S1 adquirir triggers · indexar RVABREP     S2/S3 mapear tipo CM · resolver metadata
@@ -191,8 +198,8 @@ class ConsoleApp(App[None]):
     """
     BINDINGS = [
         *[
-            Binding(str(i + 1), f"switch_tab('{t}')", t.upper(), show=False)
-            for i, t in enumerate(_TABS)
+            Binding(key, f"switch_tab('{t}')", t.upper(), show=False)
+            for key, t in zip(_TAB_KEYS, _TABS, strict=True)
         ],
         *[
             Binding(f"f{i + 1}", f"switch_tab('{t}')", t.upper(), show=False, priority=True)
@@ -265,6 +272,8 @@ class ConsoleApp(App[None]):
                 yield SyncPane(self)
             with TabPane("9·YAML", id="yaml"):
                 yield YamlPane(self)
+            with TabPane("0·PRUEBA", id="prueba"):
+                yield PracticePane(self)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -347,8 +356,13 @@ class ConsoleApp(App[None]):
         )
 
     def action_doctor_run(self) -> None:
-        if self.q("#tabs", TabbedContent).active == "doctor":
+        """``d`` despacha por tab: [4] corre el grupo del doctor, [0] borra
+        el último documento de prueba subido (141)."""
+        active = self.q("#tabs", TabbedContent).active
+        if active == "doctor":
             self.q("DoctorPane", DoctorPane).run_group()
+        elif active == "prueba":
+            self.q("PracticePane", PracticePane).request_delete_last()
 
     def action_apply_overrides(self) -> None:
         if self.q("#tabs", TabbedContent).active == "config":
@@ -433,8 +447,13 @@ class ConsoleApp(App[None]):
             self.resume_run()  # 132: en [6] la misma tecla reanuda
 
     def action_sync_status(self) -> None:
-        if self.q("#tabs", TabbedContent).active == "sync":
+        """``s`` despacha por tab: [8] estado del sync, [0] generar y subir
+        el documento de prueba (141)."""
+        active = self.q("#tabs", TabbedContent).active
+        if active == "sync":
             self.q("SyncPane", SyncPane).run_status()
+        elif active == "prueba":
+            self.q("PracticePane", PracticePane).request_upload()
 
     def action_cancel_run(self) -> None:
         if self.q("#tabs", TabbedContent).active != "monitor" or not self.run_active:

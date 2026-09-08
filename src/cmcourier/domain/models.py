@@ -14,6 +14,7 @@ acoplados a la semántica de los modelos.
 from __future__ import annotations
 
 __all__ = [
+    "RawResponse",
     "BatchDetails",
     "BatchInfo",
     "CMMapping",
@@ -35,6 +36,7 @@ __all__ = [
     "parse_cymmdd",
 ]
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -396,6 +398,55 @@ class ResolvedMetadata:
 
     def __len__(self) -> int:
         return len(self.properties)
+
+
+@dataclass(frozen=True, slots=True)
+class RawResponse:
+    """La respuesta del servidor SIN maquillaje.
+
+    ``body`` viaja COMPLETO (el pipeline lo trunca a 1024 caracteres;
+    acá el punto es justamente leerlo entero) y ``curl`` es el comando
+    equivalente con la contraseña enmascarada, para pegar en una
+    terminal y seguir investigando.
+    """
+
+    status_code: int
+    reason: str
+    headers: Mapping[str, str]
+    body: str
+    elapsed_ms: int
+    curl: str
+
+    @property
+    def ok(self) -> bool:
+        """``True`` sólo para 2xx — un 302 no es un upload exitoso."""
+        return 200 <= self.status_code < 300
+
+    @property
+    def object_id(self) -> str | None:
+        """El ``cmis:objectId`` parseado del cuerpo, o ``None``.
+
+        Mismas tres rutas que el parser del `pipeline`
+        (``succinctProperties`` → ``properties`` → ``id``), pero devuelve
+        ``None`` en lugar de ``"unknown"``: sin objectId no hay nada que
+        borrar.
+        """
+        try:
+            data = json.loads(self.body)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        succinct = data.get("succinctProperties")
+        if isinstance(succinct, dict) and succinct.get("cmis:objectId"):
+            return str(succinct["cmis:objectId"])
+        properties = data.get("properties")
+        if isinstance(properties, dict):
+            obj = properties.get("cmis:objectId")
+            if isinstance(obj, dict) and obj.get("value"):
+                return str(obj["value"])
+        object_id = data.get("id")
+        return str(object_id) if object_id else None
 
 
 @dataclass(frozen=True, slots=True)

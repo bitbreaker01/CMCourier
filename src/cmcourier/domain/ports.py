@@ -14,6 +14,7 @@ local-scan).
 from __future__ import annotations
 
 __all__ = [
+    "PracticeUploadPort",
     "CacheEntry",
     "CacheKey",
     "CacheStats",
@@ -29,13 +30,14 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from cmcourier.domain.models import (
     BatchDetails,
     BatchInfo,
     DocDetail,
     MigrationRecord,
+    RawResponse,
     RVABREPDocument,
     StagedFile,
     StageStatus,
@@ -494,3 +496,28 @@ class IDocumentCache(ABC):
     @abstractmethod
     def stats(self) -> CacheStats:
         """Devuelve las stats actuales de la tabla."""
+
+
+class PracticeUploadPort(Protocol):
+    """Lo que el tiro de prueba necesita de un servidor CMIS.
+
+    Deliberadamente NO es ``IUploader``: el puerto del `pipeline` sube
+    con reintentos y devuelve un objectId. Acá se quiere un solo POST y
+    la respuesta cruda, incluida la fallida.
+    """
+
+    def upload_raw(
+        self,
+        file: StagedFile,
+        folder_path: str,
+        object_type_id: str,
+        document_name: str,
+        mime_type: str,
+        properties: Mapping[str, str],
+    ) -> RawResponse:
+        """UN solo POST ``createDocument``; el 4xx/5xx se devuelve, no se lanza."""
+        ...
+
+    def delete_object(self, object_id: str) -> RawResponse:
+        """Borra el objeto recién subido (``cmisaction=delete``)."""
+        ...

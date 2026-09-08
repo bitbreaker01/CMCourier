@@ -41,7 +41,8 @@ lo dice en `size_note: str` (`""` si cumplió). Mimes:
 `ValueError`.
 
 **REQ-003 — Upload con respuesta cruda y borrado.** Nuevo Protocol
-`services/practice_upload.py::PracticeUploadPort` con
+`domain/ports.py::PracticeUploadPort` (y `RawResponse` en
+`domain/models.py`: el adapter depende del dominio, no de `services`) con
 `upload_raw(file: StagedFile, folder_path, object_type_id,
 document_name, mime_type, properties) -> RawResponse` y
 `delete_object(object_id: str) -> RawResponse`.
