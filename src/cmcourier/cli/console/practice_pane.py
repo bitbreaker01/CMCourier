@@ -114,7 +114,6 @@ class PracticePane(VerticalScroll):
         self._rows: tuple[CMMapping, ...] = ()
         self._row_index = 0
         self._busy = False
-        self._rendering = False
         self.history: list[Attempt] = []
 
     # ------------------------------------------------------------ layout
@@ -205,6 +204,11 @@ class PracticePane(VerticalScroll):
             return
         self._set_error("")
         self._rows, self._row_index = rows, 0
+        # 141 antagonista B1: el ``Select#row`` se arma UNA sola vez acá,
+        # al validar — no en cada ``render_target`` (ver el método para el
+        # porqué: ``set_options`` / ``value=`` postean ``Select.Changed``,
+        # que si se procesara en cada render dispara un bucle).
+        self._render_row_select()
         self.call_later(self.render_target)
 
     def _not_found_text(self, code: str) -> str:
@@ -232,12 +236,17 @@ class PracticePane(VerticalScroll):
             self.query_one("#target").display = False
 
     async def render_target(self) -> None:
-        """Panel del destino + un ``Input`` por metadato requerido."""
+        """Panel del destino + un ``Input`` por metadato requerido.
+
+        141 antagonista B1: NO reconstruye ``#row`` (eso pasa UNA vez, en
+        :meth:`validate_code`) — reconstruirlo acá cada vez que cambia la
+        fila reabre la ventana para el bucle ``Select.Changed`` →
+        ``render_target`` → ``set_options`` → ``Select.Changed`` …
+        """
         mapping = self.current_mapping()
         if mapping is None:
             return
         self.query_one("#target").display = True
-        self._render_row_select()
         folder = mapping.cmis_folder or mapping.cm_folder
         object_type = mapping.cmis_type or mapping.cm_object_type
         self.query_one("#target-info", Static).update(
@@ -257,6 +266,16 @@ class PracticePane(VerticalScroll):
         self._check_target(mapping)
 
     def _render_row_select(self) -> None:
+        """141 antagonista B1: ``set_options`` / ``value=`` POSTEAN
+        ``Select.Changed`` — sin envolverlos en ``self.prevent(...)`` ese
+        mensaje se procesa después de que este método termina y dispara
+        ``on_select_changed`` → ``call_later(render_target)`` →
+        ``_render_row_select`` de nuevo: un bucle de ~12 remontajes/s que
+        a su vez redispara el worker de ``_check_target`` contra el CM en
+        cada vuelta. Un flag síncrono (``self._rendering``) NO alcanza:
+        el mensaje se entrega en un tick posterior, cuando el flag ya
+        volvió a ``False``.
+        """
         select = self.query_one("#row", Select)
         select.display = len(self._rows) > 1
         if len(self._rows) <= 1:
@@ -268,12 +287,9 @@ class PracticePane(VerticalScroll):
             )
             for i, m in enumerate(self._rows)
         ]
-        self._rendering = True
-        try:
+        with self.prevent(Select.Changed):
             select.set_options(options)
             select.value = str(self._row_index)
-        finally:
-            self._rendering = False
 
     # -------------------------------------------- chequeo contra el server
 
@@ -294,13 +310,23 @@ class PracticePane(VerticalScroll):
         folder = mapping.cmis_folder or mapping.cm_folder
 
         def work() -> None:
-            uploader = build_uploader(config, secrets)
-            text = f"tipo {_probe(lambda: uploader.get_type_definition(object_type))}"
-            text += f" · carpeta {_probe(lambda: uploader.verify_folder_exists(folder))}"
-            self.console.call_from_thread(self._apply_check, text)
+            # 141 antagonista B2: ``build_uploader`` (config rota, TLS mal
+            # configurado) puede lanzar; sin este try, la excepción sube
+            # sin capturar y — con el ``exit_on_error=True`` default de
+            # ``run_worker`` — tira abajo la app entera.
+            try:
+                uploader = build_uploader(config, secrets)
+                text = f"tipo {_probe(lambda: uploader.get_type_definition(object_type))}"
+                text += f" · carpeta {_probe(lambda: uploader.verify_folder_exists(folder))}"
+            except Exception as exc:  # noqa: BLE001 — el worker nunca revienta la app
+                text = f"✗ {type(exc).__name__}: {exc}"
+            with contextlib.suppress(Exception):
+                # la app ya pudo haber cerrado — call_from_thread tira
+                # RuntimeError en ese caso, y no hay nada más que hacer.
+                self.console.call_from_thread(self._apply_check, text)
 
         self._set_busy(True)
-        self.console.run_worker(work, thread=True, exclusive=False)
+        self.console.run_worker(work, thread=True, exclusive=False, exit_on_error=False)
 
     def _apply_check(self, text: str) -> None:
         self._set_busy(False)
@@ -403,9 +429,12 @@ class PracticePane(VerticalScroll):
                 error: str | None = None
             except Exception as exc:  # noqa: BLE001 — el worker nunca revienta la UI
                 result, error = None, f"{type(exc).__name__}: {exc}"
-            self.console.call_from_thread(self._apply_upload, draft, result, error)
+            with contextlib.suppress(Exception):
+                # 141 antagonista B2: si la app ya cerró, call_from_thread
+                # tira RuntimeError — no hay nada más que hacer acá.
+                self.console.call_from_thread(self._apply_upload, draft, result, error)
 
-        self.console.run_worker(work, thread=True, exclusive=False)
+        self.console.run_worker(work, thread=True, exclusive=False, exit_on_error=False)
 
     def _apply_upload(
         self, draft: PracticeDraft, result: PracticeResult | None, error: str | None
@@ -442,8 +471,12 @@ class PracticePane(VerticalScroll):
 
     def _show_response(self, response: RawResponse, *, header: str) -> None:
         """Vuelca la respuesta CRUDA — nada se enmascara salvo la contraseña
-        del curl: los valores los tipeó el operador en esta sesión."""
-        headers = "\n".join(f"{k}: {v}" for k, v in response.headers.items())
+        del curl y los headers de credenciales (141 antagonista I1: un
+        ``Set-Cookie: JSESSIONID=...`` o un ``Authorization`` en la
+        respuesta terminaban crudos en pantalla; los valores de NEGOCIO
+        (properties, body) los tipeó el operador en esta sesión y esos sí
+        se muestran tal cual)."""
+        headers = "\n".join(f"{k}: {_mask_header(k, v)}" for k, v in response.headers.items())
         self.query_one("#result", TextArea).text = "\n".join(
             [
                 header,
@@ -492,7 +525,21 @@ class PracticePane(VerticalScroll):
         self.console.notify("No hay nada subido para borrar", severity="warning")
 
     def request_delete(self, index: int) -> None:
+        """141 REQ-005 + antagonista I6: las MISMAS guardas que
+        ``request_upload`` — una corrida activa o credenciales CMIS
+        vencidas bloquean el borrado igual que bloquean la subida (el
+        `pipeline` puede estar escribiendo al mismo tiempo, y el borrado
+        pega contra el mismo servidor CMIS)."""
         if self._guard_busy() or not 0 <= index < len(self.history):
+            return
+        if self.console.run_active:
+            self.console.notify("hay una corrida activa — probá cuando termine", severity="warning")
+            return
+        if not self.console.state.creds_ready(required=("cmis",)):
+            self.console.notify(
+                "Sin credenciales frescas de sesión — cargalas en [2]", severity="error"
+            )
+            self.console.action_switch_tab("credenciales")
             return
         attempt = self.history[index]
         if not attempt.object_id or attempt.deleted:
@@ -505,11 +552,15 @@ class PracticePane(VerticalScroll):
             no="cancelar",
             danger=True,
             confirm_text="PRD" if prd else None,
-            cb=lambda ok: self._start_delete(index) if ok else None,
+            # 141 antagonista I2: se captura el OBJETO ``attempt``, no el
+            # índice — ``history.insert(0, …)`` reindexa cada entrada
+            # existente en cuanto llega un intento nuevo, así que un
+            # índice capturado acá podría apuntar a OTRO intento para
+            # cuando el operador confirme el modal.
+            cb=lambda ok: self._start_delete(attempt) if ok else None,
         )
 
-    def _start_delete(self, index: int) -> None:
-        attempt = self.history[index]
+    def _start_delete(self, attempt: Attempt) -> None:
         object_id = attempt.object_id or ""
         self._set_busy(True)
         config = self.console.effective_config()
@@ -523,18 +574,21 @@ class PracticePane(VerticalScroll):
                 error: str | None = None
             except Exception as exc:  # noqa: BLE001 — el worker nunca revienta la UI
                 response, error = None, f"{type(exc).__name__}: {exc}"
-            self.console.call_from_thread(self._apply_delete, index, response, error)
+            with contextlib.suppress(Exception):
+                # 141 antagonista B2: ídem — la app pudo haber cerrado.
+                self.console.call_from_thread(self._apply_delete, attempt, response, error)
 
-        self.console.run_worker(work, thread=True, exclusive=False)
+        self.console.run_worker(work, thread=True, exclusive=False, exit_on_error=False)
 
-    def _apply_delete(self, index: int, response: RawResponse | None, error: str | None) -> None:
+    def _apply_delete(
+        self, attempt: Attempt, response: RawResponse | None, error: str | None
+    ) -> None:
         self._set_busy(False)
         with contextlib.suppress(NoMatches):
             if response is None:
                 self.query_one("#result", TextArea).text = f"✘ no hubo respuesta: {error}"
                 self.console.notify(str(error), severity="error", timeout=10)
                 return
-            attempt = self.history[index]
             self._show_response(
                 response,
                 header=(
@@ -583,11 +637,21 @@ class PracticePane(VerticalScroll):
             self.validate_code()
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "row" and not self._rendering:
-            event.stop()
-            with contextlib.suppress(ValueError, TypeError):
-                self._row_index = int(str(event.value))
-            self.call_later(self.render_target)
+        """141 antagonista B1: corta temprano si el índice no cambió —
+        defensa en profundidad además de ``self.prevent(Select.Changed)``
+        en :meth:`_render_row_select` (que ya evita que este handler vea
+        los cambios sintéticos del propio pane)."""
+        if event.select.id != "row":
+            return
+        event.stop()
+        try:
+            new_index = int(str(event.value))
+        except (ValueError, TypeError):
+            return
+        if new_index == self._row_index:
+            return
+        self._row_index = new_index
+        self.call_later(self.render_target)
 
 
 def _probe(call: Any) -> str:
@@ -605,3 +669,16 @@ def _pretty(body: str) -> str:
         return json.dumps(json.loads(body), indent=2, ensure_ascii=False)
     except (ValueError, TypeError):
         return body
+
+
+# 141 antagonista I1: headers que cargan credenciales de sesión — nunca se
+# muestran crudos en pantalla, aunque los mande el servidor "de verdad".
+_SENSITIVE_HEADERS = frozenset(
+    {"set-cookie", "authorization", "www-authenticate", "proxy-authenticate"}
+)
+
+
+def _mask_header(name: str, value: str) -> str:
+    """``***`` para los headers de credenciales (case-insensitive); el
+    resto viaja tal cual."""
+    return "***" if name.lower() in _SENSITIVE_HEADERS else value

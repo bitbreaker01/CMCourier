@@ -400,6 +400,16 @@ class ResolvedMetadata:
         return len(self.properties)
 
 
+def _document_object_id(object_id: object, base_type_id: object) -> str | None:
+    """141 B3: sólo strings no vacíos, y sólo si el ``baseTypeId`` (cuando
+    viene) es ``cmis:document`` — nunca un id de carpeta."""
+    if base_type_id is not None and base_type_id != "cmis:document":
+        return None
+    if isinstance(object_id, bool) or not object_id:
+        return None
+    return str(object_id)
+
+
 @dataclass(frozen=True, slots=True)
 class RawResponse:
     """La respuesta del servidor SIN maquillaje.
@@ -426,11 +436,18 @@ class RawResponse:
     def object_id(self) -> str | None:
         """El ``cmis:objectId`` parseado del cuerpo, o ``None``.
 
-        Mismas tres rutas que el parser del `pipeline`
-        (``succinctProperties`` → ``properties`` → ``id``), pero devuelve
-        ``None`` en lugar de ``"unknown"``: sin objectId no hay nada que
-        borrar.
+        141 antagonista B3: sin ``ok`` no hay documento que borrar — un
+        4xx/5xx nunca parsea un id, aunque el cuerpo traiga uno (Alfresco
+        devuelve el id de la CARPETA destino en varios errores, no el del
+        documento). Solo dos rutas válidas: ``succinctProperties`` o
+        ``properties.cmis:objectId.value`` — el fallback a ``data["id"]``
+        del parser del `pipeline` se eliminó acá porque ese campo es
+        genérico y no garantiza ser un ``cmis:objectId``. Cuando el cuerpo
+        trae ``cmis:baseTypeId``, tiene que valer ``"cmis:document"`` — un
+        id de carpeta no sirve para borrar el tiro de prueba.
         """
+        if not self.ok:
+            return None
         try:
             data = json.loads(self.body)
         except (ValueError, TypeError):
@@ -438,15 +455,18 @@ class RawResponse:
         if not isinstance(data, dict):
             return None
         succinct = data.get("succinctProperties")
-        if isinstance(succinct, dict) and succinct.get("cmis:objectId"):
-            return str(succinct["cmis:objectId"])
+        if isinstance(succinct, dict):
+            return _document_object_id(
+                succinct.get("cmis:objectId"), succinct.get("cmis:baseTypeId")
+            )
         properties = data.get("properties")
         if isinstance(properties, dict):
             obj = properties.get("cmis:objectId")
-            if isinstance(obj, dict) and obj.get("value"):
-                return str(obj["value"])
-        object_id = data.get("id")
-        return str(object_id) if object_id else None
+            obj_id = obj.get("value") if isinstance(obj, dict) else None
+            base = properties.get("cmis:baseTypeId")
+            base_value = base.get("value") if isinstance(base, dict) else base
+            return _document_object_id(obj_id, base_value)
+        return None
 
 
 @dataclass(frozen=True, slots=True)

@@ -638,12 +638,18 @@ class CmisUploader(IUploader):
 
         ``allVersions=true`` porque el documento de prueba se crea con
         una sola versión y no queremos dejar huérfanos en el CM.
+
+        141 antagonista M1: un ``object_id`` vacío (o solo whitespace)
+        lanza ``ValueError`` ANTES de armar el request — ``root?objectId=``
+        sin id apunta a la raíz del repositorio, no a nada borrable.
         """
+        if not object_id.strip():
+            raise ValueError("object_id no puede estar vacío")
         url = self._service_url("root")
         fields = {"cmisaction": "delete", "objectId": object_id, "allVersions": "true"}
         curl = " ".join(
             [
-                "curl -u admin:*** -X POST",
+                f"curl -u {self._cfg.username}:*** -X POST",
                 *[f"-F '{key}={value}'" for key, value in fields.items()],
                 f"'{url}?objectId={object_id}'",
             ]
@@ -925,12 +931,14 @@ class CmisUploader(IUploader):
     ) -> str:
         """Renderiza un curl ejecutable que reproduce el POST que falló.
 
-        El `auth` se renderiza como ``-u admin:***`` sin importar
-        unmask_pii — las credenciales nunca se filtran a los logs
-        estructurados (Principio VIII).
+        El `auth` se renderiza como ``-u <username>:***`` (141 antagonista
+        I5: antes era ``admin`` hardcodeado sin importar la config) —
+        la contraseña se enmascara siempre, sin importar unmask_pii — las
+        credenciales nunca se filtran a los logs estructurados (Principio
+        VIII).
         """
         parts = [
-            "curl -u admin:***",
+            f"curl -u {self._cfg.username}:***",
             "-X POST",
             "-F 'cmisaction=createDocument'",
             f"-F 'propertyId[0]=cmis:objectTypeId' -F 'propertyValue[0]={object_type_id}'",

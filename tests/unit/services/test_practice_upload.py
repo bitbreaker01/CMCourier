@@ -98,6 +98,38 @@ class TestValidateValues:
     def test_no_catalog_never_complains_about_property_ids(self) -> None:
         assert validate_values(_mapping(with_ids=False), {"BAC_Nombre": "a", "BAC_CIF": "b"}) == {}
 
+    # -------------------------------------------------------------- M2
+    # ``cmis_property_ids={}`` (dict vacío) es "sin catálogo" — igual que
+    # ``None`` — para ser consistente con build_properties.
+
+    def test_empty_catalog_dict_behaves_like_no_catalog(self) -> None:
+        mapping = CMMapping(
+            clase_id="01",
+            id_rvi="FB01",
+            id_corto="CN01",
+            clase_name="c",
+            required_metadata_fields=("BAC_Nombre",),
+            cmis_property_ids={},
+        )
+        assert validate_values(mapping, {"BAC_Nombre": "Juan"}) == {}
+
+    # -------------------------------------------------------------- M3
+    # dos Metadato con el MISMO CMISPropertyId — el servidor recibiría una
+    # sola property con el último valor pisando al otro en silencio.
+
+    def test_duplicate_cmis_property_id_is_an_error_for_both_fields(self) -> None:
+        mapping = CMMapping(
+            clase_id="01",
+            id_rvi="FB01",
+            id_corto="CN01",
+            clase_name="c",
+            required_metadata_fields=("A", "B"),
+            cmis_property_ids=MappingProxyType({"A": "cm:X", "B": "cm:X"}),
+        )
+        errors = validate_values(mapping, {"A": "valor-A", "B": "valor-B"})
+        assert errors["A"] == "CMISPropertyId duplicado con B"
+        assert errors["B"] == "CMISPropertyId duplicado con A"
+
 
 class TestBuildProperties:
     def test_translates_to_cmis_property_ids(self) -> None:
@@ -180,8 +212,12 @@ class TestRunPracticeUpload:
         draft = self._draft(mapping=mapping, values={})
         result = run_practice_upload(draft, _FakeUploader(), workdir=tmp_path, now=_NOW)
 
-        assert result.folder == mapping.cm_folder
-        assert result.object_type == mapping.cm_object_type
+        # 141 antagonista I7: valores LITERALES — comparar contra
+        # ``mapping.cm_folder`` / ``mapping.cm_object_type`` es casi
+        # tautológico (ambos vienen de la misma fórmula que el código bajo
+        # prueba). Con clase_id="01.01.01.01.01" el fallback es fijo.
+        assert result.folder == "/$type/BAC_01_01_01_01_01"
+        assert result.object_type == "$t!-2_BAC_01_01_01_01_01v-1"
 
     def test_image_format_travels_with_its_mime(self, tmp_path: Path) -> None:
         uploader = _FakeUploader()
@@ -195,3 +231,52 @@ class TestRunPracticeUpload:
         workdir = tmp_path / "no" / "existe"
         run_practice_upload(self._draft(), _FakeUploader(), workdir=workdir, now=_NOW)
         assert workdir.is_dir()
+
+    # -------------------------------------------------------------- I4 + M4
+    # ``workdir / name`` colisiona cuando dos operadores suben al MISMO
+    # segundo (``now`` con resolución de un segundo); y si ``write_bytes``
+    # revienta, el ``finally`` original nunca corría (estaba FUERA del
+    # try), dejando basura en ``workdir``.
+
+    def test_two_uploads_with_the_same_now_do_not_collide(self, tmp_path: Path) -> None:
+        """El primer upload todavía tiene que ver su propio archivo en
+        disco aunque un segundo upload — con el mismo ``now`` — termine
+        (y borre su temporal) antes de que el primero lea el suyo."""
+        seen_paths: list[Path] = []
+
+        class _RecordingUploader:
+            def upload_raw(  # noqa: ANN001
+                self, file, folder_path, object_type_id, document_name, mime_type, properties
+            ):
+                seen_paths.append(file.path)
+                assert file.path.exists()
+                return _OK
+
+            def delete_object(self, object_id: str) -> RawResponse:  # pragma: no cover
+                raise NotImplementedError
+
+        uploader = _RecordingUploader()
+        result_a = run_practice_upload(self._draft(), uploader, workdir=tmp_path, now=_NOW)
+        result_b = run_practice_upload(self._draft(), uploader, workdir=tmp_path, now=_NOW)
+
+        # los dos temporales vivieron en directorios DISTINTOS — nunca se
+        # pisaron, aunque ``document_name`` sea idéntico para ambos.
+        assert seen_paths[0] != seen_paths[1]
+        assert seen_paths[0].parent != seen_paths[1].parent
+        assert result_a.name == result_b.name  # mismo nombre lógico
+        assert list(tmp_path.rglob("*")) == []  # nada quedó atrás
+
+    def test_write_bytes_failure_leaves_nothing_in_workdir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(self: Path, data: bytes) -> int:  # noqa: ANN001, ARG001
+            raise OSError("disco lleno")
+
+        monkeypatch.setattr(Path, "write_bytes", _boom)
+        uploader = _FakeUploader()
+
+        with pytest.raises(OSError, match="disco lleno"):
+            run_practice_upload(self._draft(), uploader, workdir=tmp_path, now=_NOW)
+
+        assert uploader.calls == []
+        assert list(tmp_path.rglob("*")) == []

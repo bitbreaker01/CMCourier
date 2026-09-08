@@ -90,9 +90,11 @@ class TestUploadRawSuccess:
 
     def test_posts_multipart_create_document_with_properties(self, tmp_path: Path) -> None:
         seen: list[bytes] = []
+        urls: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen.append(request.read())
+            urls.append(str(request.url))
             return httpx.Response(201, text='{"succinctProperties": {"cmis:objectId": "id"}}')
 
         _upload(_uploader(handler), _staged(tmp_path))
@@ -102,6 +104,10 @@ class TestUploadRawSuccess:
         assert "cmcourier:BAC_CIF" in payload
         assert "123456" in payload
         assert "D:cmcourier:bacDoc" in payload
+        # 141 antagonista I7: la URL tiene que llevar el ``folder_path``
+        # RESUELTO — la misma convención IBM CM que ``_service_url`` usa
+        # para el resto de los métodos (``base/<repo_id>/root/<folder>``).
+        assert urls[0] == "http://cm.test/cmis/repo/root/cmcourier-staging/CN01"
 
     def test_curl_masks_the_password(self, tmp_path: Path) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -113,6 +119,34 @@ class TestUploadRawSuccess:
         assert "s3cr3t0" not in response.curl
         assert "-u admin:***" in response.curl
         assert "createDocument" in response.curl
+
+    # -------------------------------------------------------------- I5
+    # el curl hardcodeaba "-u admin:***" sin importar el username real de
+    # la config — engañoso para el operador que copia el comando.
+
+    def test_curl_uses_the_real_username_not_hardcoded_admin(self, tmp_path: Path) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            request.read()
+            return httpx.Response(201, text="{}")
+
+        uploader = CmisUploader(
+            CmisConfig(
+                base_url="http://cm.test/cmis",
+                repo_id="repo",
+                username="operador",
+                password="s3cr3t0",
+                timeout_seconds=5.0,
+            )
+        )
+        uploader._client.close()  # noqa: SLF001
+        uploader._client = httpx.Client(  # noqa: SLF001
+            transport=httpx.MockTransport(handler), auth=("operador", "s3cr3t0")
+        )
+        response = _upload(uploader, _staged(tmp_path))
+
+        assert "-u operador:***" in response.curl
+        assert "s3cr3t0" not in response.curl
+        assert "-u admin:***" not in response.curl
 
 
 class TestUploadRawFailure:
@@ -212,6 +246,56 @@ class TestDeleteObject:
 
         assert "curl" in excinfo.value.context
 
+    # -------------------------------------------------------------- M1
+    # delete_object("") armaba igual el request contra root?objectId= — el
+    # adapter tiene que fallar ANTES de tocar la red.
+
+    def test_empty_object_id_raises_before_any_request(self) -> None:
+        calls: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(200, text="{}")
+
+        with pytest.raises(ValueError, match="object_id"):
+            _uploader(handler).delete_object("")
+        assert calls == []
+
+    def test_whitespace_object_id_raises_before_any_request(self) -> None:
+        calls: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(200, text="{}")
+
+        with pytest.raises(ValueError, match="object_id"):
+            _uploader(handler).delete_object("   ")
+        assert calls == []
+
+    # -------------------------------------------------------------- I5
+    def test_delete_curl_uses_the_real_username(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            request.read()
+            return httpx.Response(200, text="{}")
+
+        uploader = CmisUploader(
+            CmisConfig(
+                base_url="http://cm.test/cmis",
+                repo_id="repo",
+                username="operador",
+                password="s3cr3t0",
+                timeout_seconds=5.0,
+            )
+        )
+        uploader._client.close()  # noqa: SLF001
+        uploader._client = httpx.Client(  # noqa: SLF001
+            transport=httpx.MockTransport(handler), auth=("operador", "s3cr3t0")
+        )
+        response = uploader.delete_object("abc")
+
+        assert "-u operador:***" in response.curl
+        assert "s3cr3t0" not in response.curl
+
 
 class TestRawResponse:
     def test_ok_only_for_2xx(self) -> None:
@@ -224,9 +308,51 @@ class TestRawResponse:
         body = json.dumps({"properties": {"cmis:objectId": {"value": "por-properties"}}})
         assert RawResponse(201, "Created", {}, body, 1, "c").object_id == "por-properties"
 
-    def test_object_id_from_id_route(self) -> None:
-        body = json.dumps({"id": "por-id"})
-        assert RawResponse(201, "Created", {}, body, 1, "c").object_id == "por-id"
-
     def test_object_id_none_when_body_is_not_json(self) -> None:
         assert RawResponse(201, "Created", {}, "<html>error</html>", 1, "c").object_id is None
+
+    # -------------------------------------------------------------- B3
+    # object_id NUNCA cae al fallback `data["id"]`: un cuerpo de error de
+    # Alfresco trae un "id" que es la carpeta destino, no el documento.
+
+    def test_id_only_route_no_longer_falls_back(self) -> None:
+        body = json.dumps({"exception": "constraint", "id": "workspace://SpacesStore/FOLDER-ROOT"})
+        assert RawResponse(201, "Created", {}, body, 1, "c").object_id is None
+
+    def test_id_boolean_is_not_an_object_id(self) -> None:
+        body = json.dumps({"id": True})
+        assert RawResponse(201, "Created", {}, body, 1, "c").object_id is None
+
+    def test_not_ok_status_never_parses_an_object_id(self) -> None:
+        """Un 500 con succinctProperties válido igual devuelve None: sin
+        ``ok`` no hay documento que borrar."""
+        body = json.dumps({"succinctProperties": {"cmis:objectId": "workspace://obj-1"}})
+        assert RawResponse(500, "Internal Server Error", {}, body, 1, "c").object_id is None
+
+    def test_folder_base_type_is_not_a_document(self) -> None:
+        body = json.dumps(
+            {
+                "succinctProperties": {
+                    "cmis:objectId": "folder-999",
+                    "cmis:baseTypeId": "cmis:folder",
+                }
+            }
+        )
+        assert RawResponse(201, "Created", {}, body, 1, "c").object_id is None
+
+    def test_succinct_document_base_type_is_accepted(self) -> None:
+        body = json.dumps(
+            {"succinctProperties": {"cmis:objectId": "doc-1", "cmis:baseTypeId": "cmis:document"}}
+        )
+        assert RawResponse(201, "Created", {}, body, 1, "c").object_id == "doc-1"
+
+    def test_properties_route_rejects_folder_base_type(self) -> None:
+        body = json.dumps(
+            {
+                "properties": {
+                    "cmis:objectId": {"value": "folder-1"},
+                    "cmis:baseTypeId": {"value": "cmis:folder"},
+                }
+            }
+        )
+        assert RawResponse(201, "Created", {}, body, 1, "c").object_id is None

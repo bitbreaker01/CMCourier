@@ -27,6 +27,8 @@ __all__ = [
     "validate_values",
 ]
 
+import shutil
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -82,14 +84,48 @@ def validate_values(mapping: CMMapping, values: Mapping[str, str]) -> dict[str, 
     ``CMISPropertyId`` cuando el catálogo existe da ``"sin CMISPropertyId
     en el mapping"``: mandarlo con el nombre `friendly` lo rebota el
     servidor con un error mucho más oscuro.
+
+    141 antagonista M2: un catálogo ``{}`` (dict vacío) cuenta como "sin
+    catálogo" — igual que ``None`` — consistente con :func:`build_properties`,
+    que también trata ambos como "sin catálogo, dejar el nombre `friendly`".
+
+    141 antagonista M3: dos ``Metadato`` requeridos que comparten el mismo
+    ``CMISPropertyId`` son un error de CONFIGURACIÓN del mapping, no del
+    operador — el servidor recibiría una sola property con el último
+    valor pisando en silencio al otro. Se marca en AMBOS campos y tiene
+    prioridad sobre "requerido" / "sin CMISPropertyId".
     """
+    duplicates = _duplicate_property_errors(mapping)
     errors: dict[str, str] = {}
     catalog = mapping.cmis_property_ids
     for name in mapping.required_metadata_fields:
-        if not values.get(name, "").strip():
+        if name in duplicates:
+            errors[name] = duplicates[name]
+        elif not values.get(name, "").strip():
             errors[name] = "requerido"
-        elif catalog is not None and not catalog.get(name):
+        elif catalog and not catalog.get(name):
             errors[name] = "sin CMISPropertyId en el mapping"
+    return errors
+
+
+def _duplicate_property_errors(mapping: CMMapping) -> dict[str, str]:
+    """141 antagonista M3: agrupa los campos requeridos por ``CMISPropertyId``
+    y arma el mensaje de error para cada campo cuyo id colisiona con otro."""
+    catalog = mapping.cmis_property_ids
+    if not catalog:
+        return {}
+    names_by_property_id: dict[str, list[str]] = {}
+    for name in mapping.required_metadata_fields:
+        cmis_id = catalog.get(name)
+        if cmis_id:
+            names_by_property_id.setdefault(cmis_id, []).append(name)
+    errors: dict[str, str] = {}
+    for names in names_by_property_id.values():
+        if len(names) < 2:
+            continue
+        for name in names:
+            others = ", ".join(other for other in names if other != name)
+            errors[name] = f"CMISPropertyId duplicado con {others}"
     return errors
 
 
@@ -126,16 +162,22 @@ def run_practice_upload(
 ) -> PracticeResult:
     """141 REQ-004: genera el archivo, lo sube y lo borra del disco.
 
-    El archivo temporal vive SÓLO durante el upload: el ``finally`` lo
-    borra aunque ``upload_raw`` reviente. No pasa por tracking ni por
-    idempotencia — este documento no existe para el `pipeline`.
+    141 antagonista I4 + M4: cada llamada obtiene su PROPIO directorio
+    temporal (``tempfile.mkdtemp``) en lugar de escribir directo en
+    ``workdir`` — dos operadores (o dos tiros seguidos) con el mismo
+    ``now`` generan el mismo ``document_name`` y se pisarían el archivo.
+    ``write_bytes`` vive DENTRO del ``try``: si revienta (disco lleno,
+    permisos), el ``finally`` borra igual el directorio recién creado en
+    lugar de dejarlo huérfano. No pasa por tracking ni por idempotencia —
+    este documento no existe para el `pipeline`.
     """
     name = document_name(draft.cm_code, draft.fmt, now)
-    synthetic = build_synthetic_file(draft.fmt, draft.size_bytes, name)
     workdir.mkdir(parents=True, exist_ok=True)
-    path = workdir / name
-    path.write_bytes(synthetic.content)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="practice-", dir=workdir))
     try:
+        synthetic = build_synthetic_file(draft.fmt, draft.size_bytes, name)
+        path = tmp_dir / name
+        path.write_bytes(synthetic.content)
         response = uploader.upload_raw(
             StagedFile(path=path, size_bytes=len(synthetic.content), page_count=1),
             draft.folder,
@@ -145,7 +187,7 @@ def run_practice_upload(
             build_properties(draft.mapping, draft.values),
         )
     finally:
-        path.unlink(missing_ok=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     return PracticeResult(
         name=name,
         folder=draft.folder,

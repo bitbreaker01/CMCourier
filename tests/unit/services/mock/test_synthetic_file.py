@@ -9,7 +9,7 @@ from __future__ import annotations
 from io import BytesIO
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from cmcourier.services.mock.synthetic_file import (
     MAX_SIZE_BYTES,
@@ -49,9 +49,29 @@ class TestImages:
             assert img.format == _PIL_FORMAT[fmt]
 
     @pytest.mark.parametrize("fmt", _IMAGE_FORMATS)
-    def test_size_within_tolerance_or_annotated(self, fmt: str) -> None:
+    def test_size_within_tolerance(self, fmt: str) -> None:
+        """141 antagonista I7: assert de tolerancia REAL — el ``or
+        out.size_note != ""`` original nunca reprobaba (a 300 KB los tres
+        formatos entran cómodos en la banda), así que la tolerancia
+        jamás se ejercitaba de verdad."""
         out = build_synthetic_file(fmt, _TARGET, "m")
-        assert abs(len(out.content) - _TARGET) <= _TOLERANCE or out.size_note != ""
+        assert out.size_note == ""
+        assert abs(len(out.content) - _TARGET) <= _TOLERANCE
+
+    @pytest.mark.parametrize("fmt", _IMAGE_FORMATS)
+    def test_marker_is_actually_drawn_on_the_pixels(
+        self, fmt: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """141 antagonista I7: ``TestDeterminism`` sólo prueba que el
+        SEED (= marker) cambia los bytes — no que el texto se dibuje. Acá
+        se neutraliza ``ImageDraw.text`` con el MISMO seed: si el marker
+        realmente se pinta, los bytes tienen que diferir."""
+        with_marker = build_synthetic_file(fmt, 20_000, "m").content
+
+        monkeypatch.setattr(ImageDraw.ImageDraw, "text", lambda *a, **k: None)
+        without_marker = build_synthetic_file(fmt, 20_000, "m").content
+
+        assert with_marker != without_marker
 
     @pytest.mark.parametrize(
         ("fmt", "mime", "ext"),

@@ -180,16 +180,22 @@ class MappingService:
                 continue
             id_rvi = str(id_rvi_raw).strip()
 
+            mapping = self._row_to_mapping_split(
+                row, id_rvi, required_index, cmis_property_id_index
+            )
             if id_rvi in self._cache:
                 _logger.warning(
                     "duplicate ID RVI %r dropped from mapping (first occurrence wins)",
                     id_rvi,
                 )
+                # 141 antagonista I3: la fila se descarta del índice por
+                # IDRVI (gana la primera ocurrencia), pero su IDCM sigue
+                # siendo una fila legítima del Modelo Documental — no
+                # indexarla acá la hace invisible para ``get_by_cm_code``.
+                self._remember_cm_code(mapping)
                 continue
 
-            self._remember(
-                self._row_to_mapping_split(row, id_rvi, required_index, cmis_property_id_index)
-            )
+            self._remember(mapping)
 
         if skipped:
             _logger.info(
@@ -304,14 +310,18 @@ class MappingService:
                 continue
             id_rvi = str(id_rvi_raw).strip()
 
+            mapping = self._row_to_mapping(row, id_rvi)
             if id_rvi in self._cache:
                 _logger.warning(
                     "duplicate ID RVI %r dropped from mapping (first occurrence wins)",
                     id_rvi,
                 )
+                # 141 antagonista I3: mismo criterio que el modo split — el
+                # IDCM de la fila descartada sigue siendo indexable.
+                self._remember_cm_code(mapping)
                 continue
 
-            self._remember(self._row_to_mapping(row, id_rvi))
+            self._remember(mapping)
 
         if skipped:
             _logger.info(
@@ -342,13 +352,24 @@ class MappingService:
     def _remember(self, mapping: CMMapping) -> None:
         """141 REQ-001: cachea la fila en los DOS índices a la vez.
 
-        El índice por ``IDRVI`` es el de siempre; el de ``IDCM``
-        (``id_corto``) acumula todas las filas que apuntan al mismo
-        código, en orden de aparición en la fuente. Las filas con
-        ``id_corto`` vacío no entran al índice secundario — no hay
-        código CM que buscar.
+        El índice por ``IDRVI`` es el de siempre (gana la primera
+        ocurrencia); el de ``IDCM`` se delega a :meth:`_remember_cm_code`.
         """
         self._cache[mapping.id_rvi] = mapping
+        self._remember_cm_code(mapping)
+
+    def _remember_cm_code(self, mapping: CMMapping) -> None:
+        """141 REQ-001 (antagonista I3): índice por ``IDCM`` en solitario.
+
+        Se llama tanto para filas nuevas (vía :meth:`_remember`) como
+        para filas cuyo ``IDRVI`` es un duplicado descartado del índice
+        primario — el ``IDCM`` de esa fila sigue siendo una entrada
+        legítima del Modelo Documental, y ``get_by_cm_code`` no puede
+        perderla solo porque otra fila anterior ya ocupó el mismo
+        ``IDRVI``. Acumula todas las filas que apuntan al mismo código,
+        en orden de aparición en la fuente. Las filas con ``id_corto``
+        vacío no entran — no hay código CM que buscar.
+        """
         if mapping.id_corto:
             self._by_cm_code.setdefault(mapping.id_corto, []).append(mapping)
 

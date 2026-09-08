@@ -438,11 +438,6 @@ def build_uploader(config: PipelineConfig, secrets: Secrets) -> CmisUploader:
     )
 
 
-# Alias del nombre privado previo a 141 — los call sites internos siguen
-# funcionando sin tocar cinco líneas por gusto.
-_build_uploader = build_uploader
-
-
 def _try(stage: str, fn: Callable[[], T]) -> T | CheckResult:
     try:
         return fn()
@@ -478,7 +473,7 @@ def _check_log_dir_writable(config: PipelineConfig) -> CheckResult:
 
 def _check_cmis_connectivity(config: PipelineConfig, secrets: Secrets) -> CheckResult:
     try:
-        uploader = _build_uploader(config, secrets)
+        uploader = build_uploader(config, secrets)
         info = uploader.test_connection()
     except Exception as exc:  # noqa: BLE001
         return _fail(
@@ -711,7 +706,7 @@ def _check_cm_type_alignment(config: PipelineConfig, secrets: Secrets) -> CheckR
         # ``m.cmis_type or m.cm_object_type``, asi que el pre-flight tiene
         # que chequear el mismo tipo efectivo que va a viajar en el wire.
         unique_types = sorted({(m.cmis_type or m.cm_object_type) for m in mapping.get_all()})
-        uploader = _build_uploader(config, secrets)
+        uploader = build_uploader(config, secrets)
     except Exception as exc:  # noqa: BLE001
         return _fail("cm_type_alignment", exc)
     missing: list[str] = []
@@ -756,7 +751,7 @@ def _check_cmis_folders_exist(config: PipelineConfig, secrets: Secrets) -> Check
                 "cmis_folders_exist",
                 "no CMISFolder populated in mapping; nothing to verify",
             )
-        uploader = _build_uploader(config, secrets)
+        uploader = build_uploader(config, secrets)
     except Exception as exc:  # noqa: BLE001
         return _fail("cmis_folders_exist", exc)
     missing: list[str] = []
@@ -812,7 +807,7 @@ def _check_cmis_properties_alignment(config: PipelineConfig, secrets: Secrets) -
                 "cmis_properties_alignment",
                 "no CMISPropertyId populated in MetadatosCM; nothing to verify",
             )
-        uploader = _build_uploader(config, secrets)
+        uploader = build_uploader(config, secrets)
     except Exception as exc:  # noqa: BLE001
         return _fail("cmis_properties_alignment", exc)
     type_defs: dict[str, Mapping[str, object]] = {}

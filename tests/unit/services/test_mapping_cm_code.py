@@ -66,7 +66,26 @@ class TestCmCodes:
         assert "CN01" in codes
 
     def test_every_code_resolves(self, sample_service: MappingService) -> None:
-        assert all(sample_service.get_by_cm_code(code) for code in sample_service.cm_codes())
+        # 141 antagonista I7: la cuenta literal (22 IDCM únicos en el CSV de
+        # ``sample/``) evita que este test se vuelva una tautología que
+        # compara el índice contra sí mismo.
+        codes = sample_service.cm_codes()
+        assert len(codes) == 22
+        assert all(sample_service.get_by_cm_code(code) for code in codes)
+
+    def test_every_idcm_in_the_sample_csv_resolves(self, sample_service: MappingService) -> None:
+        """141 antagonista I3: ``cm_codes()`` tiene que cubrir TODO IDCM
+        presente en ``sample/MapeoRVI_CM.csv``, incluidos los que llegan
+        por una fila con ``IDRVI`` duplicado."""
+        rows = [
+            line.split(",")
+            for line in _RVI_CM.read_text(encoding="utf-8").splitlines()[1:]
+            if line.strip()
+        ]
+        csv_codes = {row[2].strip() for row in rows if row[2].strip()}
+        assert csv_codes <= set(sample_service.cm_codes())
+        assert "CJ02" in sample_service.cm_codes()
+        assert sample_service.get_by_cm_code("CJ02") != ()
 
 
 class TestMultipleRowsPerCode:
@@ -109,6 +128,51 @@ class TestMultipleRowsPerCode:
     def test_only_required_metadata(self, service: MappingService) -> None:
         rows = service.get_by_cm_code("XX99")
         assert rows[0].required_metadata_fields == ("BAC_Nombre",)
+
+
+class TestDuplicateIdRviStillIndexesByCmCode:
+    """141 antagonista I3: una fila con ``IDRVI`` duplicado se descartaba
+    ANTES de llamar a ``_remember`` — perdía su ``IDCM`` del índice
+    secundario aunque el ``IDCM`` fuera legítimo y único."""
+
+    @pytest.fixture
+    def service(self, tmp_path: Path) -> Iterator[MappingService]:
+        rvi_path = tmp_path / "MapeoRVI_CM.csv"
+        rvi_path.write_text(
+            "IDRVI,IDCM,IDClaseDocumental,CMISType,CMISFolder\n"
+            "FB01,CN01,01.01,D:tipoA,/carpeta/A\n"
+            "FB01,CN02,01.02,D:tipoB,/carpeta/B\n",
+            encoding="utf-8",
+        )
+        meta_path = tmp_path / "MetadatosCM.csv"
+        meta_path.write_text(
+            "IDCorto,Metadato,Requerido,CMISPropertyId\n"
+            "CN01,BAC_Nombre,Yes,cm:nombre\n"
+            "CN02,BAC_CIF,Yes,cm:cif\n",
+            encoding="utf-8",
+        )
+        rvi = TabularDataSource(rvi_path)
+        metadatos = TabularDataSource(meta_path)
+        try:
+            yield MappingService(rvi, metadata_source=metadatos)
+        finally:
+            rvi.close()
+            metadatos.close()
+
+    def test_both_cm_codes_are_indexed(self, service: MappingService) -> None:
+        assert set(service.cm_codes()) == {"CN01", "CN02"}
+
+    def test_each_code_resolves_its_own_row(self, service: MappingService) -> None:
+        (cn01,) = service.get_by_cm_code("CN01")
+        (cn02,) = service.get_by_cm_code("CN02")
+        assert cn01.cmis_folder == "/carpeta/A"
+        assert cn02.cmis_folder == "/carpeta/B"
+
+    def test_id_rvi_index_still_keeps_first_occurrence_only(self, service: MappingService) -> None:
+        """El descarte por IDRVI duplicado no cambia: FB01 sigue
+        resolviendo a la PRIMERA fila (CN01), no a CN02."""
+        assert service.get_mapping("FB01").id_corto == "CN01"
+        assert service.count() == 1
 
 
 class TestConsolidatedMode:
