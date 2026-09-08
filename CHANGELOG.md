@@ -15,6 +15,116 @@ abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
+## [0.113.0] — 2026-09-07 — **Consola: tiro de prueba a un código CM con la respuesta cruda**
+
+Antes de una corrida de miles de documentos, el operador quiere
+confirmar que UN código de Content Manager está mapeado, que los
+metadatos que exige son los que él cree, y — sobre todo — ver qué
+contesta el servidor cuando algo falla. El `pipeline` no sirve para
+eso: trunca el cuerpo del error y reintenta. Spec 141, TDD estricto y
+revisión antagonista.
+
+### Added
+
+- **Spec 141 — pestaña `[0] PRUEBA`.** Se escribe un código CM
+  (`IDCM`), `↵` lo valida contra el mapping (si no existe, sugiere los
+  más parecidos) y muestra carpeta y `cmis:objectTypeId` destino; si el
+  código tiene más de una fila, un selector elige cuál. Aparece un
+  input por metadato **requerido** del CSV, un selector de formato
+  (`pdf` / `tiff` / `jpeg` / `png`) y un tamaño (`200kb` por defecto).
+  `s` genera el documento sintético, lo sube con UN solo
+  `createDocument` y muestra la respuesta CRUDA: `HTTP <status>
+  <reason> · <ms> · <nombre> (<tamaño>)`, `## headers`, `## body`
+  completo y `## curl` para reproducir a mano. Un historial de hasta 20
+  intentos permite borrar cada documento subido; `d` borra el último.
+  Todo con confirmación, y en `prd` con la palabra `PRD`. Bloqueado
+  mientras hay una corrida activa; no pasa por tracking ni por
+  idempotencia — el documento se llama `PRUEBA-<IDCM>-<fecha>.<ext>`
+  para distinguirlo de un vistazo.
+- `MappingService.get_by_cm_code(id_cm)` y `cm_codes()`: buscar
+  mapeos por código CM (antes sólo por `clase_id`/`id_rvi`).
+- `services/mock/synthetic_file.py`: `build_synthetic_file(fmt, size,
+  marker)` genera PDF (stdlib), TIFF, JPEG y PNG (Pillow, ruido
+  determinista) del tamaño pedido, con `mime_type`, extensión y una
+  nota si el tamaño real difiere.
+- `CmisUploader.upload_raw(...)` y `delete_object(object_id)`: un solo
+  request, sin reintentos ni re-autenticación; los `4xx`/`5xx` se
+  devuelven como `RawResponse` (status, reason, headers, body, ms,
+  curl) en vez de lanzarse. `RawResponse` vive en `domain/models.py` y
+  el puerto `PracticeUploadPort` en `domain/ports.py`, separado de
+  `IUploader`.
+- `services/practice_upload.py`: caso de uso puro (`PracticeDraft`,
+  `validate_values`, `build_properties` Metadato → `CMISPropertyId`,
+  `run_practice_upload`); el archivo temporal se borra en un `finally`.
+- Documentación (REQ-006): guía de la consola con el ejercicio `CN01`
+  → PDF 200 KB → leer la respuesta → borrar; `reference/cli.md` (tab
+  `0·PRUEBA`, teclas `0`/`F10`, `↵`, `s`, `d`); tutorial 04;
+  `explanation/operations-console.md` ("Un tiro antes de la corrida");
+  `diagrams/console-flow.md` (nodo `[0]` → CMIS).
+
+### Changed
+
+- La consola tiene 10 pestañas: `1`–`9`,`0` / `F1`–`F10`. `s` y `d`
+  se despachan según la pestaña activa (`[8]` sync / `[0]` subir;
+  `[4]` doctor / `[0]` borrar el último).
+- `cli/doctor.py`: `build_uploader` es público (`_build_uploader`
+  queda como alias).
+- README: "9 pantallas" → "10 pantallas".
+
+### Fixed
+
+Hallazgos de la revisión antagonista sobre 141, todos con test rojo
+primero:
+
+- **Bucle infinito de render con tormenta de requests (B1).** Con un
+  código CM de más de una fila, cambiar el `Select#row` reconstruía el
+  propio `Select` en cada render; `set_options()`/`value=` POSTEAN
+  `Select.Changed` (un flag síncrono no lo frena), así que la pantalla
+  se remontaba ~12 veces/s y disparaba ~20 `getTypeDefinition` +
+  `getObjectByPath` por segundo contra el Content Manager, sin fin. El
+  `Select` se arma UNA vez al validar, dentro de `self.prevent(
+  Select.Changed)`, y el handler corta si la fila no cambió.
+- **Una excepción en un worker mataba la consola entera (B2).**
+  `run_worker(thread=True)` usa `exit_on_error=True` por default y la
+  comprobación del destino no tenía `try`. Los tres workers de `[0]`
+  van con `exit_on_error=False`, cuerpo dentro de `try/except`, y el
+  `call_from_thread` tolera que la app ya haya cerrado.
+- **`RawResponse.object_id` devolvía ids que NO eran el documento
+  (B3).** Parseaba el cuerpo aunque el status fuera 4xx/5xx y caía a
+  `data["id"]` — Alfresco devuelve el id de la CARPETA destino en
+  varios errores, y el historial armaba el botón "borrar" contra ese
+  id con `allVersions=true`. Ahora sólo con `ok`, sólo desde
+  `cmis:objectId`, y si viene `cmis:baseTypeId` tiene que ser
+  `cmis:document`.
+- `Set-Cookie` / `Authorization` / `WWW-Authenticate` /
+  `Proxy-Authenticate` de la respuesta se muestran como `***` (I1): un
+  `JSESSIONID` vivo no va a la pantalla.
+- El borrado capturaba un ÍNDICE del historial, que se reindexa con
+  cada intento nuevo; ahora captura el intento (I2).
+- `MappingService.get_by_cm_code` perdía los códigos CM de las filas
+  con `IDRVI` duplicado (en el `sample/`, `CJ02` no existía para
+  `[0]`): el índice por IDCM se alimenta antes del descarte (I3).
+- El archivo sintético vivía en `assembly.temp_dir` con nombre de
+  resolución de segundo: dos operadores en el mismo segundo se
+  pisaban el archivo mid-upload. Ahora cada tiro va en un
+  `mkdtemp(prefix="practice-")` propio que se borra entero, con la
+  escritura dentro del `try` (I4, M4).
+- El `## curl` decía `-u admin:***` hardcodeado; ahora interpola el
+  usuario CMIS real (I5).
+- `d` (borrar el último) no chequeaba corrida activa ni credenciales
+  CMIS; tiene las mismas guardas que subir (I6).
+- Tests endurecidos (I7): tolerancia real de tamaño por formato y
+  marker efectivamente dibujado en `synthetic_file`; URL exacta del
+  `createDocument` en `upload_raw`; asserts literales en lugar de
+  tautologías.
+- `delete_object("")` lanza `ValueError` antes de armar un request
+  (M1); `validate_values` trata un catálogo `{}` como "sin catálogo",
+  igual que `build_properties` (M2), y rechaza dos `Metadato` con el
+  mismo `CMISPropertyId` (M3); eliminado el alias muerto
+  `doctor._build_uploader` (M6).
+
+---
+
 ## [0.112.0] — 2026-09-07 — **Consola: editor de conexiones con alias y editor de configuración completo**
 
 Plan C de la consola: la configuración ENTERA se administra desde la
