@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # This file documents the COMPLETE configurable surface of CMCourier as of
-# version 0.113.0. It is a *reference*, not a runnable config:
+# version 0.113.1. It is a *reference*, not a runnable config:
 #
 #   * Every path below is a PLACEHOLDER (`/path/to/...`). The schema uses
 #     pydantic FilePath / DirectoryPath for inputs that MUST already exist,

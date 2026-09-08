@@ -15,6 +15,61 @@ abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
 
 ---
 
+## [0.113.1] — 2026-09-08 — **Instalador offline: que el bundle se arme y que instale en el servidor**
+
+El instalador offline (spec 101) nunca se había ejecutado de punta a
+punta: el bundle no se armaba (`pip download` intentaba empaquetar el
+checkout entero por el `-e .` del `uv export`), y aunque se hubiera
+armado, `install.bat` no comprobaba la versión de Python. Ahora se
+arma en Linux para Windows y para Linux, y el bundle Linux se instala
+en un venv limpio en el test. Spec 142, TDD estricto y revisión
+antagonista.
+
+### Fixed
+
+- **Spec 142 — el bundle se arma.** `uv export --no-emit-project`
+  (el proyecto viaja como wheel de `uv build`, no como `-e .`);
+  `requirements-download.txt` derivado SIN markers de plataforma
+  (`pip download` los evalúa contra la máquina de build: `colorama`
+  no viajaba al bundle Windows armado desde Linux); guardas de un
+  solo `cmcourier-*.whl`, cero sdists y staging de `pip`/`setuptools`/
+  `wheel` obligatorio; prerequisito `zip` en Linux; cross-download
+  Linux con `manylinux_2_28` (los pins actuales lo requieren).
+- **Spec 142 — el instalador comprueba antes de tocar nada.**
+  `install.bat` / `install.sh` se generan desde
+  `installer/templates/` y comprueban `major.minor` **y** 64 bits del
+  intérprete elegido (`PYTHON` → `py -X.Y` / `pythonX.Y` → `python`)
+  antes de crear `.venv`; un `.venv` de otra versión o roto se
+  reporta con la orden exacta para borrarlo, nunca se borra solo.
+  `install.bat`: probe sin `for /f` sobre comando (cmd re-parsea
+  las comillas y se traga `2>nul`), `cd /d … || goto :fail` para
+  shares UNC, `PYTHON` con comillas y rutas relativas resueltas desde
+  el directorio del operador, `pause` si se lanzó con doble click, y
+  siempre CRLF/ASCII aunque se renderice en Linux.
+- **Build Windows desde Linux con `pwsh`.** `python`/`python3`
+  fallback, `Join-Path` con más de dos segmentos (PS 5.1), zip con
+  `/` en las entradas.
+
+### Added
+
+- `tests/unit/installer/` (36 tests: texto de ambos instaladores +
+  ejecución real de `install.sh` con intérpretes falsos) y
+  `tests/integration/installer/` (gateado con
+  `CMCOURIER_INSTALLER_LIVE=1`: arma los dos bundles, instala el de
+  Linux y audita el de Windows — conteo de wheels, tags `cp311`,
+  CRLF).
+
+### Docs
+
+- `docs/how-to/build-offline-installer.md` reescrito: la versión de
+  Python del servidor PRIMERO, prerequisitos por plataforma (python.org
+  x64, VC++ Redistributable, ODBC 18, glibc ≥ 2.28, unixODBC), build
+  desde Linux con `pwsh`, cómo verificar el bundle antes de llevarlo, y
+  la nota honesta de que `install.bat` sólo se verifica por texto en el
+  runner Linux — probalo UNA vez en un Windows real.
+
+---
+
 ## [0.113.0] — 2026-09-07 — **Consola: tiro de prueba a un código CM con la respuesta cruda**
 
 Antes de una corrida de miles de documentos, el operador quiere

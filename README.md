@@ -2,7 +2,7 @@
 
 > Migración de documentos bancarios de **IBM RVI / AS400** a **IBM Content Manager** vía **CMIS REST**. Idempotente, observable, parallelizable.
 
-**Versión actual**: `0.113.0` — pipeline de punta a punta: modos `batched` y `streaming`, AIMD + heavy/light lanes, registro de conexiones por alias (AS400 y SQL Server como fuentes de metadata, credenciales `<ALIAS>_USERNAME/_PASSWORD`), sincronización distribuida con AS400 (`claim` / `periodic`) + herramienta de recuperación, consola de operación interactiva de 10 pantallas (`cmcourier console`: una tarjeta de credenciales por conexión con alta/edición/baja de conexiones por alias, doctor granular, overrides que se pueden escribir al YAML, editor del YAML completo generado del schema, launcher con selector de pipeline, monitor con pausa/re-auth en caliente, techo manual de workers y ETA, batches, sync AS400 y prueba de carga de UN documento sintético a un código CM con la respuesta cruda del servidor), instalador offline para servidores air-gapped, y banco de pruebas de stress.
+**Versión actual**: `0.113.1` — pipeline de punta a punta: modos `batched` y `streaming`, AIMD + heavy/light lanes, registro de conexiones por alias (AS400 y SQL Server como fuentes de metadata, credenciales `<ALIAS>_USERNAME/_PASSWORD`), sincronización distribuida con AS400 (`claim` / `periodic`) + herramienta de recuperación, consola de operación interactiva de 10 pantallas (`cmcourier console`: una tarjeta de credenciales por conexión con alta/edición/baja de conexiones por alias, doctor granular, overrides que se pueden escribir al YAML, editor del YAML completo generado del schema, launcher con selector de pipeline, monitor con pausa/re-auth en caliente, techo manual de workers y ETA, batches, sync AS400 y prueba de carga de UN documento sintético a un código CM con la respuesta cruda del servidor), instalador offline para servidores air-gapped, y banco de pruebas de stress.
 
 ---
 
@@ -151,7 +151,7 @@ verificación del bundle y detalle completo en
 ```bash
 pytest -m unit              # solo unit tests (rápidos)
 cmcourier --help            # confirma que el CLI está instalado
-cmcourier --version         # debe imprimir 0.113.0
+cmcourier --version         # debe imprimir 0.113.1
 ```
 
 ### Variables de entorno (cuando corras migraciones reales)
