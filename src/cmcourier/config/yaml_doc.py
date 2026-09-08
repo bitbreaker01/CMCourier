@@ -321,8 +321,12 @@ def _to_node(value: object) -> object:
 
 
 def _set_index(parent: CommentedMap | CommentedSeq, index: int, value: object) -> None:
+    """``index == len`` agrega al final (139: ``diff_edits`` emite items nuevos así)."""
     if not isinstance(parent, CommentedSeq):
         raise YamlDocumentError("un índice numérico sólo se aplica a una secuencia")
+    if index == len(parent):
+        parent.append(value)
+        return
     if not 0 <= index < len(parent):
         raise YamlDocumentError(f"índice {index} fuera de rango (usá append para agregar)")
     parent[index] = value

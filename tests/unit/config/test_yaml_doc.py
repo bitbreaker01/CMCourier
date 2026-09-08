@@ -148,6 +148,14 @@ class TestGetHasSet:
         tail = "    - kind: csv\n      alias: b\n    - kind: csv\n      alias: c\n"
         assert doc.text().endswith(tail)
 
+    def test_set_at_len_appends(self, tmp_path: Path) -> None:
+        """139: ``diff_edits`` emite ``Edit((…, len), item)`` para un item nuevo."""
+        doc, _ = _doc(tmp_path, "l:\n  - a\n")
+        doc.set(("l", 1), "b")
+        assert doc.text() == "l:\n  - a\n  - b\n"
+        with pytest.raises(YamlDocumentError):
+            doc.set(("l", 5), "c")
+
     def test_append_creates_the_sequence(self, tmp_path: Path) -> None:
         doc, _ = _doc(tmp_path, "a: 1\n")
         doc.append(("a2", "items"), 5)

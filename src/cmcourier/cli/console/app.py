@@ -39,6 +39,7 @@ from cmcourier.cli.console.run_pane import RunPane
 from cmcourier.cli.console.runner import ConsoleRunManager, LaunchSpec
 from cmcourier.cli.console.state import ConsoleState
 from cmcourier.cli.console.sync_pane import SyncPane
+from cmcourier.cli.console.yaml_pane import YamlPane
 from cmcourier.cli.doctor import (
     CHECK_NAMES,
     CheckResult,
@@ -51,7 +52,17 @@ from cmcourier.config.schema import PipelineConfig
 from cmcourier.domain.exceptions import ConfigurationError
 from cmcourier.domain.models import BatchInfo
 
-_TABS = ["inicio", "credenciales", "config", "doctor", "correr", "monitor", "batches", "sync"]
+_TABS = [
+    "inicio",
+    "credenciales",
+    "config",
+    "doctor",
+    "correr",
+    "monitor",
+    "batches",
+    "sync",
+    "yaml",
+]
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -131,17 +142,19 @@ class HelpScreen(ModalScreen[None]):
         Binding("question_mark", "dismiss", "cerrar"),
     ]
 
-    HELP = """[b $accent]TECLAS GLOBALES[/] (F1–F8 funcionan aun con foco en un campo)
-  1-8 / F1-F8   cambiar de pantalla        ?   esta ayuda
+    HELP = """[b $accent]TECLAS GLOBALES[/] (F1–F9 funcionan aun con foco en un campo)
+  1-9 / F1-F9   cambiar de pantalla        ?   esta ayuda
   q             salir (confirma si hay corrida)   Esc  cerrar modal / soltar foco
 
 [b $accent]POR PANTALLA[/]
-  [2] ↵ probar conexión del formulario     [3] a guardar overrides · w escribirlos al YAML
+  [2] ↵ probar conexión · n nueva conexión (editar/quitar en cada tarjeta)
+  [3] a guardar overrides · w escribirlos al YAML
   [4] d correr la selección · ↑↓ navegar · ↵ expandir
   [5] r lanzar                             [6] x cancelar (drain) · p pausar · r reanudar
                                                +/- techo manual de workers (en caliente)
   [7] ↑↓ navegar · ↵ detalle · R retry · E export
   [8] s estado del sync · simular antes de aplicar (recover) · resolver por txn
+  [9] v validar el YAML editado · w escribirlo (backup) · connections se edita en [2]
 
 [b $accent]STAGES S0–S7[/]
   S0/S1 adquirir triggers · indexar RVABREP     S2/S3 mapear tipo CM · resolver metadata
@@ -190,6 +203,7 @@ class ConsoleApp(App[None]):
         Binding("d", "doctor_run", "doctor", show=False),
         Binding("a", "apply_overrides", "guardar overrides", show=False),
         Binding("w", "persist_overrides", "escribir al YAML", show=False),
+        Binding("v", "validate_yaml", "validar YAML", show=False),
         Binding("n", "new_connection", "nueva conexión", show=False),
         Binding("r", "launch", "lanzar", show=False),
         Binding("x", "cancel_run", "cancelar corrida", show=False),
@@ -248,6 +262,8 @@ class ConsoleApp(App[None]):
                 yield BatchesPane(self)
             with TabPane("8·SYNC", id="sync"):
                 yield SyncPane(self)
+            with TabPane("9·YAML", id="yaml"):
+                yield YamlPane(self)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -301,6 +317,9 @@ class ConsoleApp(App[None]):
             self.call_later(self.q("CredsPane", CredsPane).rebuild_cards)
         elif active == "monitor" and self.run_active:
             self.q("MonitorPane", MonitorPane).refresh_monitor()
+        elif active == "yaml":
+            # 139: refleja escrituras de [2]/[3]; con cambios pendientes no pisa.
+            self.call_later(self.q("YamlPane", YamlPane).reload_if_clean)
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
@@ -340,8 +359,16 @@ class ConsoleApp(App[None]):
             self.q("CredsPane", CredsPane).open_new()
 
     def action_persist_overrides(self) -> None:
-        if self.q("#tabs", TabbedContent).active == "config":
+        """``w`` despacha por tab: [3] overrides (135), [9] el formulario YAML (139)."""
+        active = self.q("#tabs", TabbedContent).active
+        if active == "config":
             self.persist_overrides()
+        elif active == "yaml":
+            self.call_later(self.q("YamlPane", YamlPane).write)
+
+    def action_validate_yaml(self) -> None:
+        if self.q("#tabs", TabbedContent).active == "yaml":
+            self.q("YamlPane", YamlPane).validate()
 
     def persist_overrides(self) -> None:
         """135: escribe los overrides APLICADOS al YAML — con confirmación.
@@ -370,6 +397,7 @@ class ConsoleApp(App[None]):
             self.state.overrides = applied.cleared()
             self.state.mark_doctor_stale("cambió el YAML")
             pane.refresh_yaml_values()
+            self.call_later(self.q("YamlPane", YamlPane).reload_if_clean)
             self.on_pii_override(None)
             self.refresh_status()
             self.notify(

@@ -40,6 +40,7 @@ from cmcourier.cli.console.connection_edit import (
 )
 from cmcourier.cli.console.connection_edit_screen import ConnectionEditScreen
 from cmcourier.cli.console.state import AS400_MAX_TRIES, CMIS_ALIAS, ConnInfo, connection_infos
+from cmcourier.cli.console.yaml_pane import YamlPane
 from cmcourier.cli.doctor import CheckResult, CheckStatus, check_cmis, check_connection
 from cmcourier.config.loader import load_config
 from cmcourier.config.schema import INLINE_CONNECTION_ALIAS, PipelineConfig
@@ -438,6 +439,7 @@ class CredsPane(Vertical):
         await self.rebuild_cards()  # rebuild_conn hace el prefill del alias nuevo
         self._render_hint()
         console.q("ConfigPane", ConfigPane).refresh_yaml_values()
+        await console.q("YamlPane", YamlPane).reload_if_clean()  # 139
         console.on_pii_override(None)
         console.refresh_status()
         console.notify(f"{notice} — backup en {result.backup_path}", timeout=8)
