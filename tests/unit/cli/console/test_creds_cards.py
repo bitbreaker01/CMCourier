@@ -176,6 +176,34 @@ class TestCards:
 
         asyncio.run(_run())
 
+    @pytest.mark.parametrize("size", [(100, 30), (120, 24)])
+    def test_pane_scrolls_to_reach_every_card(self, tmp_path: Path, size: tuple[int, int]) -> None:
+        """Queja del operador: con 3 conexiones la tercera tarjeta queda cortada
+        abajo y "no puedo hacer scroll down". `CredsPane` era un `Vertical`
+        (overflow oculto): la grilla de 2 columnas mide más que la terminal y
+        no hay forma de llegar. Tras `scroll_end` TODAS las tarjetas tienen que
+        caer dentro de la pantalla (y ninguna se sale por la derecha)."""
+
+        async def _run() -> None:
+            config, path = _registry_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test(size=size) as pilot:
+                await goto(pilot, app, "2")
+                pane = app.query_one(CredsPane)
+                assert pane.max_scroll_y > 0, f"la grilla entra entera en {size}: test sin valor"
+                width, height = size
+                for alias in ("cmis", "clientes_sql", "rvi"):
+                    r = app.query_one(f"#card-{alias}").region
+                    assert r.x + r.width <= width, f"{alias} se sale por la derecha: {r} en {size}"
+                last = app.query_one("#card-rvi").region
+                assert last.y + last.height > height, f"rvi ya entra sin scroll en {size}"
+                pane.scroll_end(animate=False)
+                await pilot.pause()
+                last = app.query_one("#card-rvi").region
+                assert last.y + last.height <= height, f"rvi no se alcanza: {last} en {size}"
+
+        asyncio.run(_run())
+
 
 class TestRecompose:
     """Antagonista 129-131 I1/I2: la rama de remonte de `rebuild_cards` hoy

@@ -25,7 +25,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
-from textual.containers import Grid, Horizontal, Vertical
+from textual.containers import Grid, Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Input, Label, Static
 
 from cmcourier.cli.console.config_pane import ConfigPane
@@ -80,8 +80,13 @@ def _sites_text(info: ConnInfo) -> str:
     return f"usada por: {' · '.join(info.sites)}"
 
 
-class CredsPane(Vertical):
-    """Formulario CMIS + una tarjeta por alias, con prueba de conexión en vivo."""
+class CredsPane(VerticalScroll):
+    """Formulario CMIS + una tarjeta por alias, con prueba de conexión en vivo.
+
+    ``VerticalScroll`` (no ``Vertical``): con 3+ conexiones la grilla de dos
+    columnas mide más que la terminal y un ``Vertical`` (overflow oculto)
+    dejaba la última tarjeta cortada sin forma de llegar.
+    """
 
     DEFAULT_CSS = """
     CredsPane { padding: 1 2; }

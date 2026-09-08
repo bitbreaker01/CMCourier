@@ -23,6 +23,15 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
   (se envuelven en vez de empujar) y `editar`/`quitar`/`mover` en su
   propia fila. Test de pilot que exige que cada botón y chip caiga
   dentro del área de su tarjeta a 120 y a 100 columnas.
+- **Consola `[2] CREDENCIALES`: con 3+ conexiones la última tarjeta
+  quedaba cortada abajo y no había scroll.** Reporte del operador
+  ("no puedo hacer scroll down"). `CredsPane` era un `Vertical` (overflow
+  oculto): la grilla de dos columnas mide más que la terminal y no había
+  forma de llegar a la segunda fila. Ahora es `VerticalScroll`, como
+  `[5] CORRER` y `[8] SYNC` (hallazgo 128): rueda del mouse, PgDn/PgUp o
+  Tab hasta la tarjeta la traen a la vista. Test de pilot a 100×30 y
+  120×24 que exige que el fondo de la última tarjeta sea alcanzable con
+  scroll y que ninguna se salga por la derecha.
 
 ---
 
