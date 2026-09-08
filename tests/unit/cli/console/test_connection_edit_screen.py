@@ -283,6 +283,80 @@ class TestDelete:
 
         asyncio.run(_run())
 
+    def test_i3_session_credentials_of_the_deleted_alias_are_discarded(
+        self, tmp_path: Path
+    ) -> None:
+        """I3: el confirm promete descartarlas; si quedan, `to_secrets` las
+        expone y recrear el alias revive la password vieja (prefill setdefault)."""
+
+        async def _run() -> None:
+            config, path = _config(tmp_path, connections=_RVI)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "2")
+                app.query_one("#user-rvi", Input).value = "usr"
+                app.query_one("#pass-rvi", Input).value = "pw-vieja"
+                await pilot.pause()
+                assert app.state.creds.get("rvi").password == "pw-vieja"
+
+                await _press(pilot, app, "del-rvi")
+                assert await wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+                app.screen.query_one("#yes", Button).press()
+                assert await wait_for(pilot, lambda: "  rvi:" not in path.read_text())
+                assert await wait_for(pilot, lambda: "rvi" not in app.state.creds.credentials)
+                assert "rvi" not in app.state.creds.to_secrets().credentials
+                assert app.state.creds.get("rvi").password == ""
+
+        asyncio.run(_run())
+
+    def test_i3_a_refused_delete_keeps_the_credentials(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _config(tmp_path, connections=_RVI, metadata_sources=_META_AS400)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "2")
+                app.query_one("#pass-rvi", Input).value = "pw"
+                await pilot.pause()
+                await _press(pilot, app, "del-rvi")
+                await pilot.pause()
+                assert not isinstance(app.screen, ConfirmScreen)
+                assert app.state.creds.get("rvi").password == "pw"
+
+        asyncio.run(_run())
+
+
+_ANCHORED = "  rvi: &base\n    kind: as400\n    host: as400.viejo\n    port: 446\n  otro: *base\n"
+
+
+class TestAnchoredYaml:
+    def test_b1_editing_an_alias_notifies_and_leaves_the_yaml_intact(self, tmp_path: Path) -> None:
+        """B1: ruamel devuelve el MISMO objeto para `&base` y `*base` — editar
+        `rvi` cambiaría también `otro`. Se avisa y no se toca el disco."""
+
+        async def _run() -> None:
+            config, path = _config(tmp_path, connections=_ANCHORED)
+            before = path.read_text()
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "2")
+                await _press(pilot, app, "edit-rvi")
+                assert await wait_for(pilot, lambda: isinstance(app.screen, ConnectionEditScreen))
+                screen = app.screen
+                assert isinstance(screen, ConnectionEditScreen)
+                await _fill(pilot, screen, host="as400.nuevo")
+                await _save(pilot, app)
+                assert await wait_for(
+                    pilot, lambda: any("No se escribió el YAML" in m for m in _notes(app))
+                )
+                toast = next(m for m in _notes(app) if "No se escribió el YAML" in m)
+                assert "alias YAML" in toast
+                assert "Traceback" not in toast and len(toast) < 200
+                assert path.read_text() == before
+                assert not _backups(tmp_path)
+                assert app.config.connections["otro"].host == "as400.viejo"
+
+        asyncio.run(_run())
+
 
 class TestMoveInline:
     def test_e6_move_inline_to_registry_copies_session_creds(self, tmp_path: Path) -> None:

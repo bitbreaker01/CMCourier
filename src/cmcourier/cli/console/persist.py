@@ -76,6 +76,8 @@ def persist_overrides(
             if value is not None:
                 doc.set(path, value)
         result = doc.write(verify=verify)
-    except (YamlDocumentError, YamlWriteError) as exc:
+    # M2: leer, escribir el tmp o reemplazar puede fallar por permisos / disco
+    # lleno; la [3] sólo atrapa PersistError y el OSError crudo salía como traceback.
+    except (YamlDocumentError, YamlWriteError, OSError) as exc:
         raise PersistError(str(exc)) from exc
     return PersistResult(config=result.value, backup_path=result.backup_path, changed=changed)

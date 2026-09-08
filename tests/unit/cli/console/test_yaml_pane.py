@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from textual.widgets import Button, Input, Select, Static
 from cmcourier.cli.console.app import ConfirmScreen, ConsoleApp, HelpScreen
 from cmcourier.cli.console.config_pane import ConfigPane
 from cmcourier.cli.console.creds_pane import CredsPane
+from cmcourier.cli.console.schema_form import diff_edits
 from cmcourier.cli.console.yaml_pane import YamlPane
 from cmcourier.config.loader import load_config
 from cmcourier.config.schema import PipelineConfig
@@ -285,6 +287,84 @@ class TestE7Discriminator:
                 assert "required" in str(err.renderable).lower()
 
         asyncio.run(_run())
+
+
+class TestI4QuotedScalars:
+    def test_typing_back_the_quoted_original_leaves_no_changes(self, tmp_path: Path) -> None:
+        """I4: `repo_id: "repo"` llega como `DoubleQuotedScalarString`; `dirty`
+        (==) lo veía igual y `diff_edits` (por tipo) distinto — la cabecera
+        marcaba "1 cambios" y `w` contestaba "sin cambios"."""
+
+        async def _run() -> None:
+            _, path = _yaml(tmp_path)
+            path.write_text(path.read_text().replace("  repo_id: repo\n", '  repo_id: "repo"\n'))
+            config = load_config(path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "9")
+                pane = app.query_one(YamlPane)
+                assert type(pane.original["cmis"]["repo_id"]) is str
+                row = _row(app, ("cmis", "repo_id"))
+                row.value = "otro"
+                await pilot.pause()
+                assert "1 cambios" in _head(app)
+                row.value = "repo"
+                await pilot.pause()
+                assert pane.dirty is False
+                assert diff_edits(pane.original, pane.working) == []
+                assert "sin cambios" in _head(app)
+
+        asyncio.run(_run())
+
+
+class TestI5Discard:
+    def test_u_restores_the_form_after_changing_a_discriminator(self, tmp_path: Path) -> None:
+        """I5: cambiar el kind destruye el bloque y no había forma de volver."""
+
+        async def _run() -> None:
+            config, path = _yaml(tmp_path)
+            before = path.read_text()
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "9")
+                pane = app.query_one(YamlPane)
+                original = deepcopy(pane.original)
+                _row(app, ("trigger", "kind"), Select).value = "local_scan"
+                await pilot.pause()
+                await pilot.pause()
+                assert pane.working["trigger"] == {"kind": "local_scan"}
+                assert pane.dirty
+
+                app.set_focus(None)
+                await pilot.press("u")
+                assert await wait_for(pilot, lambda: not pane.dirty)
+                assert pane.working == original
+                assert _row(app, ("trigger", "csv_path")).value
+                assert "sin cambios" in _head(app)
+                assert any("descartados" in m.lower() for m in _notes(app))
+                assert path.read_text() == before
+
+        asyncio.run(_run())
+
+    def test_u_outside_the_yaml_tab_is_ignored(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _yaml(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "9")
+                pane = app.query_one(YamlPane)
+                _row(app, ("cmis", "workers")).value = "8"
+                await pilot.pause()
+                await goto(pilot, app, "1")
+                await pilot.press("u")
+                await pilot.pause()
+                assert pane.dirty
+
+        asyncio.run(_run())
+
+    def test_u_is_listed_in_the_help(self, tmp_path: Path) -> None:
+        line = next(ln for ln in HelpScreen.HELP.splitlines() if ln.strip().startswith("[9]"))
+        assert "u descartar" in line
 
 
 class TestE8RunActive:

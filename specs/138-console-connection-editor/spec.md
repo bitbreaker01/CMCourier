@@ -38,9 +38,11 @@ pone la interfaz.
   kind as400); `("metadata","sources",i,"as400_connection")` por cada
   source as400 (label `metadata.sources[i] <name>`); `("metadata",
   "sources",i,"connection")` por cada source mssql; `("tracking",
-  "as400_sync","connection")` si `as400_sync.enabled` (label
-  `tracking.as400_sync`). `current` es el alias que hoy referencia el
-  sitio, `None` si es inline o no está.
+  "as400_sync","connection")` si está habilitado o referencia un alias
+  (label `tracking.as400_sync`) — el schema valida el alias del sync
+  aunque esté apagado (`connection_refs(include_disabled=True)`), así que
+  un sync deshabilitado que lo nombra igual bloquea la baja. `current` es
+  el alias que hoy referencia el sitio, `None` si es inline o no está.
 - `plan_write(draft, config, *, use_at: set[tuple]) -> list[Edit]` con
   `Edit(path, value)`: `("connections", alias)` → `draft_to_yaml`, y por
   cada sitio en `use_at` cuya `kind` coincida con la del draft:
@@ -48,10 +50,12 @@ pone la interfaz.
 - `plan_delete(alias, config) -> list[Edit] | list[Site]`: si algún
   sitio lo referencia devuelve esos sitios (la UI rechaza y los lista);
   si no, `[Edit(("connections", alias), DELETE)]`.
-- `plan_move_inline(site, alias, config) -> list[Edit]`: toma la
-  conexión inline de `site` (as400 `As400ConnectionConfig`) y produce
-  `Edit(("connections", alias), model_dump(...))` + `Edit(site.path,
-  alias)`. `alias` validado como en `validate_draft`.
+- `inline_connection(site, config) -> As400ConnectionConfig`: la conexión
+  inline que vive en `site` (`ValueError` si el sitio usa un alias). Mover
+  al registro NO tiene plan propio: abre el mismo modal prefilled con los
+  campos del inline y los sitios inline pre-marcados, y escribe con
+  `plan_write` — así el operador ve y corrige antes de guardar, y sólo se
+  escriben los campos que no dejó vacíos.
 - `apply_edits(doc: YamlDocument, edits)`: `DELETE` → `doc.delete`,
   otro → `doc.set`.
 
@@ -131,11 +135,13 @@ avisa.
 las tarjetas.
 
 **E6 —** Tarjeta inline `as400` (indexing.source inline) → "mover al
-registro…" con alias `rvi_main` → el YAML gana `connections.rvi_main`
-con host/port/database/driver del inline y `indexing.source.connection:
-rvi_main`; `load_config` valida; las credenciales `AS400_*` de sesión se
-copian al nuevo alias (`creds.set(alias, user, pass)` si el inline las
-tenía) para no re-pedirlas.
+registro…" abre el modal prefilled con los campos del inline y los sitios
+inline pre-marcados; con alias `rvi_main` → `plan_write` escribe
+`connections.rvi_main` (sólo los campos no vacíos del modal) y
+`indexing.source.connection: rvi_main`; `load_config` valida; las
+credenciales `AS400_*` de sesión se copian al nuevo alias
+(`creds.set(alias, user, pass)` si el inline las tenía) para no
+re-pedirlas.
 
 **E7 —** Con `run_active`, los botones están `disabled` y `n` notifica
 sin abrir modal.

@@ -173,7 +173,7 @@ class YamlPane(Vertical):
             parts.append(self._validation)
         if changes and self._mtime is not None and self._disk_mtime() != self._mtime:
             parts.append("⚠ el archivo cambió en disco (tus cambios no se pisan)")
-        parts.append("v validar · w escribir")
+        parts.append("v validar · w escribir · u descartar")
         with contextlib.suppress(Exception):
             self.query_one("#yaml-head", Static).update("  ·  ".join(parts))
 
@@ -482,6 +482,24 @@ class YamlPane(Vertical):
                     break
             else:
                 raise KeyError(path)
+
+    # ------------------------------------------------------------ descartar (I5)
+
+    async def discard(self) -> None:
+        """``u`` en [9]: ``working`` vuelve a ``original`` y el formulario se
+        redibuja entero.
+
+        I5: cambiar un discriminador (``kind``) deja el item en
+        ``{kind: nuevo}`` y se lleva puesto el bloque que había — sin esto,
+        el operador tenía que salir de la consola para recuperarlo.
+        """
+        if not self.dirty:
+            self.console.notify("El YAML no tiene cambios pendientes (sin cambios)")
+            return
+        self.working = deepcopy(self.original)
+        self._validation = ""
+        await self.render_form()
+        self.console.notify("Cambios descartados — el formulario volvió al archivo en disco")
 
     # ------------------------------------------------------------ validar (REQ-003)
 

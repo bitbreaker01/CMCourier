@@ -7,6 +7,7 @@ byte-idéntico, y si el resultado no carga EXACTAMENTE como
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -162,6 +163,22 @@ class TestSafety:
         assert b"  workers: 8\r\n" in data
         assert data.endswith(b"processing:\r\n  mode: streaming\r\n")
         assert load_config(yaml_path).cmis.workers == 8
+
+    def test_m2_unwritable_directory_raises_persist_error(self, tmp_path: Path) -> None:
+        """M2: el OSError de la escritura atómica salía crudo por la [3] — la
+        pane sólo atrapa PersistError, así que el toast era un traceback."""
+        if os.geteuid() == 0:
+            pytest.skip("como root todo directorio es escribible")
+        config, yaml_path = _make_config(tmp_path)
+        before = yaml_path.read_text()
+        tmp_path.chmod(0o500)
+        try:
+            with pytest.raises(PersistError):
+                persist_overrides(yaml_path, config, SessionOverrides(workers=8))
+        finally:
+            tmp_path.chmod(0o700)
+        assert yaml_path.read_text() == before
+        assert not list(tmp_path.glob("config.yaml.bak-*"))
 
     def test_duplicate_key_refuses_to_write(self, tmp_path: Path) -> None:
         """137: ruamel rechaza la clave duplicada al CARGAR → PersistError que la nombra."""

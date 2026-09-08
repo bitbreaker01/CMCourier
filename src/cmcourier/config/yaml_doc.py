@@ -33,11 +33,15 @@ from pathlib import Path
 from typing import Final, Generic, TypeVar
 
 from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedMap, CommentedSeq
+from ruamel.yaml.comments import CommentedMap, CommentedSeq, TaggedScalar
 from ruamel.yaml.constructor import DuplicateKeyError
 from ruamel.yaml.error import YAMLError
 from ruamel.yaml.nodes import ScalarNode
 from ruamel.yaml.representer import RoundTripRepresenter
+from ruamel.yaml.scalarbool import ScalarBoolean
+from ruamel.yaml.scalarfloat import ScalarFloat
+from ruamel.yaml.scalarint import ScalarInt
+from ruamel.yaml.scalarstring import ScalarString
 
 T = TypeVar("T")
 
@@ -101,7 +105,12 @@ class YamlDocument:
 
     @classmethod
     def load(cls, path: Path) -> YamlDocument:
-        """Lee ``path`` (resolviendo symlinks) y lo parsea conservando todo."""
+        """Lee ``path`` (resolviendo symlinks) y lo parsea conservando todo.
+
+        M6: el EOL es del ARCHIVO, no de cada línea — con un solo ``\\r\\n``
+        adentro el archivo "es CRLF" y se vuelve a escribir entero con CRLF
+        (un archivo de EOL mixto ya está roto para git y para el editor).
+        """
         # B2 de 135: si el YAML es un symlink, el reemplazo atómico pisaría
         # el link y el archivo real no cambiaría. Trabajamos sobre el real.
         path = path.resolve()
@@ -154,6 +163,7 @@ class YamlDocument:
             raise YamlDocumentError("la ruta no puede estar vacía")
         parent = self._ensure_parent(path)
         step = path[-1]
+        self._require_not_alias(parent, path[:-1])
         if isinstance(step, int):
             _set_index(parent, step, _to_node(value))
             return
@@ -174,9 +184,17 @@ class YamlDocument:
                 raise YamlDocumentError(f"{_fmt(path[:-1])} no es una secuencia")
             if not 0 <= step < len(parent):
                 raise YamlDocumentError(f"índice {step} fuera de rango en {_fmt(path[:-1])}")
+            self._require_not_alias(parent, path[:-1])
             del parent[step]
             return
         if isinstance(parent, CommentedMap) and step in parent:
+            # I1: la clave está pero la pone un ``<<: *base`` — ``del`` no borra
+            # nada y el operador se queda pensando que la vació.
+            if step not in dict(parent.non_merged_items()):
+                raise YamlDocumentError(
+                    f"{_fmt(path)} viene de una merge key (<<:) — editalo a mano"
+                )
+            self._require_not_alias(parent, path[:-1])
             del parent[step]
 
     def append(self, path: YamlPath, value: object) -> None:
@@ -189,6 +207,7 @@ class YamlDocument:
             return
         if not isinstance(current, CommentedSeq):
             raise YamlDocumentError(f"{_fmt(path)} no es una secuencia")
+        self._require_not_alias(current, path)
         current.append(_to_node(value))
 
     # -- salida --------------------------------------------------------------
@@ -241,6 +260,7 @@ class YamlDocument:
                     raise YamlDocumentError(f"{_fmt(path[:depth])} no es un mapping")
                 child = node.get(step, MISSING)
                 if child is MISSING:
+                    self._require_not_alias(node, path[:depth])
                     child = _block_map()
                     if node is self._root:
                         self._add_top_level(step, child)
@@ -250,6 +270,19 @@ class YamlDocument:
                 raise YamlDocumentError(f"{_fmt(path[: depth + 1])} es un escalar, no un bloque")
             node = child
         return node
+
+    def _require_not_alias(self, container: object, path: YamlPath) -> None:
+        """B1: un contenedor que aparece dos veces en el árbol es un ancla.
+
+        Con ``rvi: &base {…}`` / ``otro: *base`` ruamel devuelve el MISMO
+        objeto en los dos lugares: tocar ``connections.rvi.host`` cambiaría
+        también ``connections.otro`` y el operador nunca lo pidió. No se
+        edita: el archivo queda intacto y se le dice que lo haga a mano.
+        """
+        if _shared(self._root, container):
+            raise YamlDocumentError(
+                f"{_fmt(path) or '<raíz>'} es un alias YAML (&/*) — editalo a mano"
+            )
 
     def _add_top_level(self, key: str, node: object) -> None:
         """Agrega una clave NUEVA de primer nivel con línea en blanco antes.
@@ -275,12 +308,52 @@ def apply_edits(doc: YamlDocument, edits: Iterable[Edit]) -> None:
 
 
 def to_plain(node: object) -> object:
-    """``CommentedMap`` / ``CommentedSeq`` → ``dict`` / ``list`` recursivo; escalares intactos."""
+    """``CommentedMap`` / ``CommentedSeq`` → ``dict`` / ``list``, y los escalares
+    de ruamel a builtins (M4).
+
+    ``DoubleQuotedScalarString`` es un ``str`` y ``ScalarFloat`` un ``float``,
+    pero NO son ``str`` / ``float``: la igualdad por tipo de ``diff_edits``
+    (139) los ve distintos de lo que tipea el operador y el formulario
+    reporta cambios fantasma. Acá se desenvuelven una sola vez.
+    """
     if isinstance(node, CommentedMap):
         return {key: to_plain(value) for key, value in node.items()}
     if isinstance(node, CommentedSeq):
         return [to_plain(value) for value in node]
+    return _plain_scalar(node)
+
+
+def _plain_scalar(node: object) -> object:
+    """El escalar ruamel como builtin (``ScalarBoolean`` antes que ``ScalarInt``: es un ``int``)."""
+    if isinstance(node, ScalarString):
+        return str(node)
+    if isinstance(node, ScalarBoolean):
+        return bool(node)
+    if isinstance(node, ScalarInt):
+        return int(node)
+    if isinstance(node, ScalarFloat):
+        return float(node)
+    if isinstance(node, TaggedScalar):
+        return str(node.value)
     return node
+
+
+def _shared(root: object, target: object) -> bool:
+    """``target`` aparece más de una vez (por identidad) colgando de ``root``."""
+    seen = 0
+    visited: set[int] = set()
+    stack: list[object] = [root]
+    while stack:
+        node = stack.pop()
+        if node is target:
+            seen += 1
+            if seen > 1:
+                return True
+        if not isinstance(node, CommentedMap | CommentedSeq) or id(node) in visited:
+            continue
+        visited.add(id(node))
+        stack.extend(node.values() if isinstance(node, CommentedMap) else node)
+    return False
 
 
 class _NullAsNullRepresenter(RoundTripRepresenter):

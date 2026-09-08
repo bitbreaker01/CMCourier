@@ -54,6 +54,57 @@ class TestLoad:
         link.symlink_to(real)
         assert YamlDocument.load(link).path == real
 
+    def test_m6_mixed_eol_file_is_written_entirely_as_crlf(self, tmp_path: Path) -> None:
+        """M6: con algún CRLF el archivo "es CRLF" — se normaliza entero al escribir."""
+        path = tmp_path / "c.yaml"
+        path.write_bytes(b"a: 1\r\nb: 2\nc: 3\r\n")
+        doc = YamlDocument.load(path)
+        doc.set(("a",), 9)
+        assert doc.text() == "a: 9\r\nb: 2\r\nc: 3\r\n"
+
+
+_ANCHORED = "connections:\n  rvi: &base\n    kind: as400\n    host: as400.viejo\n  otro: *base\n"
+_MERGED = "base: &b\n  host: h1\n  port: 446\nconn:\n  <<: *b\n  host: h2\n"
+
+
+class TestAnchors:
+    """B1 / I1: lo que ruamel comparte por identidad no se edita a ciegas."""
+
+    def test_b1_set_under_an_alias_is_refused(self, tmp_path: Path) -> None:
+        doc, path = _doc(tmp_path, _ANCHORED)
+        before = doc.text()
+        with pytest.raises(YamlDocumentError, match="alias YAML"):
+            doc.set(("connections", "rvi", "host"), "as400.nuevo")
+        assert doc.text() == before
+        assert path.read_text() == _ANCHORED
+
+    def test_b1_delete_and_append_under_an_alias_are_refused(self, tmp_path: Path) -> None:
+        doc, _ = _doc(tmp_path, _ANCHORED + "  rvi2:\n    tables: &t\n      - A\n  otro2: *t\n")
+        with pytest.raises(YamlDocumentError, match="alias YAML"):
+            doc.delete(("connections", "rvi", "host"))
+        with pytest.raises(YamlDocumentError, match="alias YAML"):
+            doc.append(("connections", "rvi2", "tables"), "B")
+        with pytest.raises(YamlDocumentError, match="alias YAML"):
+            doc.set(("connections", "rvi", "nuevo", "hondo"), 1)
+
+    def test_b1_a_plain_mapping_is_still_editable(self, tmp_path: Path) -> None:
+        """El ancla sólo bloquea el contenedor COMPARTIDO, no todo el archivo."""
+        doc, _ = _doc(tmp_path, _ANCHORED + "  suelta:\n    host: h\n")
+        doc.set(("connections", "suelta", "host"), "h2")
+        assert "    host: h2\n" in doc.text()
+
+    def test_i1_delete_of_a_merge_key_inherited_value_is_refused(self, tmp_path: Path) -> None:
+        doc, _ = _doc(tmp_path, _MERGED)
+        assert doc.get(("conn", "port")) == 446
+        with pytest.raises(YamlDocumentError, match="merge key"):
+            doc.delete(("conn", "port"))
+        assert doc.text() == _MERGED
+
+    def test_i1_delete_of_an_own_key_next_to_a_merge_key_still_works(self, tmp_path: Path) -> None:
+        doc, _ = _doc(tmp_path, _MERGED)
+        doc.delete(("conn", "host"))
+        assert doc.text() == "base: &b\n  host: h1\n  port: 446\nconn:\n  <<: *b\n"
+
 
 class TestGetHasSet:
     def test_get_and_has(self, tmp_path: Path) -> None:
@@ -250,6 +301,19 @@ class TestHelpers:
         assert type(plain["b"]) is list  # type: ignore[index]
         assert type(plain["c"]) is dict  # type: ignore[index]
         assert to_plain(7) == 7
+
+    def test_m4_to_plain_unwraps_ruamel_scalars(self, tmp_path: Path) -> None:
+        """M4/I4: los escalares ruamel rompen la igualdad por tipo de ``diff_edits``."""
+        src = 'repo_id: "repo"\nport: 0o755\nratio: 1.50\nflag: true\ntag: !x 5\n'
+        doc, _ = _doc(tmp_path, src)
+        plain = to_plain(doc.root)
+        assert isinstance(plain, dict)
+        assert plain == {"repo_id": "repo", "port": 493, "ratio": 1.5, "flag": True, "tag": "5"}
+        assert type(plain["repo_id"]) is str
+        assert type(plain["port"]) is int
+        assert type(plain["ratio"]) is float
+        assert type(plain["flag"]) is bool
+        assert type(plain["tag"]) is str
 
 
 def _first_scalar(node: object, prefix: tuple[str | int, ...] = ()) -> tuple[str | int, ...]:

@@ -377,7 +377,6 @@ class CredsPane(Vertical):
             used = ", ".join(site.label for site in plan.blocked_by)
             self.console.notify(f"{alias} está en uso por: {used}", severity="error", timeout=8)
             return
-        notice = f"Conexión {alias} quitada"
         self.console.confirm(
             title=f"Quitar la conexión {alias}",
             body=(
@@ -387,10 +386,15 @@ class CredsPane(Vertical):
             yes="quitar",
             no="cancelar",
             danger=True,
-            cb=lambda ok: (
-                self.call_later(self.apply_connection_edits, plan.edits, notice) if ok else None
-            ),
+            cb=lambda ok: self.call_later(self._commit_delete, alias, plan.edits) if ok else None,
         )
+
+    async def _commit_delete(self, alias: str, edits: Iterable[Edit]) -> None:
+        """I3: el confirm promete descartar las credenciales de sesión del alias
+        — recién cuando el YAML se escribió de verdad se descartan (si el write
+        falla, el alias sigue existiendo y su credencial también)."""
+        if await self.apply_connection_edits(edits, f"Conexión {alias} quitada"):
+            self.console.state.creds.discard(alias)
 
     async def commit_draft(
         self,

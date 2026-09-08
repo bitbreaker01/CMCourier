@@ -154,7 +154,7 @@ class HelpScreen(ModalScreen[None]):
                                                +/- techo manual de workers (en caliente)
   [7] ↑↓ navegar · ↵ detalle · R retry · E export
   [8] s estado del sync · simular antes de aplicar (recover) · resolver por txn
-  [9] v validar el YAML editado · w escribirlo (backup) · connections se edita en [2]
+  [9] v validar · w escribir (backup) · u descartar · connections se edita en [2]
 
 [b $accent]STAGES S0–S7[/]
   S0/S1 adquirir triggers · indexar RVABREP     S2/S3 mapear tipo CM · resolver metadata
@@ -204,6 +204,7 @@ class ConsoleApp(App[None]):
         Binding("a", "apply_overrides", "guardar overrides", show=False),
         Binding("w", "persist_overrides", "escribir al YAML", show=False),
         Binding("v", "validate_yaml", "validar YAML", show=False),
+        Binding("u", "discard_yaml", "descartar cambios", show=False),
         Binding("n", "new_connection", "nueva conexión", show=False),
         Binding("r", "launch", "lanzar", show=False),
         Binding("x", "cancel_run", "cancelar corrida", show=False),
@@ -369,6 +370,12 @@ class ConsoleApp(App[None]):
     def action_validate_yaml(self) -> None:
         if self.q("#tabs", TabbedContent).active == "yaml":
             self.q("YamlPane", YamlPane).validate()
+
+    def action_discard_yaml(self) -> None:
+        """I5: ``u`` en [9] tira el borrador del formulario — cambiar un `kind`
+        se lleva puesto el bloque y no había forma de deshacerlo."""
+        if self.q("#tabs", TabbedContent).active == "yaml":
+            self.call_later(self.q("YamlPane", YamlPane).discard)
 
     def persist_overrides(self) -> None:
         """135: escribe los overrides APLICADOS al YAML — con confirmación.

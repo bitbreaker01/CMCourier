@@ -79,6 +79,14 @@ class SessionCredentials:
         for alias, cred in fresh.credentials.items():
             self.credentials.setdefault(alias, cred)
 
+    def discard(self, alias: str) -> None:
+        """I3: el alias se fue del registro — su credencial de sesión también.
+
+        Si queda, ``to_secrets`` la sigue exponiendo y recrear el alias
+        revive la password vieja (``prefill_missing`` usa ``setdefault``).
+        """
+        self.credentials.pop(alias, None)
+
     def get(self, alias: str) -> Credential:
         return self.credentials.get(alias, _EMPTY)
 

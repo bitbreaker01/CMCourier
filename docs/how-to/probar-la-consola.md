@@ -303,11 +303,13 @@ consola ni perder comentarios.
    ítem pierde los comentarios que tenía adentro — es un ítem nuevo, no
    una edición in-place. Un mapping en flow style (`{ a: 1 }`) que se
    reescribe pierde el espaciado interno (`{a: 1}`).
-7. Salí sin guardar (cambiá de pestaña y volvé, o simplemente no apretés
-   `w`): al re-entrar a `[9]` con cambios pendientes, la consola NO relee
-   el disco — evita pisarte un borrador a medio hacer. Sin cambios
-   pendientes, sí relee (por ejemplo, después de escribir algo desde
-   `[2]` o `[3]`).
+7. Apretá **`u`** para descartar el borrador entero y volver al archivo en
+   disco — es la salida si cambiaste un `kind` por error, porque eso se
+   lleva puesto el bloque que había. Y si salís sin guardar (cambiás de
+   pestaña y volvés, o simplemente no apretás `w`): al re-entrar a `[9]`
+   con cambios pendientes, la consola NO relee el disco — evita pisarte
+   un borrador a medio hacer. Sin cambios pendientes, sí relee (por
+   ejemplo, después de escribir algo desde `[2]` o `[3]`).
 
 La diferencia con `[3]` no es de mecánica — las dos escriben con el mismo
 `YamlDocument` (137) y el mismo backup — es de **alcance y nivel**: `[3]`

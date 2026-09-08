@@ -23,7 +23,6 @@ __all__ = [
     "field_default",
     "inline_connection",
     "plan_delete",
-    "plan_move_inline",
     "plan_write",
     "prefill_fields",
     "validate_alias",
@@ -173,7 +172,8 @@ def validate_draft(
     for name, raw in values.items():
         if not raw:
             continue  # vacío → se omite y aplica el default del modelo
-        if name in _INT_FIELDS and not (raw.isdigit() and 1 <= int(raw) <= 65535):
+        # M1: ``"²".isdigit()`` es True y ``int("²")`` revienta — pedimos ASCII.
+        if name in _INT_FIELDS and not (raw.isascii() and raw.isdigit() and 1 <= int(raw) <= 65535):
             errors[name] = f"{name}: 1..65535"
         elif name in _BOOL_FIELDS and raw.lower() not in _BOOL_WORDS:
             errors[name] = "true/false/sí/no/1/0"
@@ -242,7 +242,10 @@ def connection_sites(config: PipelineConfig) -> list[Site]:
             path = ("metadata", "sources", i, "connection")
             sites.append(Site(path, label, "mssql", meta.connection))
     sync = config.tracking.as400_sync
-    if sync.enabled:
+    # I2: ``schema.connection_refs(include_disabled=True)`` valida el alias del
+    # sync aunque esté apagado — si no lo listamos, ``plan_delete`` lo borra y
+    # el YAML resultante no carga.
+    if sync.enabled or sync.connection is not None:
         sites.append(
             Site(
                 ("tracking", "as400_sync", "connection"),
@@ -318,13 +321,3 @@ def inline_connection(site: Site, config: PipelineConfig) -> As400ConnectionConf
     if not isinstance(node, As400ConnectionConfig):
         raise ValueError(f"{site.label} no tiene una conexión inline (usa {site.current!r})")
     return node
-
-
-def plan_move_inline(site: Site, alias: str, config: PipelineConfig) -> list[Edit]:
-    """La conexión inline de ``site`` pasa al registro como ``alias`` y el
-    sitio la referencia por nombre. ``alias`` se valida como en el borrador."""
-    error = validate_alias(alias, existing=set(config.connections), editing=None)
-    if error:
-        raise ValueError(f"alias: {error}")
-    payload = inline_connection(site, config).model_dump(mode="json", exclude_none=True)
-    return [Edit(("connections", alias), payload), Edit(site.path, alias)]

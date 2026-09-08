@@ -99,7 +99,7 @@ Si la sesión CMIS expira a mitad de corrida, la consola **no quema documentos**
 
 **`7` BATCHES** te da la tabla con la auditoría de cada corrida (quién, dónde, con qué config), `↵` para el detalle, `R` para reintentar los fallidos y `E` para exportar. **`8` SYNC** es `sync status | recover | resolve` con botones.
 
-**`9` YAML.** El archivo completo, como un formulario generado del schema (137–139): `v` valida, `w` escribe con confirmación y backup. `connections` sigue siendo cosa de `[2]` — acá se ve, no se edita.
+**`9` YAML.** El archivo completo, como un formulario generado del schema (137–139): `v` valida, `w` escribe con confirmación y backup, `u` descarta el borrador. `connections` sigue siendo cosa de `[2]` — acá se ve, no se edita.
 
 > El paso a paso completo, con un Alfresco en Docker y qué apretar en cada pantalla, está en [`how-to/probar-la-consola.md`](../how-to/probar-la-consola.md). La referencia seca de teclas y flags, en [`reference/cli.md`](../reference/cli.md#console--consola-de-operación-123135). El porqué de cada decisión de diseño, en [`explanation/operations-console.md`](../explanation/operations-console.md).
 

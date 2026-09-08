@@ -116,7 +116,7 @@ Necesita un TTY real — no funciona por un pipe ni en un editor sin terminal in
 | `6` | MONITOR | Corrida en vivo a 4 Hz: cabecera, PREP/UPLOAD, y en `streaming` también el bucket. |
 | `7` | BATCHES | Tabla de batches con su auditoría; detalle, retry y export. |
 | `8` | SYNC | La versión interactiva de `sync status` / `recover` / `resolve` (128). |
-| `9` | YAML | Formulario generado del schema sobre el YAML completo (137–139): `v` valida, `w` escribe (con backup). `connections` se administra en `[2]`, acá es de sólo lectura. |
+| `9` | YAML | Formulario generado del schema sobre el YAML completo (137–139): `v` valida, `w` escribe (con backup), `u` descarta el borrador. `connections` se administra en `[2]`, acá es de sólo lectura. |
 
 ### Teclas
 
@@ -146,6 +146,7 @@ Copiadas de `HelpScreen.HELP` (`cli/console/app.py`) — la ayuda `?` dentro de 
 | `s` | `[8]` | Estado del sync. |
 | `v` | `[9]` | Validar el YAML editado contra el schema — pinta los errores por fila (139). |
 | `w` | `[9]` | Escribir el formulario editado al YAML completo, con confirmación y backup (139). |
+| `u` | `[9]` | Descartar los cambios del formulario y volver al archivo en disco (139). |
 
 Ojo con `r`: en `[5]` lanza y en `[6]` reanuda. Es la misma acción (`action_launch`) ruteada por la pestaña activa.
 

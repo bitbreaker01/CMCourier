@@ -1,6 +1,6 @@
 """138 REQ-001 — módulo puro del editor de conexiones: validación del
 borrador, mapping al YAML, sitios que aceptan un alias y los planes de
-edición (`plan_write` / `plan_delete` / `plan_move_inline`)."""
+edición (`plan_write` / `plan_delete`)."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from cmcourier.cli.console.connection_edit import (
     connection_sites,
     draft_to_yaml,
     field_default,
+    inline_connection,
     plan_delete,
-    plan_move_inline,
     plan_write,
     validate_draft,
     write_error_text,
@@ -118,6 +118,12 @@ class TestValidateDraft:
         assert "port" in err
         assert validate_draft(_draft(host="h", port=" 446 "), existing=set(), editing=None) == {}
 
+    def test_m1_unicode_digits_are_rejected_not_crashed(self) -> None:
+        """M1: ``"²".isdigit()`` es True pero ``int("²")`` revienta."""
+        for raw in ("²", "٤٤٦", "1²"):
+            err = validate_draft(_draft(host="h", port=raw), existing=set(), editing=None)
+            assert err["port"] == "port: 1..65535", raw
+
     def test_mssql_database_required_and_booleans(self) -> None:
         err = validate_draft(
             _draft(kind="mssql", host="h", encrypt="quizás"), existing=set(), editing=None
@@ -212,10 +218,19 @@ class TestConnectionSites:
             (("tracking", "as400_sync", "connection"), "tracking.as400_sync", "as400", "rvi"),
         ]
 
-    def test_disabled_sync_is_not_a_site(self, tmp_path: Path) -> None:
+    def test_i2_disabled_sync_that_names_an_alias_is_still_a_site(self, tmp_path: Path) -> None:
+        """I2: ``schema.connection_refs(include_disabled=True)`` lo valida igual —
+        si no es un sitio, ``plan_delete`` borraría el alias y la config no carga."""
         config, _ = _config(
             tmp_path, connections=_RVI, sync="    enabled: false\n    connection: rvi\n"
         )
+        assert [s.path for s in connection_sites(config)] == [
+            ("tracking", "as400_sync", "connection")
+        ]
+        assert not plan_delete("rvi", config).ok
+
+    def test_disabled_sync_without_alias_is_not_a_site(self, tmp_path: Path) -> None:
+        config, _ = _config(tmp_path, connections=_RVI, sync="    enabled: false\n")
         assert connection_sites(config) == []
 
 
@@ -287,40 +302,22 @@ class TestPlanDelete:
         assert plan.blocked_by == []
 
 
-class TestPlanMoveInline:
-    def test_moves_inline_as400_to_registry(self, tmp_path: Path) -> None:
-        """E6: la conexión inline pasa al registro y el sitio la referencia por alias."""
+class TestInlineConnection:
+    """M3: ``plan_move_inline`` era código muerto — mover abre el modal y usa
+    ``plan_write``; de la parte pura sólo sobrevive el lector del inline (E6)."""
+
+    def test_reads_the_inline_model_of_a_site(self, tmp_path: Path) -> None:
         config, _ = _config(tmp_path, inline_indexing=True)
         site = connection_sites(config)[0]
-        edits = plan_move_inline(site, "rvi_main", config)
-        assert edits == [
-            Edit(
-                ("connections", "rvi_main"),
-                {
-                    "kind": "as400",
-                    "host": "as400.test",
-                    "port": 8471,
-                    "database": "RVILIB",
-                    "driver": "iSeries Access ODBC Driver",
-                },
-            ),
-            Edit(("indexing", "source", "connection"), "rvi_main"),
-        ]
-
-    def test_alias_is_validated(self, tmp_path: Path) -> None:
-        config, _ = _config(tmp_path, connections=_RVI, inline_indexing=True)
-        site = connection_sites(config)[0]
-        with pytest.raises(ValueError, match="ya existe"):
-            plan_move_inline(site, "rvi", config)
-        with pytest.raises(ValueError, match="reservado"):
-            plan_move_inline(site, "cmis", config)
+        model = inline_connection(site, config)
+        assert (model.host, model.port, model.database) == ("as400.test", 8471, "RVILIB")
 
     def test_site_with_alias_is_not_inline(self, tmp_path: Path) -> None:
         config, _ = _config(tmp_path, connections=_RVI, metadata_sources=_META_AS400)
         site = connection_sites(config)[0]
         assert site.current == "rvi"
         with pytest.raises(ValueError, match="inline"):
-            plan_move_inline(site, "otro", config)
+            inline_connection(site, config)
 
 
 class TestWriteErrorText:
