@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+#
+# CMCourier @@PROJECT_VERSION@@ — offline installer
+# Generado desde installer/templates/install.sh.tmpl por build-offline-bundle.sh
+#
+set -euo pipefail
+cd "$(dirname "$0")"
+
+TARGET_VERSION="@@PYTHON_VERSION@@"
+
+echo "=== CMCourier @@PROJECT_VERSION@@ — offline installer ==="
+echo "Install dir: $(pwd)"
+echo "Python destino: ${TARGET_VERSION}"
+echo
+
+version_of() {
+  "$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# [1/6] Resolver el intérprete de Python
+#   1. $PYTHON si está definida.
+#   2. python@@PYTHON_VERSION@@ si está en PATH.
+#   3. python3.
+# ---------------------------------------------------------------------------
+echo "[1/6] Resolviendo intérprete de Python..."
+if [[ -n "${PYTHON:-}" ]]; then
+  PY="$PYTHON"
+  echo "      PYTHON está seteado, uso: ${PY}"
+elif command -v "python${TARGET_VERSION}" >/dev/null 2>&1; then
+  PY="python${TARGET_VERSION}"
+  echo "      Encontrado en PATH: ${PY}"
+elif command -v python3 >/dev/null 2>&1; then
+  PY="python3"
+  echo "      Uso python3 (genérico) del PATH."
+else
+  echo "ERROR: no se encontró ningún intérprete de Python en PATH." >&2
+  echo "       Instalá Python ${TARGET_VERSION}, o apuntá:" >&2
+  echo "         PYTHON=/ruta/al/interprete bash install.sh" >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# [2/6] Comprobar major.minor ANTES de crear el .venv
+# ---------------------------------------------------------------------------
+echo "[2/6] Comprobando la versión de ${PY}..."
+FOUND_VERSION="$(version_of "$PY")" || {
+  echo "ERROR: no se pudo ejecutar '${PY}' para comprobar su versión." >&2
+  exit 1
+}
+if [[ "$FOUND_VERSION" != "$TARGET_VERSION" ]]; then
+  echo "ERROR: ${PY} es Python ${FOUND_VERSION}, se esperaba Python ${TARGET_VERSION}." >&2
+  echo "       Encontrado: ${FOUND_VERSION}" >&2
+  echo "       Esperado:   ${TARGET_VERSION}" >&2
+  echo "       Apuntá al intérprete correcto con:" >&2
+  echo "         PYTHON=/usr/bin/python@@PYTHON_VERSION@@ bash install.sh" >&2
+  exit 1
+fi
+echo "      OK: ${PY} es Python ${FOUND_VERSION}."
+
+if [[ -d .venv ]]; then
+  echo "      Comprobando la versión del .venv existente..."
+  VENV_VERSION="$(version_of ".venv/bin/python")" || {
+    echo "ERROR: no se pudo comprobar la versión de .venv/bin/python." >&2
+    exit 1
+  }
+  if [[ "$VENV_VERSION" != "$TARGET_VERSION" ]]; then
+    echo "ERROR: el .venv existente es Python ${VENV_VERSION}, se esperaba Python ${TARGET_VERSION}." >&2
+    echo "       Encontrado: ${VENV_VERSION}" >&2
+    echo "       Esperado:   ${TARGET_VERSION}" >&2
+    echo "       Borralo y volvé a correr install.sh:" >&2
+    echo "         rm -rf .venv && bash install.sh" >&2
+    exit 1
+  fi
+  echo "      OK: .venv existente es Python ${VENV_VERSION}."
+fi
+
+# ---------------------------------------------------------------------------
+# [3/6] Crear el virtualenv (si no existe)
+# ---------------------------------------------------------------------------
+echo "[3/6] Creando virtualenv (.venv)..."
+if [[ -d .venv ]]; then
+  echo "      .venv ya existe, reuso."
+else
+  "$PY" -m venv .venv || { echo "ERROR: no se pudo crear .venv."; exit 1; }
+fi
+
+# ---------------------------------------------------------------------------
+# [4/6] Actualizar pip desde el wheelhouse local, si el bundle lo trae
+# ---------------------------------------------------------------------------
+echo "[4/6] Actualizando pip desde el wheelhouse local (si está disponible)..."
+if compgen -G "wheels/pip-*.whl" > /dev/null 2>&1; then
+  .venv/bin/python -m pip install --no-index --find-links wheels --upgrade \
+    pip setuptools wheel || { echo "ERROR: upgrade de pip falló."; exit 1; }
+else
+  echo "      No hay wheel de pip en wheels/, salteo el upgrade."
+fi
+
+# ---------------------------------------------------------------------------
+# [5/6] Instalar cmcourier offline
+# ---------------------------------------------------------------------------
+echo "[5/6] Instalando cmcourier y dependencias (offline)..."
+.venv/bin/python -m pip install --no-index --find-links wheels cmcourier \
+  || { echo "ERROR: instalación de cmcourier falló."; exit 1; }
+
+# ---------------------------------------------------------------------------
+# [6/6] Verificar
+# ---------------------------------------------------------------------------
+echo "[6/6] Verificando..."
+.venv/bin/cmcourier --version || { echo "ERROR: cmcourier no corre."; exit 1; }
+
+echo
+echo "=== Instalado correctamente ==="
+echo
+echo "Próximos pasos:"
+echo "  1. Instalá el driver ODBC de IBM i Access si no está (fuente AS400/RVI)."
+echo "  2. Instalá el Microsoft ODBC Driver 18 for SQL Server si hay fuente MSSQL."
+echo "  3. Configurá un DSN (unixODBC) para cada fuente que lo use."
+echo "  4. Editá config/config-prod.yaml (copialo desde el .template)."
+echo "  5. Corré:  .venv/bin/cmcourier --config config/config-prod.yaml [comando]"

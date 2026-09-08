@@ -1,0 +1,145 @@
+@echo off
+setlocal EnableDelayedExpansion
+
+rem CMCourier @@PROJECT_VERSION@@ offline installer
+rem Generated from installer/templates/install.bat.tmpl by build-offline-bundle.ps1
+rem Target: Python @@PYTHON_VERSION@@ on Windows x86_64
+
+set "INSTALL_DIR=%~dp0"
+cd /d "%INSTALL_DIR%"
+
+set "TARGET_VERSION=@@PYTHON_VERSION@@"
+
+echo === CMCourier @@PROJECT_VERSION@@ offline installer ===
+echo Install dir: %INSTALL_DIR%
+echo Target Python: %TARGET_VERSION%
+echo.
+
+rem ---------------------------------------------------------------------
+rem [1/6] Resolve the Python interpreter
+rem   1. %PYTHON% if defined.
+rem   2. py -@@PYTHON_VERSION@@ (python.org launcher) if it works.
+rem   3. python.
+rem ---------------------------------------------------------------------
+rem PY is the executable (quoted when invoked: the path may contain spaces),
+rem PYARGS the launcher arguments (only for "py -X.Y").
+echo [1/6] Resolving Python interpreter...
+set "PYARGS="
+if defined PYTHON (
+    set "PY=%PYTHON%"
+    echo       PYTHON is set, using: !PY!
+) else (
+    py -@@PYTHON_VERSION@@ -c "import sys" >nul 2>&1
+    if not errorlevel 1 (
+        set "PY=py"
+        set "PYARGS=-@@PYTHON_VERSION@@"
+        echo       Found py launcher for @@PYTHON_VERSION@@: py -@@PYTHON_VERSION@@
+    ) else (
+        where python >nul 2>nul
+        if errorlevel 1 (
+            echo ERROR: no Python interpreter found in PATH.
+            echo        Install Python @@PYTHON_VERSION@@ x86_64 from python.org first ^(not the Microsoft Store^).
+            exit /b 1
+        )
+        set "PY=python"
+        echo       Using generic "python" from PATH.
+    )
+)
+
+rem ---------------------------------------------------------------------
+rem [2/6] Check major.minor BEFORE creating .venv
+rem   usebackq: the probe has single quotes inside; no "%" in the probe
+rem   so cmd has nothing to re-expand. The extra outer quotes are for
+rem   `cmd /c`, which strips the first and last quote of a command that
+rem   starts with one (the path in PYTHON may contain spaces).
+rem ---------------------------------------------------------------------
+echo [2/6] Checking the version of !PY! !PYARGS!...
+set "FOUND_VERSION="
+for /f "usebackq delims=" %%v in (`""!PY!" !PYARGS! -c "import sys; print('.'.join(map(str, sys.version_info[:2])))" 2^>nul"`) do set "FOUND_VERSION=%%v"
+if not defined FOUND_VERSION (
+    echo ERROR: could not run "!PY!" !PYARGS! to check its version.
+    exit /b 1
+)
+if not "!FOUND_VERSION!"=="!TARGET_VERSION!" (
+    echo ERROR: !PY! !PYARGS! is Python !FOUND_VERSION!, expected Python !TARGET_VERSION!.
+    echo        Found:    !FOUND_VERSION!
+    echo        Expected: !TARGET_VERSION!
+    echo        Point to the correct interpreter with:
+    echo          set PYTHON=C:\Python@@PYTHON_VERSION_NODOT@@\python.exe
+    echo          install.bat
+    exit /b 1
+)
+echo       OK: !PY! !PYARGS! is Python !FOUND_VERSION!.
+
+if exist .venv\Scripts\python.exe (
+    set "VENV_VERSION="
+    for /f "usebackq delims=" %%v in (`.venv\Scripts\python.exe -c "import sys; print('.'.join(map(str, sys.version_info[:2])))" 2^>nul`) do set "VENV_VERSION=%%v"
+    if not "!VENV_VERSION!"=="!TARGET_VERSION!" (
+        echo ERROR: existing .venv is Python !VENV_VERSION!, expected Python !TARGET_VERSION!.
+        echo        Delete it and re-run:
+        echo          rmdir /s /q .venv
+        echo          install.bat
+        exit /b 1
+    )
+    echo       OK: existing .venv is Python !VENV_VERSION!.
+)
+
+rem ---------------------------------------------------------------------
+rem [3/6] Create the virtualenv (if it doesn't exist)
+rem ---------------------------------------------------------------------
+echo [3/6] Creating virtualenv (.venv)...
+if exist .venv (
+    echo       .venv already exists, reusing.
+) else (
+    "!PY!" !PYARGS! -m venv .venv
+    if errorlevel 1 (
+        echo ERROR: Failed to create .venv.
+        exit /b 1
+    )
+)
+
+rem ---------------------------------------------------------------------
+rem [4/6] Upgrade pip from the local wheelhouse, if the bundle has it
+rem ---------------------------------------------------------------------
+echo [4/6] Upgrading pip from local wheelhouse (if available)...
+if exist wheels\pip-*.whl (
+    ".venv\Scripts\python.exe" -m pip install --no-index --find-links wheels --upgrade pip setuptools wheel
+    if errorlevel 1 (
+        echo ERROR: pip upgrade failed.
+        exit /b 1
+    )
+) else (
+    echo       No pip wheel in wheels\, skipping upgrade.
+)
+
+rem ---------------------------------------------------------------------
+rem [5/6] Install cmcourier offline
+rem ---------------------------------------------------------------------
+echo [5/6] Installing cmcourier and dependencies (offline)...
+".venv\Scripts\python.exe" -m pip install --no-index --find-links wheels cmcourier
+if errorlevel 1 (
+    echo ERROR: cmcourier install failed.
+    exit /b 1
+)
+
+rem ---------------------------------------------------------------------
+rem [6/6] Verify
+rem ---------------------------------------------------------------------
+echo [6/6] Verifying...
+".venv\Scripts\cmcourier.exe" --version
+if errorlevel 1 (
+    echo ERROR: cmcourier failed to run.
+    exit /b 1
+)
+
+echo.
+echo === Installed successfully ===
+echo.
+echo Next steps:
+echo   1. Install IBM i Access ODBC driver if not present (AS400/RVI source).
+echo   2. Install Microsoft ODBC Driver 18 for SQL Server if there is an MSSQL source.
+echo   3. Configure a System DSN (64-bit) for each ODBC source that uses one.
+echo   4. Edit config\config-prod.yaml (copy from .template).
+echo   5. Run:  .venv\Scripts\cmcourier.exe --config config\config-prod.yaml [command]
+echo.
+endlocal

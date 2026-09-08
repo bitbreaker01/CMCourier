@@ -54,12 +54,18 @@ if (-not (Test-Path "pyproject.toml")) {
 # ---------------------------------------------------------------------------
 Write-Step "Checking prerequisites"
 
-$pythonCmd = Get-Command python -ErrorAction SilentlyContinue
-if (-not $pythonCmd) { Fail "python not found in PATH." }
+# python with fallback to python3 (pwsh on Linux/macOS usually only has python3).
+$PythonExe = if (Get-Command python -ErrorAction SilentlyContinue) {
+    "python"
+} elseif (Get-Command python3 -ErrorAction SilentlyContinue) {
+    "python3"
+} else {
+    Fail "Neither python nor python3 found in PATH."
+}
 
-$detectedVersion = (& python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
+$detectedVersion = (& $PythonExe -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
 if (-not $PythonVersion) { $PythonVersion = $detectedVersion }
-Write-Ok "Python (build host): $detectedVersion"
+Write-Ok "Python (build host): $detectedVersion ($PythonExe)"
 Write-Ok "Python (target):     $PythonVersion"
 
 if ($PythonVersion -ne $detectedVersion) {
@@ -88,6 +94,15 @@ $BundleDir  = Join-Path $OutputDir $BundleName
 $WheelsDir  = Join-Path $BundleDir "wheels"
 $ConfigDir  = Join-Path $BundleDir "config"
 
+function Join-Paths {
+    param([Parameter(Mandatory)][string[]]$Segments)
+    $result = $Segments[0]
+    foreach ($segment in $Segments[1..($Segments.Count - 1)]) {
+        $result = Join-Path $result $segment
+    }
+    return $result
+}
+
 Write-Step "Preparing bundle directory: $BundleDir"
 if (Test-Path $BundleDir) { Remove-Item -Recurse -Force $BundleDir }
 New-Item -ItemType Directory -Path $WheelsDir | Out-Null
@@ -98,14 +113,24 @@ New-Item -ItemType Directory -Path $ConfigDir | Out-Null
 # ---------------------------------------------------------------------------
 Write-Step "Exporting requirements from uv.lock"
 $reqFile = Join-Path $BundleDir "requirements.txt"
-& uv export --no-hashes --no-dev --format requirements-txt -o $reqFile
+& uv export --no-emit-project --no-hashes --no-dev --format requirements-txt -o $reqFile
 if ($LASTEXITCODE -ne 0) { Fail "uv export failed." }
 Write-Ok "Wrote $reqFile"
+
+# requirements-download.txt: same lines, markers stripped (everything from
+# " ;" onward). pip download ignores platform markers and would otherwise
+# download for the BUILD host, not the target — see REQ-001 in spec 142.
+$reqDownloadFile = Join-Path $BundleDir "requirements-download.txt"
+$downloadLines = Get-Content $reqFile |
+    Where-Object { $_.Trim() -ne "" -and -not $_.TrimStart().StartsWith("#") } |
+    ForEach-Object { ($_ -split ' ;', 2)[0].Trim() }
+Set-Content -Path $reqDownloadFile -Value $downloadLines -Encoding UTF8
+Write-Ok "Wrote $reqDownloadFile"
 
 # ---------------------------------------------------------------------------
 # 5. Build the project wheel (unless skipped)
 # ---------------------------------------------------------------------------
-$projectWheel = "dist\cmcourier-$projectVersion-py3-none-any.whl"
+$projectWheel = Join-Path "dist" "cmcourier-$projectVersion-py3-none-any.whl"
 if ($SkipBuild -and (Test-Path $projectWheel)) {
     Write-Step "Skipping wheel build (using existing $projectWheel)"
 } else {
@@ -124,14 +149,14 @@ Write-Ok "Bundled $projectWheel"
 Write-Step "Downloading dependency wheels (target: win_amd64 / cp$($PythonVersion.Replace('.','')))"
 $abi = "cp$($PythonVersion.Replace('.',''))"
 
-& python -m pip download `
+& $PythonExe -m pip download `
     --dest $WheelsDir `
     --platform win_amd64 `
     --python-version $PythonVersion `
     --implementation cp `
     --abi $abi `
     --only-binary=:all: `
-    -r $reqFile
+    -r $reqDownloadFile
 
 if ($LASTEXITCODE -ne 0) {
     Fail @"
@@ -143,7 +168,7 @@ pip download failed. Common causes:
 }
 
 # Also stage a recent pip wheel so the offline installer can upgrade pip if it wants
-& python -m pip download `
+& $PythonExe -m pip download `
     --dest $WheelsDir `
     --platform win_amd64 `
     --python-version $PythonVersion `
@@ -155,16 +180,21 @@ pip download failed. Common causes:
 $wheelCount = (Get-ChildItem $WheelsDir -Filter *.whl).Count
 Write-Ok "Wheels staged: $wheelCount"
 
+$projectWheelCount = (Get-ChildItem $WheelsDir -Filter "cmcourier-*.whl").Count
+if ($projectWheelCount -ne 1) {
+    Fail "Expected exactly one cmcourier-*.whl in $WheelsDir, found $projectWheelCount."
+}
+
 # ---------------------------------------------------------------------------
 # 7. Copy runtime config and reference data
 # ---------------------------------------------------------------------------
 Write-Step "Bundling config and reference data"
 
 $sampleConfigs = @(
-    "sample\config-staging.yaml",
-    "sample\clients.csv",
-    "sample\MapeoRVI_CM.csv",
-    "sample\MetadatosCM.csv"
+    (Join-Path "sample" "config-staging.yaml"),
+    (Join-Path "sample" "clients.csv"),
+    (Join-Path "sample" "MapeoRVI_CM.csv"),
+    (Join-Path "sample" "MetadatosCM.csv")
 )
 foreach ($f in $sampleConfigs) {
     if (Test-Path $f) {
@@ -177,9 +207,10 @@ foreach ($f in $sampleConfigs) {
 
 # Always bundle the annotated config reference so the operator has the full
 # configurable surface even when sample/ is absent (it is gitignored).
-if (Test-Path "docs\reference\config-reference.yaml") {
-    Copy-Item "docs\reference\config-reference.yaml" $ConfigDir
-    Write-Ok "Bundled docs\reference\config-reference.yaml"
+$configReferencePath = Join-Paths @("docs", "reference", "config-reference.yaml")
+if (Test-Path $configReferencePath) {
+    Copy-Item $configReferencePath $ConfigDir
+    Write-Ok "Bundled $configReferencePath"
 }
 
 # Rename main config to a production-friendly name
@@ -189,7 +220,7 @@ if (Test-Path $stagingConfig) { Move-Item $stagingConfig $prodConfig }
 
 if (Test-Path "reference-data") {
     Copy-Item -Recurse "reference-data" (Join-Path $BundleDir "reference-data")
-    Write-Ok "Bundled reference-data\"
+    Write-Ok "Bundled reference-data/"
 }
 
 if (Test-Path "README.md") {
@@ -197,75 +228,21 @@ if (Test-Path "README.md") {
 }
 
 # ---------------------------------------------------------------------------
-# 8. Generate install.bat
+# 8. Generate install.bat from installer/templates/install.bat.tmpl
 # ---------------------------------------------------------------------------
-Write-Step "Generating install.bat"
-$installBat = @"
-@echo off
-setlocal
-
-rem CMCourier offline installer
-rem Generated by build-offline-bundle.ps1
-rem Target: Python $PythonVersion on Windows x86_64
-
-set "INSTALL_DIR=%~dp0"
-cd /d "%INSTALL_DIR%"
-
-echo === CMCourier offline installer ===
-echo Install dir: %INSTALL_DIR%
-echo.
-
-where python >nul 2>nul
-if errorlevel 1 (
-    echo ERROR: python not found in PATH.
-    echo        Install Python $PythonVersion x86_64 first.
-    exit /b 1
-)
-
-echo [1/4] Creating virtualenv (.venv)...
-if exist .venv (
-    echo       .venv already exists, reusing.
-) else (
-    python -m venv .venv
-    if errorlevel 1 (
-        echo ERROR: Failed to create .venv.
-        exit /b 1
-    )
-)
-
-echo [2/4] Upgrading pip from local wheelhouse...
-".venv\Scripts\python.exe" -m pip install --no-index --find-links wheels --upgrade pip setuptools wheel
-if errorlevel 1 (
-    echo ERROR: pip upgrade failed.
-    exit /b 1
-)
-
-echo [3/4] Installing cmcourier and dependencies (offline)...
-".venv\Scripts\python.exe" -m pip install --no-index --find-links wheels cmcourier
-if errorlevel 1 (
-    echo ERROR: cmcourier install failed.
-    exit /b 1
-)
-
-echo [4/4] Verifying...
-".venv\Scripts\cmcourier.exe" --version
-if errorlevel 1 (
-    echo ERROR: cmcourier failed to run.
-    exit /b 1
-)
-
-echo.
-echo === Installed successfully ===
-echo.
-echo Next steps:
-echo   1. Install IBM i Access ODBC driver if not present.
-echo   2. Configure a System DSN for the AS400 / RVI source.
-echo   3. Edit config\config-prod.yaml (copy from .template).
-echo   4. Run:  .venv\Scripts\cmcourier.exe --config config\config-prod.yaml [command]
-echo.
-endlocal
-"@
-$installBat | Out-File -FilePath (Join-Path $BundleDir "install.bat") -Encoding ASCII
+Write-Step "Generating install.bat from template"
+function Render-Template {
+    param([string]$TemplatePath, [string]$OutPath)
+    $content = Get-Content -Raw -Path $TemplatePath
+    $content = $content.Replace("@@PYTHON_VERSION@@", $PythonVersion)
+    $content = $content.Replace("@@PROJECT_VERSION@@", $projectVersion)
+    $content = $content.Replace("@@PYTHON_VERSION_NODOT@@", $PythonVersion.Replace(".", ""))
+    # cmd.exe misparses labels/blocks in LF-only files; the template lives in git with LF.
+    $content = $content -replace "`r?`n", "`r`n"
+    Set-Content -Path $OutPath -Value $content -Encoding ASCII -NoNewline
+}
+$batTemplate = Join-Paths @($RepoRoot, "installer", "templates", "install.bat.tmpl")
+Render-Template -TemplatePath $batTemplate -OutPath (Join-Path $BundleDir "install.bat")
 
 # ---------------------------------------------------------------------------
 # 9. Generate INSTALL.txt with operator instructions
@@ -278,10 +255,18 @@ Target: Windows Server x86_64 with Python $PythonVersion already installed.
 
 Prerequisites on the server
 ---------------------------
-1. Python $PythonVersion x86_64 in PATH.
+1. Python $PythonVersion x86_64 from python.org (NOT the Microsoft Store
+   alias), with the "py" launcher, in PATH or reachable via "py -$PythonVersion".
+   If neither is available, point to it with the PYTHON environment variable
+   before running install.bat:
+       set PYTHON=C:\PythonXXX\python.exe
+       install.bat
 2. Microsoft Visual C++ Redistributable 2015-2022 x64 (usually pre-installed).
-3. IBM i Access ODBC driver (or equivalent for the RVI source database).
-4. A System DSN configured under "ODBC Data Sources (64-bit)".
+3. IBM i Access ODBC driver (or equivalent) if there is an AS400/RVI source.
+4. Microsoft ODBC Driver 18 for SQL Server if there is an MSSQL source
+   (connections.<alias>.kind: mssql in the config).
+5. A System DSN (64-bit) configured under "ODBC Data Sources (64-bit)" for
+   each ODBC source that uses one.
 
 Installation
 ------------
@@ -306,7 +291,8 @@ Updating
 Re-run install.bat with a new bundle. The existing .venv is reused; pip
 upgrades changed packages from the new wheels\ folder.
 "@
-$installTxt | Out-File -FilePath (Join-Path $BundleDir "INSTALL.txt") -Encoding UTF8
+(($installTxt -replace "`r?`n", "`r`n") + "`r`n") |
+    Out-File -FilePath (Join-Path $BundleDir "INSTALL.txt") -Encoding UTF8 -NoNewline
 
 # ---------------------------------------------------------------------------
 # 10. Archive the bundle as .zip

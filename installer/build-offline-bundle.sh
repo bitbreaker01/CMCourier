@@ -54,6 +54,7 @@ cd "$REPO_ROOT"
 step "Chequeando prerequisitos"
 command -v python3 >/dev/null || fail "python3 no está en PATH."
 command -v uv >/dev/null || fail "uv no está en PATH. Instalá desde https://docs.astral.sh/uv/"
+command -v zip >/dev/null || fail "zip no está en PATH. Instalalo (apt/yum install zip)."
 
 DETECTED_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 [[ -n "$PYTHON_VERSION" ]] || PYTHON_VERSION="$DETECTED_VERSION"
@@ -91,9 +92,21 @@ mkdir -p "$WHEELS_DIR" "$CONFIG_DIR"
 # ---------------------------------------------------------------------------
 step "Exportando requirements desde uv.lock"
 REQ_FILE="${BUNDLE_DIR}/requirements.txt"
-uv export --no-hashes --no-dev --format requirements-txt -o "$REQ_FILE" \
+uv export --no-emit-project --no-hashes --no-dev --format requirements-txt -o "$REQ_FILE" \
   || fail "uv export falló."
 ok "Escrito ${REQ_FILE}"
+
+# requirements-download.txt: mismas líneas, sin los markers (todo lo que
+# sigue a " ;"). pip download los ignora y baja TODAS las dependencias del
+# lock sin importar la plataforma del host de build — los markers los
+# evalúa pip install de verdad, en el servidor destino.
+REQ_DOWNLOAD_FILE="${BUNDLE_DIR}/requirements-download.txt"
+: > "$REQ_DOWNLOAD_FILE"
+while IFS= read -r line; do
+  [[ -z "$line" || "$line" == \#* ]] && continue
+  echo "${line%% ;*}" >> "$REQ_DOWNLOAD_FILE"
+done < "$REQ_FILE"
+ok "Escrito ${REQ_DOWNLOAD_FILE}"
 
 # ---------------------------------------------------------------------------
 # 5. Buildear el wheel del proyecto (salvo --skip-build)
@@ -116,15 +129,17 @@ ok "Bundle: ${PROJECT_WHEEL}"
 step "Descargando wheels de dependencias (Linux x86_64 / py${PYTHON_VERSION})"
 PLATFORM_ARGS=()
 if [[ "$PYTHON_VERSION" != "$DETECTED_VERSION" ]]; then
-  # Cross-target: pip exige --platform/--abi explícitos + only-binary.
+  # Cross-target: pip exige --platform/--abi explícitos + only-binary. Se
+  # piden los tres tags manylinux (numpy 2.4.4 sólo publica _2_28) y
+  # --abi none además de cp3XY para los wheels puros py3-none-any.
   abi="cp${PYTHON_VERSION//./}"
   PLATFORM_ARGS=(
-    --platform manylinux_2_17_x86_64 --platform manylinux2014_x86_64
-    --python-version "$PYTHON_VERSION" --implementation cp --abi "$abi"
+    --platform manylinux_2_28_x86_64 --platform manylinux_2_17_x86_64 --platform manylinux2014_x86_64
+    --python-version "$PYTHON_VERSION" --implementation cp --abi "$abi" --abi none
     --only-binary=:all:
   )
 fi
-python3 -m pip download --dest "$WHEELS_DIR" "${PLATFORM_ARGS[@]}" -r "$REQ_FILE" \
+python3 -m pip download --dest "$WHEELS_DIR" "${PLATFORM_ARGS[@]}" -r "$REQ_DOWNLOAD_FILE" \
   || fail $'pip download falló. Causas comunes:\n  - Una dependencia solo trae sdist (sin wheel).\n  - Host de build no coincide con el destino (arch / glibc / Python).\n  - Problema de red / proxy en esta máquina.'
 
 # Stagear pip/setuptools/wheel para que el instalador offline pueda actualizar pip.
@@ -133,6 +148,10 @@ python3 -m pip download --dest "$WHEELS_DIR" "${PLATFORM_ARGS[@]}" \
 
 WHEEL_COUNT="$(find "$WHEELS_DIR" -name '*.whl' | wc -l | tr -d ' ')"
 ok "Wheels stageados: ${WHEEL_COUNT}"
+
+CMCOURIER_WHEEL_COUNT="$(find "$WHEELS_DIR" -maxdepth 1 -name 'cmcourier-*.whl' | wc -l | tr -d ' ')"
+[[ "$CMCOURIER_WHEEL_COUNT" -eq 1 ]] \
+  || fail "Se esperaba exactamente un cmcourier-*.whl en ${WHEELS_DIR}, se encontraron ${CMCOURIER_WHEEL_COUNT}."
 
 # ---------------------------------------------------------------------------
 # 7. Copiar config y datos de referencia
@@ -167,50 +186,18 @@ fi
 [[ -f README.md ]] && cp README.md "$BUNDLE_DIR/"
 
 # ---------------------------------------------------------------------------
-# 8. Generar install.sh
+# 8. Generar install.sh desde installer/templates/install.sh.tmpl
 # ---------------------------------------------------------------------------
-step "Generando install.sh"
-cat > "${BUNDLE_DIR}/install.sh" <<'INSTALLER'
-#!/usr/bin/env bash
-#
-# CMCourier offline installer — generado por build-offline-bundle.sh
-#
-set -euo pipefail
-cd "$(dirname "$0")"
-
-echo "=== CMCourier offline installer ==="
-echo "Install dir: $(pwd)"
-echo
-
-command -v python3 >/dev/null || { echo "ERROR: python3 no está en PATH."; exit 1; }
-
-echo "[1/4] Creando virtualenv (.venv)..."
-if [[ -d .venv ]]; then
-  echo "      .venv ya existe, reuso."
-else
-  python3 -m venv .venv || { echo "ERROR: no se pudo crear .venv."; exit 1; }
-fi
-
-echo "[2/4] Actualizando pip desde el wheelhouse local..."
-.venv/bin/python -m pip install --no-index --find-links wheels --upgrade \
-  pip setuptools wheel || { echo "ERROR: upgrade de pip falló."; exit 1; }
-
-echo "[3/4] Instalando cmcourier y dependencias (offline)..."
-.venv/bin/python -m pip install --no-index --find-links wheels cmcourier \
-  || { echo "ERROR: instalación de cmcourier falló."; exit 1; }
-
-echo "[4/4] Verificando..."
-.venv/bin/cmcourier --version || { echo "ERROR: cmcourier no corre."; exit 1; }
-
-echo
-echo "=== Instalado correctamente ==="
-echo
-echo "Próximos pasos:"
-echo "  1. Instalá el driver ODBC de IBM i Access si no está."
-echo "  2. Configurá un DSN para la fuente AS400 / RVI."
-echo "  3. Editá config/config-prod.yaml (copialo desde el .template)."
-echo "  4. Corré:  .venv/bin/cmcourier --config config/config-prod.yaml [comando]"
-INSTALLER
+step "Generando install.sh desde la plantilla"
+render_template() {
+  local tmpl_file="$1" out_file="$2" content
+  content="$(<"$tmpl_file")"
+  content="${content//@@PYTHON_VERSION@@/$PYTHON_VERSION}"
+  content="${content//@@PROJECT_VERSION@@/$PROJECT_VERSION}"
+  content="${content//@@PYTHON_VERSION_NODOT@@/${PYTHON_VERSION//./}}"
+  printf '%s\n' "$content" > "$out_file"
+}
+render_template "${REPO_ROOT}/installer/templates/install.sh.tmpl" "${BUNDLE_DIR}/install.sh"
 chmod +x "${BUNDLE_DIR}/install.sh"
 
 # ---------------------------------------------------------------------------
@@ -225,10 +212,19 @@ Destino: servidor Linux x86_64 con Python ${PYTHON_VERSION} ya instalado.
 
 Prerequisitos en el servidor
 ----------------------------
-1. Python ${PYTHON_VERSION} x86_64 en PATH.
-2. El módulo venv de Python (en Debian/Ubuntu: paquete python3-venv).
-3. Driver ODBC de IBM i Access (o equivalente para la fuente RVI).
-4. Un DSN configurado (unixODBC: /etc/odbc.ini).
+1. Python ${PYTHON_VERSION} x86_64 con el módulo venv (Debian/Ubuntu: paquete
+   python3-venv). Si no está en PATH como "python${PYTHON_VERSION}" ni como
+   "python3", apuntalo con la variable PYTHON antes de correr install.sh:
+       PYTHON=/ruta/al/interprete bash install.sh
+2. glibc >= 2.28 (RHEL/Rocky 8+, Ubuntu 20.04+, Debian 10+). Los wheels del
+   bundle no instalan en distros más viejas.
+3. unixODBC (libodbc.so.2) instalado en el sistema — pyodbc lo necesita, no
+   viene en el wheel.
+4. Driver ODBC de IBM i Access (o equivalente) si hay una fuente AS400/RVI.
+5. Microsoft ODBC Driver 18 for SQL Server si hay una fuente MSSQL
+   (connections.<alias>.kind: mssql en la config).
+6. Un DSN configurado (unixODBC: /etc/odbc.ini) para cada fuente ODBC que
+   lo use.
 
 Instalación
 -----------
