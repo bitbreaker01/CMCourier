@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # This file documents the COMPLETE configurable surface of CMCourier as of
-# version 0.111.0. It is a *reference*, not a runnable config:
+# version 0.112.0. It is a *reference*, not a runnable config:
 #
 #   * Every path below is a PLACEHOLDER (`/path/to/...`). The schema uses
 #     pydantic FilePath / DirectoryPath for inputs that MUST already exist,
@@ -38,6 +38,9 @@
 # from this registry; the loader checks the alias exists and its `kind`
 # matches what the site expects (an as400 source cannot point to mssql).
 # Credentials: <ALIAS>_USERNAME / <ALIAS>_PASSWORD.
+# Console (`cmcourier console`): this registry can be managed entirely from
+# `[2] CREDENCIALES` — add / edit / remove an alias, or move an inline as400
+# connection into it — without hand-editing this file (138).
 # -----------------------------------------------------------------------------
 connections:
   rvi:                                     # → RVI_USERNAME / RVI_PASSWORD

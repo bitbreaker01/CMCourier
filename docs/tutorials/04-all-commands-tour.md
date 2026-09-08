@@ -71,11 +71,11 @@ cmcourier console --config prod.yaml
 
 Sólo dos flags: `--config` (required) y `--log-level` (default `WARNING`; la TUI ocupa la terminal). Necesita un TTY real — por un pipe no arranca.
 
-Arriba vas a ver la barra con el badge de entorno (verde `STAGING`, o rojo `⚠ PRODUCCIÓN` si el YAML dice `environment: prd`), y ocho pestañas que se cambian con `1`–`8` o `F1`–`F8`. En cualquier momento `?` abre la ayuda con todas las teclas y `q` sale.
+Arriba vas a ver la barra con el badge de entorno (verde `STAGING`, o rojo `⚠ PRODUCCIÓN` si el YAML dice `environment: prd`), y nueve pestañas que se cambian con `1`–`9` o `F1`–`F9`. En cualquier momento `?` abre la ayuda con todas las teclas y `q` sale.
 
 ### El recorrido corto
 
-**`2` CREDENCIALES.** Una tarjeta por conexión que tu YAML realmente usa, más CMIS. Escribís usuario y contraseña, `↵` prueba la conexión y el chip pasa a `ok · NN ms`. Las credenciales viven en la sesión: nunca tocan el disco, y al salir se descartan. Si ya tenías `CMIS_USERNAME` / `<ALIAS>_USERNAME` exportadas, vienen pre-cargadas.
+**`2` CREDENCIALES.** Una tarjeta por conexión que tu YAML realmente usa, más CMIS. Escribís usuario y contraseña, `↵` prueba la conexión y el chip pasa a `ok · NN ms`. Las credenciales viven en la sesión: nunca tocan el disco, y al salir se descartan. Si ya tenías `CMIS_USERNAME` / `<ALIAS>_USERNAME` exportadas, vienen pre-cargadas. `n` (o el botón "nueva conexión") da de alta un alias nuevo en el registro sin salir de la consola (138); cada tarjeta trae **editar** / **quitar**, y la conexión `as400` inline se puede **mover al registro** desde su propia tarjeta.
 
 **`4` DOCTOR.** El selector tiene tres niveles: `all`, un grupo (`connections`, `metadata`, …) o un check individual. `d` lo corre en un worker — la UI no se congela. `↑↓` navega y `↵` expande el detalle; los FAIL y WARN se expanden solos. Valida la config **efectiva**: YAML + overrides aplicados + el pipeline elegido en `[5]`.
 
@@ -98,6 +98,8 @@ Las teclas del monitor son las que importan cuando algo se pone feo:
 Si la sesión CMIS expira a mitad de corrida, la consola **no quema documentos**: pausa sola, te avisa y te lleva a `[2]`. Cargás la credencial nueva, volvés a `[6]`, apretás `r` y el documento que comió el 401 se reintenta él mismo.
 
 **`7` BATCHES** te da la tabla con la auditoría de cada corrida (quién, dónde, con qué config), `↵` para el detalle, `R` para reintentar los fallidos y `E` para exportar. **`8` SYNC** es `sync status | recover | resolve` con botones.
+
+**`9` YAML.** El archivo completo, como un formulario generado del schema (137–139): `v` valida, `w` escribe con confirmación y backup. `connections` sigue siendo cosa de `[2]` — acá se ve, no se edita.
 
 > El paso a paso completo, con un Alfresco en Docker y qué apretar en cada pantalla, está en [`how-to/probar-la-consola.md`](../how-to/probar-la-consola.md). La referencia seca de teclas y flags, en [`reference/cli.md`](../reference/cli.md#console--consola-de-operación-123135). El porqué de cada decisión de diseño, en [`explanation/operations-console.md`](../explanation/operations-console.md).
 

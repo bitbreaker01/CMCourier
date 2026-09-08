@@ -5,8 +5,8 @@
 Esta guía te lleva de cero a tener la **consola interactiva**
 (`cmcourier console`) corriendo contra un Alfresco real en tu máquina,
 y te dice exactamente qué apretar en cada pantalla para ejercitar todo:
-credenciales, doctor, overrides, lanzar una corrida y verla en el
-monitor, y operar los batches.
+credenciales y conexiones del registro, doctor, overrides, editar el YAML
+completo, lanzar una corrida y verla en el monitor, y operar los batches.
 
 Todo es local y descartable. No toca producción ni el YAML committeado.
 
@@ -58,7 +58,7 @@ uv run cmcourier console --config sample/config-local.yaml
 ```
 
 Deberías ver la barra superior con **`STAGING`** en verde, el reloj a la
-derecha, y ocho pestañas (`1`-`8` o `F1`-`F8`). Abajo, el footer con las teclas (azul =
+derecha, y nueve pestañas (`1`-`9` o `F1`-`F9`). Abajo, el footer con las teclas (azul =
 global, gris = de la pantalla actual).
 
 En cualquier momento: **`?`** abre la ayuda completa (incluye la leyenda
@@ -93,6 +93,41 @@ avanzás (credenciales → doctor → lanzar).
 > con SQL Server. Sólo las tarjetas `as400` llevan el contador de intentos
 > (lockout del perfil al 3°); las env vars de precarga son
 > `<ALIAS>_USERNAME` / `<ALIAS>_PASSWORD` (`AS400_*` para una conexión inline).
+
+### Editar conexiones desde `[2]`
+
+Además de probar, `[2]` da de alta, edita y da de baja las conexiones del
+registro (`connections:` del YAML) — no hace falta abrir un editor de texto.
+
+1. Apretá **`n`** (o el botón **nueva conexión (n)**). Se abre un modal:
+   alias (sólo minúsculas, dígitos y `_`, empieza con letra, máx. 32
+   caracteres — `cmis` está reservado), `kind` (`as400` o `mssql`) y un
+   campo por parámetro de esa `kind`. Los checkboxes de abajo ("usar esta
+   conexión en:") sólo muestran los sitios de la config que aceptan esa
+   `kind`.
+2. Escribí sólo `host` (y `database` si elegiste `mssql` — son los dos
+   únicos campos requeridos) y dejá el resto en blanco. **Guardar**. La
+   tarjeta nueva aparece con la pista "sin uso — asignala a un sitio desde
+   editar" si no marcaste ningún checkbox.
+3. Abrí **editar** en esa misma tarjeta: los campos que dejaste vacíos
+   siguen vacíos, no aparecen con el default relleno — la consola nunca
+   escribe un default que vos no tipeaste. Cambiá el `host` y guardá: se
+   reescribe **sólo esa línea** del YAML (`connections.<alias>.host`), no
+   el bloque entero, así que un comentario que tuviera al lado otro campo
+   de la misma conexión sobrevive.
+4. Probá **quitar** una conexión que SÍ está en uso por algún sitio → la
+   consola rechaza la baja y te dice qué sitio la bloquea. Quitá una que
+   no esté en uso → confirmación en rojo, backup y borrado de
+   `connections.<alias>`.
+5. Si tu YAML tiene una fuente AS400 **inline** (sin alias, embebida
+   directo en `indexing.source` o similar), su tarjeta trae **mover al
+   registro…** en vez de editar/quitar: arma un alias nuevo con esos
+   mismos datos y hace que el sitio lo referencie por nombre, en una sola
+   escritura.
+6. Las **credenciales de sesión** (usuario/contraseña de la tarjeta) no
+   viven en este modal ni se tocan al editar el registro — pero editar un
+   alias sí invalida la prueba de conexión anterior de ESE alias, y deja
+   el doctor desactualizado (cambió `connections`).
 
 ### `4` DOCTOR
 1. El selector tiene tres niveles: **`all`** (todos los checks), **un
@@ -161,8 +196,8 @@ avanzás (credenciales → doctor → lanzar).
   cooperativa: lo que está en vuelo termina, ningún worker toma trabajo
   nuevo. La cabecera dice `PAUSADA` y la barra superior `⏸ pausada`.
   Ojo: `--max-duration` sigue corriendo mientras está pausada.
-- **`+`** / **`-`** mueven el techo manual de workers en caliente (133),
-  sin confirmación. La cabecera muestra `workers <en uso>/<cap efectivo>`
+- **`+`** (o `=`, el mismo bind) / **`-`** mueven el techo manual de
+  workers en caliente (133), sin confirmación. La cabecera muestra `workers <en uso>/<cap efectivo>`
   y, si lo tocaste, `· techo manual N`. El techo es un `min` contra lo
   que pide el AIMD: si el AIMD quiere 8 y vos pusiste 3, el pool queda
   en 3; cuando subís el techo, el AIMD retoma desde ahí. Sin AIMD sólo
@@ -233,6 +268,55 @@ Es la versión interactiva de `cmcourier sync status | recover | resolve`.
   (`as400 manda` es read-only; `local manda` escribe en AS400 y requiere
   `cm_object_id` + confirmación). Todo corre en background y el resultado
   se acumula en el panel de abajo.
+
+### Editar el archivo completo desde `[9]`
+
+`[2]` y `[3]` cubren conexiones y overrides de sesión; `[9]` es el archivo
+YAML **entero**, como un formulario generado del schema — sin salir de la
+consola ni perder comentarios.
+
+1. Entrá a `[9]`. Vas a ver las mismas secciones que el YAML (`trigger`,
+   `indexing`, `metadata`, `cmis`, `observability`, etc.), colapsadas salvo
+   la de primer nivel. `connections` aparece como texto de sólo lectura
+   (`alias (kind)` por cada una) — para darla de alta o editarla volvé a
+   `[2]`; un campo que hoy apunta a un alias muestra el `Select` con las
+   opciones del registro, y si en cambio es una conexión **inline** el
+   `Select` te ofrece `(inline — editar en [2])`.
+2. Cambiá cualquier campo (por ejemplo, un `path` o un filtro de
+   `trigger`). El encabezado de arriba cuenta los cambios pendientes en
+   vivo (`N cambios`) contra lo que hay en disco.
+3. Apretá **`v`** (validar). Si algo no cierra contra el schema, el error
+   aparece pegado a la fila que lo causa (o listado aparte si no hay una
+   fila para ese error). Corregí y validá de nuevo.
+4. Apretá **`w`** (escribir). Con cambios válidos aparece la confirmación
+   con la cantidad de cambios, la ruta del archivo y el aviso del backup
+   (`config.yaml.bak-<fecha>`); confirmá y se escribe. Con el YAML sin
+   cambios, `w` avisa "sin cambios pendientes" y no hace nada; con errores
+   de validación, se niega hasta que corrijas; con una corrida activa,
+   avisa que el YAML se escribe cuando termine.
+5. **Qué preserva** el round-trip (137): comentarios, orden de las claves,
+   comillas, el terminador de línea (CRLF si el archivo ya lo usaba) y la
+   indentación detectada del archivo original — lo que no tocaste no
+   cambia ni un espacio.
+6. **Qué NO preserva**: si reemplazás un ítem completo de una lista (por
+   ejemplo, cambiás el `kind` de una fuente de `metadata.sources`), ese
+   ítem pierde los comentarios que tenía adentro — es un ítem nuevo, no
+   una edición in-place. Un mapping en flow style (`{ a: 1 }`) que se
+   reescribe pierde el espaciado interno (`{a: 1}`).
+7. Salí sin guardar (cambiá de pestaña y volvé, o simplemente no apretés
+   `w`): al re-entrar a `[9]` con cambios pendientes, la consola NO relee
+   el disco — evita pisarte un borrador a medio hacer. Sin cambios
+   pendientes, sí relee (por ejemplo, después de escribir algo desde
+   `[2]` o `[3]`).
+
+La diferencia con `[3]` no es de mecánica — las dos escriben con el mismo
+`YamlDocument` (137) y el mismo backup — es de **alcance y nivel**: `[3]`
+sólo toca siete escalares de rendimiento/observabilidad y pasa por un
+borrador de sesión que primero se **aplica** con `a` y recién después,
+opcionalmente, se **escribe** con `w`. `[9]` edita cualquier clave del
+YAML directo, sin ese nivel intermedio — lo que ves en el formulario es
+lo que `w` va a escribir. Y `connections` no se toca desde ninguna de las
+dos: eso es `[2]`.
 
 ---
 
@@ -325,6 +409,48 @@ mezclar corridas con el banco CSV. Bajar el SQL Server:
 `docker compose -f scripts/staging/mssql-compose.yml down` (`-v` borra los datos;
 re-correr `mssql-seed.sh` después).
 
+### Ejercicio guiado: la misma migración, sin editar un YAML a mano
+
+Lo de arriba parte de `sample/config-local-mssql.yaml`, ya armado. Este
+ejercicio junta `[2]` y `[9]` para llegar al mismo resultado desde el YAML
+**plano** (`sample/config-local.yaml`, con `metadata.sources` en CSV),
+usando sólo la consola.
+
+Con el SQL Server y la tabla ya levantados (pasos 1 y 2 de arriba):
+
+```bash
+export CMIS_USERNAME=admin CMIS_PASSWORD=admin
+export CLIENTES_SQL_USERNAME=sa CLIENTES_SQL_PASSWORD='CmCourier!2026'
+uv run cmcourier console --config sample/config-local.yaml
+```
+
+1. En **`[2]`**, `n` → alias `clientes_sql`, kind `mssql`, `host`
+   `127.0.0.1`, `database` `cmcourier`, `trust_server_certificate` `true`
+   (el contenedor usa un certificado autofirmado). No marqués ningún
+   checkbox — todavía no hay un sitio `mssql` en este YAML. **Guardar** y
+   probá la conexión: `ok · NN ms`.
+2. En **`[9]`**, abrí `metadata` → `sources` → el ítem `[0]` (la fuente
+   `clients`, hoy `kind: csv`). Cambiale el `kind` a `mssql` en el Select:
+   el ítem se reconstruye con `alias: clients` conservado (137/139: cambiar
+   de `kind` es borrar y crear de nuevo, salvo `alias`/`name`) y el resto
+   de los campos vacío.
+3. En el campo `connection` del ítem, elegí `clientes_sql` — sale del
+   registro que armaste en `[2]`. Completá `table` con `dbo.clientes`.
+4. Abrí `metadata` → `field_sources` → `BAC_Nombre_Cliente` → `sources` →
+   `[0]` y cambiá `source_type` de `csv:clients` a `mssql:clients`: el
+   lookup tiene que apuntar a la fuente por su `kind:alias` nuevo.
+5. **`v`** valida. Si te salteaste el paso 4, el error va a aparecer ahí,
+   no en el bloque de `metadata.sources` que tocaste antes.
+6. **`w`** escribe — confirmá y mirá el backup en el toast. `[2]` y `[3]`
+   se refrescan solos con el YAML nuevo.
+7. **`4`** DOCTOR → `d` (grupo `metadata` o `all`): `metadata_sources`
+   pasa contra `dbo.clientes`, igual que con `config-local-mssql.yaml`,
+   pero sin haber abierto un editor de texto.
+
+`sample/config-local.yaml` quedó modificado (con backup al lado). Si vas a
+repetir otro ejercicio de esta guía que dependa del CSV, restauralo con
+`git checkout -- sample/config-local.yaml`.
+
 ---
 
 ## 6. Resetear entre pruebas
@@ -341,15 +467,3 @@ cd scripts/staging
 docker compose -f alfresco-compose.yml -f alfresco-compose.local.yml down      # conserva datos
 docker compose -f alfresco-compose.yml -f alfresco-compose.local.yml down -v   # wipe total (re-registrar modelo)
 ```
-
----
-
-## Qué NO hace todavía (por diseño de la v1)
-
-- **Editar el YAML libremente** desde la consola: `w` escribe SÓLO los
-  siete escalares de `3` (135). Lo estructural — fuentes, conexiones,
-  mapping, tracking — sigue siendo del archivo. Un editor completo
-  necesitaría round-trip con comentarios (`ruamel.yaml`): dependencia
-  nueva y quoting propio, para algo que hoy no hace falta.
-
-El resto del mock v2 (ver el artifact de diseño) está implementado.

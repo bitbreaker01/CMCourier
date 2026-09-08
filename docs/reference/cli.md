@@ -104,18 +104,19 @@ Necesita un TTY real — no funciona por un pipe ni en un editor sin terminal in
 
 ### Pestañas
 
-`1`–`8` o `F1`–`F8`. Los `F`-keys tienen `priority=True`: funcionan **aun con el foco dentro de un campo de texto**, los dígitos no.
+`1`–`9` o `F1`–`F9`. Los `F`-keys tienen `priority=True`: funcionan **aun con el foco dentro de un campo de texto**, los dígitos no.
 
 | # | Pestaña | Qué hace |
 |---|---------|----------|
 | `1` | INICIO | Config, entorno, `trigger.kind`, `processing.mode`, estado por conexión, veredicto del doctor y la lista "siguiente paso". |
-| `2` | CREDENCIALES | Una tarjeta por conexión de la config efectiva (131) más `cmis`. Prueba de conexión por alias. Las credenciales viven en la sesión — nunca tocan disco. |
+| `2` | CREDENCIALES | Una tarjeta por conexión de la config efectiva (131) más `cmis`. Prueba de conexión por alias. Alta / edición / baja de conexiones del registro y "mover al registro" una inline (138). Las credenciales viven en la sesión — nunca tocan disco. |
 | `3` | CONFIG | Overrides de sesión sobre el YAML, modelo *draft → applied* (124) y escritura al YAML con `w` (135). |
 | `4` | DOCTOR | El mismo `run_doctor` que el comando, con selector `all` / grupo / check individual (126). Corre en un worker, no congela la UI. |
 | `5` | CORRER | Launcher: elección de pipeline (127), parámetros por kind, `nueva` vs `reanudar`, `total` y `max-duration`. |
 | `6` | MONITOR | Corrida en vivo a 4 Hz: cabecera, PREP/UPLOAD, y en `streaming` también el bucket. |
 | `7` | BATCHES | Tabla de batches con su auditoría; detalle, retry y export. |
 | `8` | SYNC | La versión interactiva de `sync status` / `recover` / `resolve` (128). |
+| `9` | YAML | Formulario generado del schema sobre el YAML completo (137–139): `v` valida, `w` escribe (con backup). `connections` se administra en `[2]`, acá es de sólo lectura. |
 
 ### Teclas
 
@@ -123,11 +124,12 @@ Copiadas de `HelpScreen.HELP` (`cli/console/app.py`) — la ayuda `?` dentro de 
 
 | Tecla | Ámbito | Acción |
 |-------|--------|--------|
-| `1`–`8` / `F1`–`F8` | global | Cambiar de pantalla. |
+| `1`–`9` / `F1`–`F9` | global | Cambiar de pantalla. |
 | `?` | global | Ayuda (teclas + leyenda S0–S7 + lista de checks del doctor). |
 | `q` | global | Salir. Confirma si hay corrida — salir **no** la cancela, sigue en background. |
 | `Esc` | global | Cerrar modal / soltar el foco de un campo. |
 | `↵` | `[2]` | Probar la conexión de la tarjeta enfocada. |
+| `n` | `[2]` | Nueva conexión del registro (138) — editar / quitar quedan en cada tarjeta. |
 | `a` | `[3]` | Aplicar el borrador de overrides (draft → applied). |
 | `w` | `[3]` | Escribir los overrides **aplicados** al YAML (135). |
 | `d` | `[4]` | Correr la selección del doctor. |
@@ -142,6 +144,8 @@ Copiadas de `HelpScreen.HELP` (`cli/console/app.py`) — la ayuda `?` dentro de 
 | `R` | `[7]` | Reintentar los fallidos (te lleva al launcher en modo reanudar). |
 | `E` | `[7]` | Exportar el reporte del batch. |
 | `s` | `[8]` | Estado del sync. |
+| `v` | `[9]` | Validar el YAML editado contra el schema — pinta los errores por fila (139). |
+| `w` | `[9]` | Escribir el formulario editado al YAML completo, con confirmación y backup (139). |
 
 Ojo con `r`: en `[5]` lanza y en `[6]` reanuda. Es la misma acción (`action_launch`) ruteada por la pestaña activa.
 
@@ -164,6 +168,45 @@ Ojo con `r`: en `[5]` lanza y en `[6]` reanuda. Es la misma acción (`action_lau
 El pipeline elegido en `[5]` (127) **no** se persiste: es una elección por corrida, no de configuración.
 
 El parche es sobre el texto, línea a línea — comentarios y formato quedan byte-idénticos. Antes de tocar el original la consola recarga el resultado con `load_config` y lo compara contra lo que debería quedar; si no coincide (flow style, anchors, claves duplicadas) se niega con un `PersistError` y el archivo queda intacto, sin backup a medias. Si pasa, hace `config.yaml.bak-YYYYmmdd-HHMMSS` al lado y reemplaza de forma atómica.
+
+### Conexiones del registro (`[2]`)
+
+`n` (o el botón "nueva conexión") abre el modal de alta (138). Cada tarjeta de una conexión del registro trae **editar** y **quitar**; la tarjeta de una conexión `as400` inline (la del alias implícito `as400` en `indexing.source` / `metadata.sources[]` / `tracking.as400_sync`) sólo trae **mover al registro…** — no se puede editar ni quitar sin moverla primero.
+
+El modal:
+
+- **alias**: `^[a-z][a-z0-9_]{0,31}$` (minúscula inicial, después minúsculas/dígitos/`_`, máx. 32); `cmis` está reservado. Al editar, alias y `kind` quedan bloqueados — cambiar de `kind` es borrar y crear de nuevo.
+- un `Input` por campo de la `kind` elegida (`as400`: `host`, `port`, `database`, `driver`, `table`; `mssql`: `host`, `port`, `database`, `driver`, `encrypt`, `trust_server_certificate`), con el default del modelo como placeholder.
+- un checkbox por sitio de la config que acepta esa `kind` ("usar esta conexión en:"). Un sitio que HOY usa este alias no se puede destildar acá: hay que apuntarlo a otra conexión desde su propio editor.
+- se escribe **`kind` + los campos no vacíos**, ya tipados (`port` a `int`; `encrypt` / `trust_server_certificate` a `bool` desde `true/false/sí/si/no/1/0`). Un campo vacío se omite (o se borra, si estabas editando): el default del modelo lo cubre en memoria, pero no se escribe al YAML.
+- **editar** un alias existente escribe **campo por campo** (`connections.<alias>.<campo>`), no reemplaza el mapping entero — así el estilo (por ejemplo un bloque en flow style) y los comentarios de los demás campos sobreviven.
+- **quitar** se bloquea si algún sitio referencia el alias (el mensaje lista cuáles); si no, borra `connections.<alias>` con confirmación y backup.
+- **mover al registro…** arma un alias nuevo con los campos y los sitios de la conexión inline pre-marcados, y en el mismo golpe crea `connections.<alias>` y apunta el sitio inline al alias por nombre.
+
+Las credenciales de sesión (usuario/contraseña de la tarjeta) no forman parte de este modal — viven aparte, en memoria — pero editar el registro invalida la prueba anterior del alias tocado y deja el doctor desactualizado.
+
+### YAML completo (`[9]`)
+
+El formulario sale del schema (`build_form` sobre `PipelineConfig`) contra un dict plano leído del disco; cada cambio en un campo actualiza ese dict en memoria, no el archivo. `connections` se muestra (alias · kind) pero es de **sólo lectura** acá — se administra desde `[2]`; un sitio con una conexión inline aparece como `(inline — editar en [2])`.
+
+- **`v`** valida como lo haría `load_config` (con los defaults de `kind` inyectados) y pinta cada error en la fila más específica que matchea; un error a nivel de modelo sin fila propia se lista aparte.
+- **`w`** primero valida solo: sin cambios pendientes avisa y no hace nada; con errores de validación se niega; con una corrida activa avisa y tampoco escribe. Si pasa, confirma con la cantidad de cambios y escribe **sólo el diff** entre lo original y lo editado vía `YamlDocument` — nunca re-serializa el dict entero.
+- Al entrar a la pestaña (o cuando `[2]`/`[3]` escriben), si no hay ediciones pendientes recarga del disco solo; con ediciones sin guardar no pisa lo que estás tipeando, y el encabezado avisa "⚠ el archivo cambió en disco" si además cambió por fuera.
+- Qué preserva el round-trip (137): comentarios, orden de las claves, comillas, CRLF, la indentación detectada del archivo.
+- Qué **no** preserva: un ítem de lista reemplazado (p. ej. cambiar el `kind` de una fuente de metadata) pierde los comentarios que tenía adentro; un mapping en flow style pierde el espaciado interno (`{ a: 1 }` pasa a `{a: 1}`); borrar el último hijo de un mapping puede dejarlo en `{}` en la misma línea (p. ej. `connections: {}` si se vaciara el registro — aunque `connections` en la práctica se edita en `[2]`, no acá).
+
+Diferencia con `[3]`: `[3]` sólo toca siete escalares de rendimiento/observabilidad, con el modelo *borrador → aplicado* de sesión (`a` / `w`). `[9]` edita el archivo completo contra el schema — cualquier clave, no sólo esos siete —, sin ese nivel intermedio: lo que ves en el formulario es lo que `w` va a escribir. Las dos pestañas comparten el mismo escritor (`YamlDocument`, con su backup) pero son caminos independientes.
+
+### Archivos que escribe la consola
+
+Toda escritura al YAML desde la consola —overrides de `[3]` (135), conexiones de `[2]` (138) o el formulario de `[9]` (139)— pasa por el mismo escritor (`config/yaml_doc.py`, 137):
+
+1. Vuelca el documento editado a un temporal en el mismo directorio: `.<nombre-del-yaml>.<pid>.tmp`.
+2. Verifica ese temporal recargándolo con `load_config` (en `[3]`, comparando además contra el resultado esperado de los overrides). Si falla, el temporal se borra y el original queda intacto — sin backup.
+3. Si pasa, copia el original a `<nombre-del-yaml>.bak-YYYYmmdd-HHMMSS` (sufijo `-N` si dos escrituras caen en el mismo segundo) al lado del archivo.
+4. Reemplaza el original por el temporal de forma atómica (mismo directorio, permisos copiados del original).
+
+Ninguno de los tres caminos deja el archivo a medias: si la verificación falla, no hay ni backup ni cambio.
 
 ### Lock de config
 

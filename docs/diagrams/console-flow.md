@@ -4,7 +4,7 @@
 
 `cmcourier console` (123–135) no es un menú: es una máquina de estados con guardas. El operador no puede lanzar una corrida sin haber pasado por las credenciales y por el doctor, no puede escribir el YAML sin haber aplicado los overrides, y no puede aplicar un `recover` sin haber simulado antes. Cada una de esas barreras existe porque el camino equivocado cuesta caro contra producción.
 
-Este diagrama muestra el orden real, no las ocho pestañas sueltas.
+Este diagrama muestra el orden real, no las nueve pestañas sueltas.
 
 ## El recorrido de una corrida
 
@@ -147,6 +147,20 @@ flowchart LR
 ```
 
 El techo gana siempre, porque es la decisión explícita de una persona que está mirando el sistema. El AIMD sigue corriendo debajo y sigue viendo el valor cappeado, así que cuando el operador sube el techo el controlador retoma desde ahí en vez de empezar de cero. El techo es **de la corrida**: la próxima arranca sin él.
+
+## Quién escribe el YAML
+
+`[2]` (138) y `[9]` (139) son los dos caminos que tocan el archivo completo — a diferencia de `[3]`, que sólo persiste sus siete escalares (135). Los dos pasan por el mismo escritor (`YamlDocument`, 137: temporal en el mismo directorio, verificación con `load_config`, backup, reemplazo atómico) y los dos dejan rastro en el resto de la consola.
+
+```mermaid
+flowchart LR
+    C2(["[2] alta / editar / quitar<br/>una conexión del registro"]) --> YAML[("YamlDocument (137)<br/>tmp → verify → backup → replace")]
+    C9(["[9] formulario del YAML completo"]) --> YAML
+    YAML --> C3["[3] refresca los valores<br/>que muestra del YAML"]
+    YAML --> C4["[4] doctor pasa a<br/>'desactualizado'"]
+```
+
+`connections:` sólo se edita desde `[2]`: en `[9]` aparece de sólo lectura, y un sitio con una conexión inline se muestra como `(inline — editar en [2])`.
 
 ## Convenciones de estos diagramas
 
