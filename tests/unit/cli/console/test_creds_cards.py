@@ -146,6 +146,36 @@ class TestCards:
 
         asyncio.run(_run())
 
+    @pytest.mark.parametrize("size", [(120, 50), (100, 45)])
+    def test_every_card_shows_test_button_and_status_chip(
+        self, tmp_path: Path, size: tuple[int, int]
+    ) -> None:
+        """Queja del operador: "probar conexión" sólo se veía en CMIS. Un `Static`
+        sin `width` en un `Horizontal` llena la fila (Textual: "fill available
+        space") y empuja el botón, `editar`/`quitar` y el chip de estado fuera
+        de la tarjeta. Cada widget de acción/estado tiene que caer DENTRO del
+        área de su tarjeta — en 120 y en 100 columnas."""
+
+        async def _run() -> None:
+            config, path = _registry_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test(size=size) as pilot:
+                await goto(pilot, app, "2")
+                app.state.record_conn_result("rvi", ok=False, message="401")
+                app.query_one(CredsPane).render_all()
+                await pilot.pause()
+                for alias in ("cmis", "clientes_sql", "rvi"):
+                    card = app.query_one(f"#card-{alias}").region
+                    for wid in app.query(f"#card-{alias} Button, #card-{alias} Static"):
+                        if wid.id and wid.id.startswith(("msg-", "sites-")):
+                            continue
+                        r = wid.region
+                        assert r.width > 0 and r.x + r.width <= card.x + card.width, (
+                            f"{wid.id} se sale de la tarjeta {alias}: {r} vs {card} en {size}"
+                        )
+
+        asyncio.run(_run())
+
 
 class TestRecompose:
     """Antagonista 129-131 I1/I2: la rama de remonte de `rebuild_cards` hoy

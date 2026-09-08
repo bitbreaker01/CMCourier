@@ -91,12 +91,20 @@ class CredsPane(Vertical):
     CredsPane .card { border: solid $surface-lighten-2; padding: 1 2; height: auto; }
     CredsPane .card-title { text-style: bold; }
     CredsPane .card-sites { color: $text-muted; }
+    /* Un Static sin width dentro de un Horizontal llena la fila y empuja
+       lo que viene después fuera de la tarjeta (chip de estado, botones).
+       Los chips van a `auto`; título, input y contador de intentos toman
+       el resto (`1fr`) y se envuelven en vez de empujar. */
+    CredsPane .frow Static { width: auto; }
+    CredsPane .frow .card-title { width: 1fr; }
+    CredsPane .frow .tries { width: 1fr; }
+    CredsPane .frow Input { width: 1fr; }
     CredsPane .chip-ok { color: $success; }
     CredsPane .chip-err { color: $error; }
     CredsPane .chip-run { color: $accent; }
     CredsPane .chip-idle { color: $text-muted; }
     CredsPane .msg { color: $text-muted; margin-top: 1; }
-    CredsPane .tries { color: $warning; }
+    CredsPane .tries { color: $warning; padding: 1 0 0 1; }
     CredsPane Input { margin-top: 0; }
     CredsPane .frow { height: auto; margin-top: 1; }
     CredsPane .toolbar { height: auto; margin-bottom: 1; }
@@ -216,12 +224,15 @@ class CredsPane(Vertical):
             )
         )
         row = Horizontal(classes="frow")
+        row.compose_add_child(Button("probar conexión", variant="primary", id=f"test-{alias}"))
         if info.kind == "as400":
             row.compose_add_child(Static("", classes="tries", id=f"tries-{alias}"))
-        row.compose_add_child(Button("probar conexión", variant="primary", id=f"test-{alias}"))
-        for button in self._card_actions(info):
-            row.compose_add_child(button)
         card.compose_add_child(row)
+        # Las acciones de edición van en su propia fila: junto a "probar" no
+        # entran en una tarjeta de la grilla (2 columnas) a 120 cols.
+        actions = self._card_actions(info)
+        if actions:
+            card.compose_add_child(Horizontal(*actions, classes="frow"))
         # markup=False: los mensajes traen cuerpos de error de CMIS/AS400
         # con corchetes y JSON que Textual leería como markup y rompería.
         card.compose_add_child(Static("", classes="msg", id=f"msg-{alias}", markup=False))

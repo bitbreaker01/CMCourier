@@ -10,8 +10,19 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
-_Sin cambios pendientes de release — todo el trabajo está versionado
-abajo. El roadmap post-MVP vive en `docs/roadmap/POST-MVP.md`._
+### Fixed
+
+- **Consola `[2] CREDENCIALES`: "probar conexión" sólo se veía en la
+  tarjeta CMIS.** Reporte del operador. Un `Static` sin `width` dentro
+  de un `Horizontal` llena la fila (Textual: *fill available space*): el
+  contador de intentos de las tarjetas `as400` empujaba "probar
+  conexión", `editar` y `quitar` fuera de la tarjeta, y el título hacía
+  lo mismo con el chip de estado (`● sin probar` / `ok` / `falló`) en
+  TODAS las tarjetas — nunca fue visible; el `Input` de contraseña
+  ocultaba `ver`. Ahora chips a `auto`, título/input/contador a `1fr`
+  (se envuelven en vez de empujar) y `editar`/`quitar`/`mover` en su
+  propia fila. Test de pilot que exige que cada botón y chip caiga
+  dentro del área de su tarjeta a 120 y a 100 columnas.
 
 ---
 
