@@ -96,6 +96,7 @@ $ConfigDir  = Join-Path $BundleDir "config"
 
 function Join-Paths {
     param([Parameter(Mandatory)][string[]]$Segments)
+    if ($Segments.Count -lt 2) { return $Segments[0] }
     $result = $Segments[0]
     foreach ($segment in $Segments[1..($Segments.Count - 1)]) {
         $result = Join-Path $result $segment
@@ -176,6 +177,7 @@ pip download failed. Common causes:
     --abi $abi `
     --only-binary=:all: `
     pip setuptools wheel | Out-Null
+if ($LASTEXITCODE -ne 0) { Fail "Could not stage pip/setuptools/wheel (the bundle would ship without pip)." }
 
 $wheelCount = (Get-ChildItem $WheelsDir -Filter *.whl).Count
 Write-Ok "Wheels staged: $wheelCount"
@@ -259,7 +261,7 @@ Prerequisites on the server
    alias), with the "py" launcher, in PATH or reachable via "py -$PythonVersion".
    If neither is available, point to it with the PYTHON environment variable
    before running install.bat:
-       set PYTHON=C:\PythonXXX\python.exe
+       set PYTHON=C:\Python$($PythonVersion.Replace(".", ""))\python.exe
        install.bat
 2. Microsoft Visual C++ Redistributable 2015-2022 x64 (usually pre-installed).
 3. IBM i Access ODBC driver (or equivalent) if there is an AS400/RVI source.

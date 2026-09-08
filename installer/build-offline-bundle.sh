@@ -103,8 +103,10 @@ ok "Escrito ${REQ_FILE}"
 REQ_DOWNLOAD_FILE="${BUNDLE_DIR}/requirements-download.txt"
 : > "$REQ_DOWNLOAD_FILE"
 while IFS= read -r line; do
+  line="${line#"${line%%[![:space:]]*}"}"   # trim a la izquierda ("    # via pydantic")
   [[ -z "$line" || "$line" == \#* ]] && continue
-  echo "${line%% ;*}" >> "$REQ_DOWNLOAD_FILE"
+  line="${line%% ;*}"
+  echo "${line%"${line##*[![:space:]]}"}" >> "$REQ_DOWNLOAD_FILE"
 done < "$REQ_FILE"
 ok "Escrito ${REQ_DOWNLOAD_FILE}"
 
@@ -127,7 +129,9 @@ ok "Bundle: ${PROJECT_WHEEL}"
 # 6. Descargar los wheels de dependencias (plataforma del host de build)
 # ---------------------------------------------------------------------------
 step "Descargando wheels de dependencias (Linux x86_64 / py${PYTHON_VERSION})"
-PLATFORM_ARGS=()
+# Siempre --only-binary: un sdist en wheels/ obliga a compilar en un servidor
+# sin internet ni toolchain. Mejor que falle acá.
+PLATFORM_ARGS=(--only-binary=:all:)
 if [[ "$PYTHON_VERSION" != "$DETECTED_VERSION" ]]; then
   # Cross-target: pip exige --platform/--abi explícitos + only-binary. Se
   # piden los tres tags manylinux (numpy 2.4.4 sólo publica _2_28) y
@@ -144,10 +148,12 @@ python3 -m pip download --dest "$WHEELS_DIR" "${PLATFORM_ARGS[@]}" -r "$REQ_DOWN
 
 # Stagear pip/setuptools/wheel para que el instalador offline pueda actualizar pip.
 python3 -m pip download --dest "$WHEELS_DIR" "${PLATFORM_ARGS[@]}" \
-  pip setuptools wheel >/dev/null 2>&1 || warn "No se pudieron stagear pip/setuptools/wheel."
+  pip setuptools wheel >/dev/null 2>&1 || fail "No se pudieron stagear pip/setuptools/wheel (el bundle saldría sin pip)."
 
 WHEEL_COUNT="$(find "$WHEELS_DIR" -name '*.whl' | wc -l | tr -d ' ')"
 ok "Wheels stageados: ${WHEEL_COUNT}"
+SDIST_COUNT="$(find "$WHEELS_DIR" \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l | tr -d ' ')"
+[[ "$SDIST_COUNT" -eq 0 ]] || fail "Hay ${SDIST_COUNT} sdist(s) en ${WHEELS_DIR}: el servidor no puede compilarlos."
 
 CMCOURIER_WHEEL_COUNT="$(find "$WHEELS_DIR" -maxdepth 1 -name 'cmcourier-*.whl' | wc -l | tr -d ' ')"
 [[ "$CMCOURIER_WHEEL_COUNT" -eq 1 ]] \

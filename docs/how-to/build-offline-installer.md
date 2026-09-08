@@ -189,10 +189,12 @@ cmcourier-offline-<version>-py<X.Y>-<plataforma>/
 Cinco minutos acá te ahorran un viaje al servidor.
 
 1. Abrí el `.zip` y contá: tiene que haber **un solo** `cmcourier-*.whl`,
-   un `colorama-*.whl`, y los wheels compilados (`pyodbc`, `numpy`,
-   `pillow`, `lxml`, `pydantic_core`…) con el tag de la versión y
+   un `colorama-*.whl`, un `pip-*.whl`, y los wheels compilados (`pyodbc`,
+   `numpy`, `pillow`, `lxml`, `pydantic_core`…) con el tag de la versión y
    plataforma destino — `cp311-cp311-win_amd64` para Windows 3.11, por
    ejemplo. Un wheel con `cp312` en un bundle `py3.11` es un bundle roto.
+   Hoy son ~55 wheels; ningún `.tar.gz` (el build falla si queda un sdist,
+   porque offline no compila).
 2. Si tenés a mano un Python de la versión destino (aunque sea en otra
    plataforma), un dry-run offline contra el `wheels/` extraído te dice si
    pip resuelve TODO sin red:
@@ -226,8 +228,9 @@ Cinco minutos acá te ahorran un viaje al servidor.
    2. `py -X.Y` (Windows) / `pythonX.Y` (Linux);
    3. `python` / `python3` a secas.
 
-   Si el elegido no es Python `X.Y` (la versión del bundle), sale con
-   código 1 y te dice qué encontró, qué esperaba y cómo apuntarlo:
+   Si el elegido no es Python `X.Y` (la versión del bundle) **o no es de
+   64 bits** (los wheels son `win_amd64` / `x86_64`), sale con código 1 y
+   te dice qué encontró, qué esperaba y cómo apuntarlo:
 
    ```bat
    set PYTHON=C:\Python311\python.exe
@@ -238,8 +241,17 @@ Cinco minutos acá te ahorran un viaje al servidor.
    PYTHON=/usr/bin/python3.11 bash install.sh
    ```
 
-   Si ya existe un `.venv` de OTRA versión, también sale con 1 y te pide
+   `PYTHON` acepta la ruta con o sin comillas, y una ruta relativa se
+   resuelve desde la carpeta en la que estás parado (no desde el bundle).
+
+   Si ya existe un `.venv` de OTRA versión, o uno roto (sin
+   `Scripts\python.exe` / `bin/python`), también sale con 1 y te pide
    borrarlo (`rmdir /s /q .venv` / `rm -rf .venv`) — no lo borra solo.
+
+   En Windows, `install.bat` funciona desde un share UNC
+   (`\\servidor\releases\...`) y, si lo lanzás con doble click, hace
+   `pause` al final para que la ventana no se cierre antes de que leas el
+   resultado.
 5. Después crea el `.venv`, actualiza pip desde `wheels/` e instala
    `cmcourier` **offline** (`pip install --no-index --find-links wheels`).
 6. Verifica solo: corre `cmcourier --version` al final.

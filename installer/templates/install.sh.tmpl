@@ -4,6 +4,7 @@
 # Generado desde installer/templates/install.sh.tmpl por build-offline-bundle.sh
 #
 set -euo pipefail
+OPERATOR_PWD="$PWD"
 cd "$(dirname "$0")"
 
 TARGET_VERSION="@@PYTHON_VERSION@@"
@@ -13,19 +14,25 @@ echo "Install dir: $(pwd)"
 echo "Python destino: ${TARGET_VERSION}"
 echo
 
+# Imprime "X.Y BITS" (p. ej. "3.11 64"). El bundle es x86_64: un Python de
+# 32 bits pasa el check de major.minor y muere recién en pip, sin decir por qué.
 version_of() {
-  "$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null
+  "$1" -c 'import sys, struct; print(".".join(map(str, sys.version_info[:2])), struct.calcsize("P")*8)' 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
 # [1/6] Resolver el intérprete de Python
-#   1. $PYTHON si está definida.
+#   1. $PYTHON si está definida (sin comillas; una ruta relativa se toma desde
+#      el directorio del operador, no desde el del bundle).
 #   2. python@@PYTHON_VERSION@@ si está en PATH.
 #   3. python3.
 # ---------------------------------------------------------------------------
 echo "[1/6] Resolviendo intérprete de Python..."
 if [[ -n "${PYTHON:-}" ]]; then
-  PY="$PYTHON"
+  PY="${PYTHON%\"}"; PY="${PY#\"}"
+  if [[ "$PY" == */* && "$PY" != /* ]]; then
+    PY="${OPERATOR_PWD}/${PY}"
+  fi
   echo "      PYTHON está seteado, uso: ${PY}"
 elif command -v "python${TARGET_VERSION}" >/dev/null 2>&1; then
   PY="python${TARGET_VERSION}"
@@ -44,10 +51,12 @@ fi
 # [2/6] Comprobar major.minor ANTES de crear el .venv
 # ---------------------------------------------------------------------------
 echo "[2/6] Comprobando la versión de ${PY}..."
-FOUND_VERSION="$(version_of "$PY")" || {
+PROBE="$(version_of "$PY")" || {
   echo "ERROR: no se pudo ejecutar '${PY}' para comprobar su versión." >&2
+  echo "       Si PYTHON apunta a una ruta, verificá que exista (sin comillas)." >&2
   exit 1
 }
+read -r FOUND_VERSION FOUND_BITS <<< "$PROBE"
 if [[ "$FOUND_VERSION" != "$TARGET_VERSION" ]]; then
   echo "ERROR: ${PY} es Python ${FOUND_VERSION}, se esperaba Python ${TARGET_VERSION}." >&2
   echo "       Encontrado: ${FOUND_VERSION}" >&2
@@ -56,14 +65,22 @@ if [[ "$FOUND_VERSION" != "$TARGET_VERSION" ]]; then
   echo "         PYTHON=/usr/bin/python@@PYTHON_VERSION@@ bash install.sh" >&2
   exit 1
 fi
-echo "      OK: ${PY} es Python ${FOUND_VERSION}."
+if [[ "$FOUND_BITS" != "64" ]]; then
+  echo "ERROR: ${PY} es un Python de ${FOUND_BITS} bits; este bundle es x86_64 (64 bits)." >&2
+  echo "       Instalá Python ${TARGET_VERSION} de 64 bits o apuntá PYTHON a uno." >&2
+  exit 1
+fi
+echo "      OK: ${PY} es Python ${FOUND_VERSION} (64 bits)."
 
 if [[ -d .venv ]]; then
   echo "      Comprobando la versión del .venv existente..."
-  VENV_VERSION="$(version_of ".venv/bin/python")" || {
-    echo "ERROR: no se pudo comprobar la versión de .venv/bin/python." >&2
+  VENV_PROBE="$(version_of ".venv/bin/python")" || {
+    echo "ERROR: .venv existe pero .venv/bin/python no corre (venv incompleto o ajeno)." >&2
+    echo "       Borralo y volvé a correr install.sh:" >&2
+    echo "         rm -rf .venv && bash install.sh" >&2
     exit 1
   }
+  read -r VENV_VERSION _ <<< "$VENV_PROBE"
   if [[ "$VENV_VERSION" != "$TARGET_VERSION" ]]; then
     echo "ERROR: el .venv existente es Python ${VENV_VERSION}, se esperaba Python ${TARGET_VERSION}." >&2
     echo "       Encontrado: ${VENV_VERSION}" >&2
@@ -83,6 +100,12 @@ if [[ -d .venv ]]; then
   echo "      .venv ya existe, reuso."
 else
   "$PY" -m venv .venv || { echo "ERROR: no se pudo crear .venv."; exit 1; }
+  if [[ ! -x .venv/bin/python ]]; then
+    echo "ERROR: el .venv se creó sin .venv/bin/python." >&2
+    echo "       En Debian/Ubuntu falta el paquete python3-venv (python${TARGET_VERSION}-venv)." >&2
+    echo "       Instalalo, borrá el .venv (rm -rf .venv) y volvé a correr install.sh." >&2
+    exit 1
+  fi
 fi
 
 # ---------------------------------------------------------------------------

@@ -3,30 +3,30 @@ setlocal EnableDelayedExpansion
 
 rem CMCourier @@PROJECT_VERSION@@ offline installer
 rem Generated from installer/templates/install.bat.tmpl by build-offline-bundle.ps1
-rem Target: Python @@PYTHON_VERSION@@ on Windows x86_64
+rem Target: Python @@PYTHON_VERSION@@ on Windows x86_64 (64-bit)
 
-set "INSTALL_DIR=%~dp0"
-cd /d "%INSTALL_DIR%"
+rem Launched by double-click (cmd /c "...install.bat")? Then pause before the
+rem window closes so the operator can read the error.
+set "PAUSE_ON_EXIT="
+echo %cmdcmdline% | find /i "%~f0" >nul 2>&1 && set "PAUSE_ON_EXIT=1"
 
 set "TARGET_VERSION=@@PYTHON_VERSION@@"
 
-echo === CMCourier @@PROJECT_VERSION@@ offline installer ===
-echo Install dir: %INSTALL_DIR%
-echo Target Python: %TARGET_VERSION%
-echo.
-
 rem ---------------------------------------------------------------------
-rem [1/6] Resolve the Python interpreter
-rem   1. %PYTHON% if defined.
+rem [1/6] Resolve the Python interpreter (BEFORE cd, so a relative PYTHON
+rem       is taken from the operator's directory, not the bundle's)
+rem   1. %PYTHON% if defined (quotes stripped, path made absolute).
 rem   2. py -@@PYTHON_VERSION@@ (python.org launcher) if it works.
 rem   3. python.
+rem PY is the executable (always invoked quoted: the path may contain
+rem spaces), PYARGS the launcher arguments (only for "py -X.Y").
 rem ---------------------------------------------------------------------
-rem PY is the executable (quoted when invoked: the path may contain spaces),
-rem PYARGS the launcher arguments (only for "py -X.Y").
+echo === CMCourier @@PROJECT_VERSION@@ offline installer ===
 echo [1/6] Resolving Python interpreter...
 set "PYARGS="
 if defined PYTHON (
-    set "PY=%PYTHON%"
+    set "PY=!PYTHON:"=!"
+    if not "!PY:\=!"=="!PY!" for %%p in ("!PY!") do set "PY=%%~fp"
     echo       PYTHON is set, using: !PY!
 ) else (
     py -@@PYTHON_VERSION@@ -c "import sys" >nul 2>&1
@@ -39,26 +39,28 @@ if defined PYTHON (
         if errorlevel 1 (
             echo ERROR: no Python interpreter found in PATH.
             echo        Install Python @@PYTHON_VERSION@@ x86_64 from python.org first ^(not the Microsoft Store^).
-            exit /b 1
+            goto :fail
         )
         set "PY=python"
         echo       Using generic "python" from PATH.
     )
 )
 
+set "INSTALL_DIR=%~dp0"
+cd /d "%INSTALL_DIR%" || goto :fail
+echo Install dir: %INSTALL_DIR%
+echo Target Python: %TARGET_VERSION% ^(64-bit^)
+echo.
+
 rem ---------------------------------------------------------------------
-rem [2/6] Check major.minor BEFORE creating .venv
-rem   usebackq: the probe has single quotes inside; no "%" in the probe
-rem   so cmd has nothing to re-expand. The extra outer quotes are for
-rem   `cmd /c`, which strips the first and last quote of a command that
-rem   starts with one (the path in PYTHON may contain spaces).
+rem [2/6] Check major.minor AND 64-bit BEFORE creating .venv
 rem ---------------------------------------------------------------------
 echo [2/6] Checking the version of !PY! !PYARGS!...
-set "FOUND_VERSION="
-for /f "usebackq delims=" %%v in (`""!PY!" !PYARGS! -c "import sys; print('.'.join(map(str, sys.version_info[:2])))" 2^>nul"`) do set "FOUND_VERSION=%%v"
+call :probe "!PY!" "!PYARGS!"
 if not defined FOUND_VERSION (
     echo ERROR: could not run "!PY!" !PYARGS! to check its version.
-    exit /b 1
+    echo        If PYTHON points to a path, check that it exists ^(no quotes needed^).
+    goto :fail
 )
 if not "!FOUND_VERSION!"=="!TARGET_VERSION!" (
     echo ERROR: !PY! !PYARGS! is Python !FOUND_VERSION!, expected Python !TARGET_VERSION!.
@@ -67,21 +69,34 @@ if not "!FOUND_VERSION!"=="!TARGET_VERSION!" (
     echo        Point to the correct interpreter with:
     echo          set PYTHON=C:\Python@@PYTHON_VERSION_NODOT@@\python.exe
     echo          install.bat
-    exit /b 1
+    goto :fail
 )
-echo       OK: !PY! !PYARGS! is Python !FOUND_VERSION!.
+if not "!FOUND_BITS!"=="64" (
+    echo ERROR: !PY! !PYARGS! is a !FOUND_BITS!-bit Python; this bundle needs 64-bit ^(win_amd64^).
+    echo        Install Python !TARGET_VERSION! x86_64 ^(64-bit^) from python.org, or point
+    echo        PYTHON at it:
+    echo          set PYTHON=C:\Python@@PYTHON_VERSION_NODOT@@\python.exe
+    goto :fail
+)
+echo       OK: !PY! !PYARGS! is Python !FOUND_VERSION! ^(64-bit^).
 
-if exist .venv\Scripts\python.exe (
-    set "VENV_VERSION="
-    for /f "usebackq delims=" %%v in (`.venv\Scripts\python.exe -c "import sys; print('.'.join(map(str, sys.version_info[:2])))" 2^>nul`) do set "VENV_VERSION=%%v"
-    if not "!VENV_VERSION!"=="!TARGET_VERSION!" (
-        echo ERROR: existing .venv is Python !VENV_VERSION!, expected Python !TARGET_VERSION!.
+if exist .venv (
+    if not exist .venv\Scripts\python.exe (
+        echo ERROR: .venv exists but has no Scripts\python.exe ^(incomplete or foreign venv^).
         echo        Delete it and re-run:
         echo          rmdir /s /q .venv
         echo          install.bat
-        exit /b 1
+        goto :fail
     )
-    echo       OK: existing .venv is Python !VENV_VERSION!.
+    call :probe ".venv\Scripts\python.exe" ""
+    if not "!FOUND_VERSION!"=="!TARGET_VERSION!" (
+        echo ERROR: existing .venv is Python !FOUND_VERSION!, expected Python !TARGET_VERSION!.
+        echo        Delete it and re-run:
+        echo          rmdir /s /q .venv
+        echo          install.bat
+        goto :fail
+    )
+    echo       OK: existing .venv is Python !FOUND_VERSION!.
 )
 
 rem ---------------------------------------------------------------------
@@ -94,7 +109,12 @@ if exist .venv (
     "!PY!" !PYARGS! -m venv .venv
     if errorlevel 1 (
         echo ERROR: Failed to create .venv.
-        exit /b 1
+        goto :fail
+    )
+    if not exist .venv\Scripts\python.exe (
+        echo ERROR: .venv was created without Scripts\python.exe.
+        echo        Delete it ^(rmdir /s /q .venv^) and check the Python installation.
+        goto :fail
     )
 )
 
@@ -106,7 +126,7 @@ if exist wheels\pip-*.whl (
     ".venv\Scripts\python.exe" -m pip install --no-index --find-links wheels --upgrade pip setuptools wheel
     if errorlevel 1 (
         echo ERROR: pip upgrade failed.
-        exit /b 1
+        goto :fail
     )
 ) else (
     echo       No pip wheel in wheels\, skipping upgrade.
@@ -119,7 +139,7 @@ echo [5/6] Installing cmcourier and dependencies (offline)...
 ".venv\Scripts\python.exe" -m pip install --no-index --find-links wheels cmcourier
 if errorlevel 1 (
     echo ERROR: cmcourier install failed.
-    exit /b 1
+    goto :fail
 )
 
 rem ---------------------------------------------------------------------
@@ -129,7 +149,7 @@ echo [6/6] Verifying...
 ".venv\Scripts\cmcourier.exe" --version
 if errorlevel 1 (
     echo ERROR: cmcourier failed to run.
-    exit /b 1
+    goto :fail
 )
 
 echo.
@@ -142,4 +162,28 @@ echo   3. Configure a System DSN (64-bit) for each ODBC source that uses one.
 echo   4. Edit config\config-prod.yaml (copy from .template).
 echo   5. Run:  .venv\Scripts\cmcourier.exe --config config\config-prod.yaml [command]
 echo.
+if defined PAUSE_ON_EXIT pause
 endlocal
+exit /b 0
+
+rem ---------------------------------------------------------------------
+rem :probe <exe> <args>  ->  FOUND_VERSION (X.Y) and FOUND_BITS (32/64)
+rem   A plain command line redirected to a temp file: no `for /f` over a
+rem   command (there `cmd /c` re-parses the quotes and swallows `2>nul`),
+rem   and no "%" in the probe so cmd has nothing to re-expand.
+rem ---------------------------------------------------------------------
+:probe
+set "FOUND_VERSION="
+set "FOUND_BITS="
+"%~1" %~2 -c "import sys, struct; print('.'.join(map(str, sys.version_info[:2])), struct.calcsize('P')*8)" > "%TEMP%\cmcourier-pyver.txt" 2>nul
+for /f "usebackq tokens=1,2" %%a in ("%TEMP%\cmcourier-pyver.txt") do (
+    set "FOUND_VERSION=%%a"
+    set "FOUND_BITS=%%b"
+)
+del "%TEMP%\cmcourier-pyver.txt" >nul 2>&1
+exit /b 0
+
+:fail
+if defined PAUSE_ON_EXIT pause
+endlocal
+exit /b 1
