@@ -190,6 +190,7 @@ class ConsoleApp(App[None]):
         Binding("d", "doctor_run", "doctor", show=False),
         Binding("a", "apply_overrides", "guardar overrides", show=False),
         Binding("w", "persist_overrides", "escribir al YAML", show=False),
+        Binding("n", "new_connection", "nueva conexión", show=False),
         Binding("r", "launch", "lanzar", show=False),
         Binding("x", "cancel_run", "cancelar corrida", show=False),
         Binding("p", "pause_run", "pausar corrida", show=False),
@@ -332,6 +333,11 @@ class ConsoleApp(App[None]):
     def action_apply_overrides(self) -> None:
         if self.q("#tabs", TabbedContent).active == "config":
             self.q("ConfigPane", ConfigPane).apply_draft()
+
+    def action_new_connection(self) -> None:
+        """138: ``n`` en [2] abre el alta de conexión (la pane guarda la corrida activa)."""
+        if self.q("#tabs", TabbedContent).active == "credenciales":
+            self.q("CredsPane", CredsPane).open_new()
 
     def action_persist_overrides(self) -> None:
         if self.q("#tabs", TabbedContent).active == "config":

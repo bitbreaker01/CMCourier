@@ -8,7 +8,11 @@ Contrato UX (mock v2 + informes adversariales):
   siempre existe;
 * las tarjetas ``as400`` llevan contador de intentos y confirmación antes
   del 3° (lockout del perfil en el iSeries); cmis/mssql no;
-* toggle mostrar/ocultar contraseña.
+* toggle mostrar/ocultar contraseña;
+* (138) alta / edición / baja de conexiones del registro y "mover al
+  registro" una inline, escribiendo el YAML vía ``YamlDocument`` (137)
+  con verificación ``load_config`` + backup. Los overrides de sesión
+  (127) se conservan: siguen aplicando encima del config nuevo.
 """
 
 from __future__ import annotations
@@ -17,19 +21,44 @@ __all__ = ["CredsPane", "run_single_check"]
 
 import contextlib
 import time
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import Button, Input, Label, Static
 
+from cmcourier.cli.console.config_pane import ConfigPane
+from cmcourier.cli.console.connection_edit import (
+    ConnectionDraft,
+    connection_sites,
+    inline_connection,
+    plan_delete,
+    plan_write,
+    prefill_fields,
+    write_error_text,
+)
+from cmcourier.cli.console.connection_edit_screen import ConnectionEditScreen
 from cmcourier.cli.console.state import AS400_MAX_TRIES, CMIS_ALIAS, ConnInfo, connection_infos
 from cmcourier.cli.doctor import CheckResult, CheckStatus, check_cmis, check_connection
+from cmcourier.config.loader import load_config
+from cmcourier.config.schema import INLINE_CONNECTION_ALIAS, PipelineConfig
+from cmcourier.config.yaml_doc import (
+    Edit,
+    WriteResult,
+    YamlDocument,
+    YamlDocumentError,
+    YamlPath,
+    YamlWriteError,
+    apply_edits,
+    to_plain,
+)
 
 if TYPE_CHECKING:
     from cmcourier.cli.console.app import ConsoleApp
 
 _INPUT_ROLES = ("user", "pass")
+_RUN_ACTIVE_MSG = "Hay una corrida activa — las conexiones se editan cuando termine"
 
 
 def _role_and_alias(widget_id: str) -> tuple[str, str] | None:
@@ -41,6 +70,13 @@ def _role_and_alias(widget_id: str) -> tuple[str, str] | None:
 def _alias_of(widget_id: str) -> str | None:
     parsed = _role_and_alias(widget_id)
     return parsed[1] if parsed else None
+
+
+def _sites_text(info: ConnInfo) -> str:
+    """Subtítulo de la tarjeta: dónde se usa — o (138) que todavía no se usa."""
+    if not info.sites:
+        return "sin uso — asignala a un sitio desde editar"
+    return f"usada por: {' · '.join(info.sites)}"
 
 
 class CredsPane(Vertical):
@@ -62,6 +98,7 @@ class CredsPane(Vertical):
     CredsPane .tries { color: $warning; }
     CredsPane Input { margin-top: 0; }
     CredsPane .frow { height: auto; margin-top: 1; }
+    CredsPane .toolbar { height: auto; margin-bottom: 1; }
     CredsPane Button { margin-left: 1; }
     """
 
@@ -76,6 +113,10 @@ class CredsPane(Vertical):
             classes="intro",
         )
         yield Static("", classes="hint", id="creds-hint")
+        # 138: las conexiones del registro se dan de alta / editan desde acá.
+        yield Horizontal(
+            Button("nueva conexión (n)", id="new-conn", classes="conn-edit"), classes="toolbar"
+        )
         yield Grid(*(self._card(info) for info in self._infos()), id="creds-grid")
 
     def on_mount(self) -> None:
@@ -96,6 +137,7 @@ class CredsPane(Vertical):
         así que la rama de remonte es defensiva — pero si corre, conserva el
         estado probado (ver `on_input_changed`) y tolera workers tardíos."""
         if not self.console.state.rebuild_conn(self.console.effective_config()):
+            self._render_meta()  # 138: editar un alias cambia host / sitios sin cambiar tarjetas
             self.render_all()
             return
         grid = self.query_one("#creds-grid", Grid)
@@ -104,6 +146,14 @@ class CredsPane(Vertical):
         self._render_hint()
         self.render_all()
         self.console.refresh_status()
+
+    def _render_meta(self) -> None:
+        """Título y sitios de cada tarjeta desde la config efectiva actual."""
+        for info in self._infos():
+            if info.alias == CMIS_ALIAS or not self.query(f"#title-{info.alias}"):
+                continue
+            self.query_one(f"#title-{info.alias}", Static).update(info.title)
+            self.query_one(f"#sites-{info.alias}", Static).update(_sites_text(info))
 
     _REAUTH_HINT = (
         "⏸ Sesión CMIS rechazada — corrida PAUSADA. Cargá usuario/contraseña "
@@ -122,6 +172,10 @@ class CredsPane(Vertical):
         )
 
     def render_all(self) -> None:
+        # 138 E7: con corrida activa el YAML no se toca — botones apagados.
+        busy = self.console.run_active
+        for button in self.query(".conn-edit"):
+            button.disabled = busy
         for alias in self.console.state.conn:
             self.render_conn(alias)
 
@@ -147,11 +201,7 @@ class CredsPane(Vertical):
         )
         if alias != CMIS_ALIAS:
             card.compose_add_child(
-                Static(
-                    f"usada por: {' · '.join(info.sites)}",
-                    classes="card-sites",
-                    id=f"sites-{alias}",
-                )
+                Static(_sites_text(info), classes="card-sites", id=f"sites-{alias}")
             )
         cred = self.console.state.creds.get(alias)
         card.compose_add_child(Label("usuario"))
@@ -168,11 +218,27 @@ class CredsPane(Vertical):
         if info.kind == "as400":
             row.compose_add_child(Static("", classes="tries", id=f"tries-{alias}"))
         row.compose_add_child(Button("probar conexión", variant="primary", id=f"test-{alias}"))
+        for button in self._card_actions(info):
+            row.compose_add_child(button)
         card.compose_add_child(row)
         # markup=False: los mensajes traen cuerpos de error de CMIS/AS400
         # con corchetes y JSON que Textual leería como markup y rompería.
         card.compose_add_child(Static("", classes="msg", id=f"msg-{alias}", markup=False))
         return card
+
+    @staticmethod
+    def _card_actions(info: ConnInfo) -> list[Button]:
+        """138 REQ-003: CMIS no vive en ``connections`` (sin botones); la
+        inline ``as400`` sólo se puede mover al registro; el resto se edita/quita."""
+        alias = info.alias
+        if alias == CMIS_ALIAS:
+            return []
+        if alias == INLINE_CONNECTION_ALIAS:
+            return [Button("mover al registro…", id=f"move-{alias}", classes="conn-edit")]
+        return [
+            Button("editar", id=f"edit-{alias}", classes="conn-edit"),
+            Button("quitar", id=f"del-{alias}", classes="conn-edit"),
+        ]
 
     # ------------------------------------------------------------ eventos
 
@@ -205,6 +271,187 @@ class CredsPane(Vertical):
             event.button.label = "ver" if inp.password else "ocultar"
         elif bid.startswith("test-"):
             self.request_test(bid.removeprefix("test-"))
+        elif bid == "new-conn":
+            self.open_new()
+        elif bid.startswith("edit-"):
+            self.open_edit(bid.removeprefix("edit-"))
+        elif bid.startswith("del-"):
+            self.request_delete(bid.removeprefix("del-"))
+        elif bid.startswith("move-"):
+            self.open_move()
+
+    # ------------------------------------------------- 138: editor de conexiones
+
+    def _editing_allowed(self) -> bool:
+        if self.console.run_active:
+            self.console.notify(_RUN_ACTIVE_MSG, severity="warning")
+            return False
+        return True
+
+    def _push_editor(
+        self,
+        screen: ConnectionEditScreen,
+        *,
+        editing: str | None,
+        move_from: str | None = None,
+    ) -> None:
+        """Abre el modal; al guardar, ``commit_draft`` con los sitios marcados."""
+
+        async def _done(draft: ConnectionDraft | None) -> None:
+            if draft is not None:
+                await self.commit_draft(
+                    draft, use_at=screen.use_at, editing=editing, move_from=move_from
+                )
+
+        self.console.push_screen(screen, _done)
+
+    def open_new(self) -> None:
+        if not self._editing_allowed():
+            return
+        config = self.console.config
+        self._push_editor(
+            ConnectionEditScreen(sites=connection_sites(config), existing=set(config.connections)),
+            editing=None,
+        )
+
+    def open_edit(self, alias: str) -> None:
+        """Precarga desde el YAML crudo (no el modelo) para no escribir defaults
+        que el operador nunca puso; el modelo sólo si el alias no está (raro)."""
+        if not self._editing_allowed():
+            return
+        config = self.console.config
+        spec = config.connections.get(alias)
+        if spec is None:
+            self.console.notify(f"{alias} no está en connections", severity="error")
+            return
+        try:
+            raw = to_plain(YamlDocument.load(self.console.config_path).get(("connections", alias)))
+        except (YamlDocumentError, OSError) as exc:
+            self.console.notify(f"No se pudo leer el YAML: {exc}", severity="error")
+            return
+        if not isinstance(raw, dict):
+            raw = spec.model_dump(mode="json", exclude_none=True)
+        self._push_editor(
+            ConnectionEditScreen(
+                sites=connection_sites(config),
+                existing=set(config.connections),
+                editing=alias,
+                kind=spec.kind,
+                alias=alias,
+                fields=prefill_fields(spec.kind, raw),
+            ),
+            editing=alias,
+        )
+
+    def open_move(self) -> None:
+        """La tarjeta inline ``as400``: mismo modal, kind y campos del inline,
+        alias vacío, y los sitios inline pre-marcados (E6)."""
+        if not self._editing_allowed():
+            return
+        config = self.console.config
+        inline = [s for s in connection_sites(config) if s.kind == "as400" and s.current is None]
+        if not inline:
+            self.console.notify("No hay conexiones inline para mover", severity="warning")
+            return
+        model = inline_connection(inline[0], config)
+        self._push_editor(
+            ConnectionEditScreen(
+                sites=connection_sites(config),
+                existing=set(config.connections),
+                kind="as400",
+                fields=prefill_fields("as400", model.model_dump(mode="json", exclude_none=True)),
+                preselect=frozenset(s.path for s in inline),
+                title="Mover la conexión inline al registro",
+            ),
+            editing=None,
+            move_from=INLINE_CONNECTION_ALIAS,
+        )
+
+    def request_delete(self, alias: str) -> None:
+        """Baja con confirmación — salvo que algún sitio la use: ahí se rechaza."""
+        if not self._editing_allowed():
+            return
+        plan = plan_delete(alias, self.console.config)
+        if not plan.ok:
+            used = ", ".join(site.label for site in plan.blocked_by)
+            self.console.notify(f"{alias} está en uso por: {used}", severity="error", timeout=8)
+            return
+        notice = f"Conexión {alias} quitada"
+        self.console.confirm(
+            title=f"Quitar la conexión {alias}",
+            body=(
+                f"Se borra connections.{alias} de {self.console.config_path} "
+                "(con backup). Las credenciales de sesión de ese alias se descartan."
+            ),
+            yes="quitar",
+            no="cancelar",
+            danger=True,
+            cb=lambda ok: (
+                self.call_later(self.apply_connection_edits, plan.edits, notice) if ok else None
+            ),
+        )
+
+    async def commit_draft(
+        self,
+        draft: ConnectionDraft,
+        *,
+        use_at: set[YamlPath],
+        editing: str | None,
+        move_from: str | None = None,
+    ) -> None:
+        """Del borrador validado al disco. ``plan_write`` corta ANTES de tocar
+        el YAML si un sitio no es de la kind (E8)."""
+        state = self.console.state
+        try:
+            edits = plan_write(draft, self.console.config, use_at=use_at, editing=editing)
+        except ValueError as exc:
+            self.console.notify(f"No se escribió el YAML: {exc}", severity="error", timeout=8)
+            return
+        alias = draft.alias
+        if move_from is not None:
+            # E6: las credenciales de sesión del inline pasan al alias nuevo
+            # ANTES del rebuild, así la tarjeta nace prefilled.
+            cred = state.creds.get(move_from)
+            state.creds.set(alias, cred.username, cred.password)
+        verb = "editada" if editing else ("movida al registro" if move_from else "creada")
+        ok = await self.apply_connection_edits(edits, f"Conexión {alias} {verb}")
+        if not ok:
+            if move_from is not None:
+                state.creds.credentials.pop(alias, None)
+            return
+        if editing is not None:
+            # E3: cambió host/puerto — la prueba anterior ya no vale.
+            state.invalidate_conn(editing)
+            state.mark_doctor_stale("cambió connections")
+            self.render_conn(editing)
+            self.console.refresh_status()
+
+    async def apply_connection_edits(self, edits: Iterable[Edit], notice: str) -> bool:
+        """REQ-004: carga el YAML, aplica, verifica con ``load_config`` y
+        reemplaza (137). Éxito → config nueva + tarjetas + [3] + status."""
+        result = self._write_edits(edits)
+        if result is None:
+            return False
+        console = self.console
+        console.config = result.value  # los overrides de sesión quedan (REQ-005)
+        console.state.mark_doctor_stale("cambió connections")
+        await self.rebuild_cards()  # rebuild_conn hace el prefill del alias nuevo
+        self._render_hint()
+        console.q("ConfigPane", ConfigPane).refresh_yaml_values()
+        console.on_pii_override(None)
+        console.refresh_status()
+        console.notify(f"{notice} — backup en {result.backup_path}", timeout=8)
+        return True
+
+    def _write_edits(self, edits: Iterable[Edit]) -> WriteResult[PipelineConfig] | None:
+        try:
+            doc = YamlDocument.load(self.console.config_path)
+            apply_edits(doc, edits)
+            return doc.write(verify=load_config)
+        except (YamlDocumentError, YamlWriteError, OSError) as exc:
+            text = write_error_text(exc)
+            self.console.notify(f"No se escribió el YAML: {text}", severity="error", timeout=10)
+            return None
 
     # ------------------------------------------------------------ prueba
 

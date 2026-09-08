@@ -38,6 +38,8 @@ def _mssql_ref(alias: str, site: str, host: str = "127.0.0.1") -> ConnectionRef:
 
 
 class _Cfg:
+    connections: dict[str, object] = {}  # 138: sin conexiones declaradas sin uso
+
     def __init__(self, *refs: ConnectionRef) -> None:
         self._refs = refs
 

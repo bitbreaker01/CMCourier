@@ -32,6 +32,11 @@ class _StubConfig:
     def connection_refs(self) -> tuple[ConnectionRef, ...]:
         return self.refs
 
+    @property
+    def connections(self) -> dict[str, MssqlConnectionConfig]:
+        """138: `check_connection` cae al registro si el alias no tiene sitio."""
+        return {r.alias: r.spec for r in self.refs if isinstance(r.spec, MssqlConnectionConfig)}
+
 
 def _mssql_ref(alias: str, site: str, host: str = "sql.test") -> ConnectionRef:
     spec = MssqlConnectionConfig(host=host, database="cmcourier")
@@ -154,6 +159,18 @@ class TestCheckConnection:
         result = check_connection(config, secrets=_secrets(), alias="clientes_sql")  # type: ignore[arg-type]
         assert result.status == CheckStatus.FAIL
         assert "CLIENTES_SQL_USERNAME" in result.message
+
+    def test_declared_but_unused_alias_is_probed_from_the_registry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """138: una conexión recién creada desde [2] no tiene sitio todavía —
+        el botón "probar" igual la prueba (el registro es la fuente)."""
+        captured = _patch_sources(monkeypatch)
+        config = _StubConfig(refs=(_mssql_ref("nueva", "metadata:x"),))
+        monkeypatch.setattr(_StubConfig, "connection_refs", lambda self: ())
+        result = check_connection(config, _secrets(nueva=("u", "p")), "nueva")  # type: ignore[arg-type]
+        assert result.status == CheckStatus.PASS
+        assert captured["mssql"] == [("SELECT 1", [])]
 
     def test_unknown_alias_fails_without_probing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_sources(monkeypatch)

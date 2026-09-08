@@ -212,11 +212,16 @@ def check_connection(config: PipelineConfig, secrets: Secrets, alias: str) -> Ch
     name = f"connection:{alias}"
     ref = next((r for r in config.connection_refs() if r.alias == alias), None)
     if ref is None:
-        return CheckResult(
-            name=name,
-            status=CheckStatus.FAIL,
-            message=f"connection alias {alias!r} is not used by this config",
-        )
+        # 138: una conexión recién creada desde [2] todavía no tiene sitio —
+        # igual se prueba (el registro es la fuente).
+        spec = config.connections.get(alias)
+        if spec is None:
+            return CheckResult(
+                name=name,
+                status=CheckStatus.FAIL,
+                message=f"connection alias {alias!r} is not declared in this config",
+            )
+        ref = ConnectionRef(alias, spec.kind, spec, "connections")
     outcome = _probe_connection(ref, secrets)
     if outcome != "PASS":
         return CheckResult(

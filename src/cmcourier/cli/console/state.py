@@ -26,14 +26,14 @@ __all__ = [
 
 import os
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from cmcourier.cli.console.overrides import SessionOverrides, TriggerOverride
 from cmcourier.cli.doctor import DoctorReport
 from cmcourier.config.loader import Credential, Secrets
-from cmcourier.config.schema import ConnectionRef, credential_env_vars
+from cmcourier.config.schema import AnyConnectionConfig, ConnectionRef, credential_env_vars
 
 AS400_MAX_TRIES = 3
 # M2 (informe UX v2): una credencial probada caduca — a los 45 min el
@@ -46,6 +46,9 @@ _EMPTY = Credential("", "")
 
 
 class _HasConnectionRefs(Protocol):
+    @property
+    def connections(self) -> Mapping[str, AnyConnectionConfig]: ...
+
     def connection_refs(self) -> tuple[ConnectionRef, ...]: ...
 
 
@@ -108,17 +111,25 @@ def _site_label(site: str) -> str:
 def connection_infos(config: _HasConnectionRefs) -> list[ConnInfo]:
     """Una entrada por alias (orden de config) con los sitios que lo usan.
 
-    Fuente única para las tarjetas de [2] y para "qué aliases hacen falta":
-    ``config.connection_refs()`` (129) ya excluye conexiones declaradas pero
-    sin uso.
+    Fuente única para las tarjetas de [2]: primero los alias que
+    ``config.connection_refs()`` (129) usa, después (138) los declarados en
+    ``connections:`` sin sitio todavía, con ``sites=()`` — el operador los
+    acaba de crear desde [2] y quiere probarlos antes de asignarlos. "Qué
+    aliases hacen falta" sigue saliendo de ``required_aliases()``.
     """
     grouped: dict[str, tuple[ConnectionRef, list[str]]] = {}
     for ref in config.connection_refs():
         grouped.setdefault(ref.alias, (ref, []))[1].append(_site_label(ref.site))
-    return [
+    infos = [
         ConnInfo(alias=alias, kind=ref.kind, host=ref.spec.host, sites=tuple(sites))
         for alias, (ref, sites) in grouped.items()
     ]
+    infos.extend(
+        ConnInfo(alias=alias, kind=spec.kind, host=spec.host, sites=())
+        for alias, spec in config.connections.items()
+        if alias not in grouped
+    )
+    return infos
 
 
 @dataclass
