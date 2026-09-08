@@ -1,6 +1,6 @@
-"""Escribir los overrides de [3] al YAML (135).
+"""Escribir los overrides de [3] al YAML (135, migrado a `YamlDocument` en 137).
 
-Parche textual + verificación semántica: lo que NO se toca queda
+Round-trip con ruamel + verificación semántica: lo que NO se toca queda
 byte-idéntico, y si el resultado no carga EXACTAMENTE como
 ``apply_overrides(config, ov)``, el archivo original no se modifica.
 """
@@ -110,21 +110,24 @@ class TestSafety:
         assert result.backup_path.name.startswith("config.yaml.bak-")
         assert result.backup_path.read_text() == before
 
-    def test_flow_style_block_refuses_to_write(self, tmp_path: Path) -> None:
-        """E3: no sabemos parchear `cmis: {…}` → error, archivo intacto, sin backup."""
+    def test_flow_style_block_is_written_in_place(self, tmp_path: Path) -> None:
+        """137 (REQ-004): `cmis: {…}` ya no se rechaza — ruamel setea dentro del flow mapping."""
         config, yaml_path = _make_config(tmp_path)
+        flow = "cmis: {base_url: http://cm.test/cmis, repo_id: repo}\n"
         text = yaml_path.read_text().replace(
-            "cmis:\n  base_url: http://cm.test/cmis\n  repo_id: repo\n",
-            "cmis: {base_url: http://cm.test/cmis, repo_id: repo}\n",
+            "cmis:\n  base_url: http://cm.test/cmis\n  repo_id: repo\n", flow
         )
         yaml_path.write_text(text)
         config = load_config(yaml_path)
 
-        with pytest.raises(PersistError):
-            persist_overrides(yaml_path, config, SessionOverrides(workers=8))
+        persist_overrides(yaml_path, config, SessionOverrides(workers=8))
 
-        assert yaml_path.read_text() == text
-        assert not list(tmp_path.glob("config.yaml.bak-*"))
+        after = yaml_path.read_text()
+        assert after != text
+        assert load_config(yaml_path).cmis.workers == 8
+        patched = "cmis: {base_url: http://cm.test/cmis, repo_id: repo, workers: 8}\n"
+        assert patched in after
+        assert after.replace(patched, flow) == text
         assert not list(tmp_path.glob(".config.yaml.*"))
 
     def test_symlink_writes_through_to_the_real_file(self, tmp_path: Path) -> None:
@@ -161,11 +164,12 @@ class TestSafety:
         assert load_config(yaml_path).cmis.workers == 8
 
     def test_duplicate_key_refuses_to_write(self, tmp_path: Path) -> None:
-        """PyYAML se queda con la última: parcheamos la primera → mismatch → cerrado."""
+        """137: ruamel rechaza la clave duplicada al CARGAR → PersistError que la nombra."""
         config, yaml_path = _make_config(tmp_path)
         _yaml_with(yaml_path, "  workers: 4\n  workers: 5\n")
         config = load_config(yaml_path)
         text = yaml_path.read_text()
-        with pytest.raises(PersistError):
+        with pytest.raises(PersistError, match="workers"):
             persist_overrides(yaml_path, config, SessionOverrides(workers=8))
         assert yaml_path.read_text() == text
+        assert not list(tmp_path.glob("config.yaml.bak-*"))

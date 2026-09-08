@@ -1,28 +1,23 @@
-"""Escribir los overrides de sesión al YAML de configuración (135).
+"""Escribir los overrides de sesión al YAML de configuración (135, 137).
 
-PyYAML no hace round-trip (pierde comentarios) y no queremos una
-dependencia nueva sólo para esto. Así que parcheamos el TEXTO: siete
-escalares conocidos, línea a línea, conservando comentarios inline y
-todo lo demás byte-idéntico. Y como un parche textual puede
-equivocarse (flow style, anchors, claves duplicadas), antes de tocar
-el archivo cargamos el resultado con ``load_config`` y exigimos que sea
-EXACTAMENTE ``apply_overrides(config, ov)``. Si no: no se escribe.
+Siete escalares conocidos van al YAML vía :class:`YamlDocument` (ruamel
+round-trip: comentarios, comillas y orden intactos; lo que no se toca
+queda byte-idéntico). Y como un editor puede equivocarse igual, antes de
+tocar el archivo cargamos el resultado con ``load_config`` y exigimos
+que sea EXACTAMENTE ``apply_overrides(config, ov)``. Si no: no se escribe.
 """
 
 from __future__ import annotations
 
 __all__ = ["PersistError", "PersistResult", "persist_overrides"]
 
-import os
-import re
-import shutil
 from dataclasses import dataclass, replace
-from datetime import datetime
 from pathlib import Path
 
 from cmcourier.cli.console.overrides import SessionOverrides, apply_overrides
 from cmcourier.config.loader import load_config
 from cmcourier.config.schema import PipelineConfig
+from cmcourier.config.yaml_doc import YamlDocument, YamlDocumentError, YamlWriteError
 
 # (campo del override, ruta de claves en el YAML)
 _PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -34,8 +29,6 @@ _PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("max_bandwidth_mbps", ("cmis", "max_bandwidth_mbps")),
     ("unmask_pii", ("observability", "unmask_pii")),
 )
-
-_KEY_RE = re.compile(r"^(?P<indent>[ ]*)(?P<key>[A-Za-z0-9_.-]+):(?P<rest>.*)$")
 
 
 class PersistError(RuntimeError):
@@ -61,117 +54,28 @@ def persist_overrides(
     if not changed:
         raise PersistError("no hay nada que escribir: los overrides aplicados están vacíos")
 
-    # B2 del antagonista: si el YAML es un symlink, el reemplazo atómico
-    # pisaría el link y el archivo real no cambiaría. Trabajamos sobre el real.
-    config_path = config_path.resolve()
-    original = config_path.read_bytes().decode("utf-8")
-    # I5: conservar el terminador de línea del archivo (CRLF de Windows).
-    eol = "\r\n" if "\r\n" in original else "\n"
-    lines = original.split(eol)
-    if lines and lines[-1] == "":
-        lines.pop()  # el archivo terminaba en newline (lo reponemos al unir)
-    for field, path in _PATHS:
-        value = getattr(ov, field)
-        if value is not None:
-            lines = _patch(lines, path, _render(value))
-    patched = eol.join(lines) + eol
-
     # El trigger (127) es una elección del launcher, no del YAML.
     expected = apply_overrides(config, replace(ov, trigger=None))
-    tmp = config_path.with_name(f".{config_path.name}.{os.getpid()}.tmp")
-    try:
-        tmp.write_bytes(patched.encode("utf-8"))
+
+    def verify(tmp: Path) -> PipelineConfig:
         try:
             loaded = load_config(tmp)
         except Exception as exc:  # noqa: BLE001 — cualquier fallo de carga cierra
-            raise PersistError(f"el YAML parcheado no valida: {exc}") from exc
+            raise PersistError(f"el YAML editado no valida: {exc}") from exc
         if loaded != expected:
             raise PersistError(
-                "el YAML parcheado no coincide con los overrides (¿flow style, anchors, "
-                "claves duplicadas?) — editá el archivo a mano"
+                "el YAML editado no coincide con los overrides (¿anchors, merge keys?) "
+                "— editá el archivo a mano"
             )
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup = config_path.with_name(f"{config_path.name}.bak-{stamp}")
-        shutil.copy2(config_path, backup)
-        shutil.copymode(config_path, tmp)  # B3: un YAML 0600 no sale 0664
-        tmp.replace(config_path)  # atómico: mismo directorio
-    finally:
-        tmp.unlink(missing_ok=True)
-    return PersistResult(config=loaded, backup_path=backup, changed=changed)
+        return loaded
 
-
-def _render(value: object) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, float):
-        return repr(value)  # 10.0 → "10.0": PyYAML lo lee como float, igual que el schema
-    return str(value)
-
-
-def _patch(lines: list[str], path: tuple[str, ...], value: str) -> list[str]:
-    """Reemplaza / inserta ``path`` en ``lines`` (sin terminador de línea).
-
-    Best effort: la verificación semántica de ``persist_overrides`` decide.
-    """
-    start, end, indent = 0, len(lines), 0
-    for depth, key in enumerate(path):
-        hit = _find_key(lines, start, end, indent, key)
-        last = depth == len(path) - 1
-        if hit is None:
-            # Falta desde acá: insertar el sub-árbol al final del bloque padre.
-            insert_at = _block_end(lines, start, end)
-            missing = path[depth:]
-            new = [f"{' ' * (indent + 2 * i)}{k}:" for i, k in enumerate(missing[:-1])]
-            new.append(f"{' ' * (indent + 2 * (len(missing) - 1))}{missing[-1]}: {value}")
-            return lines[:insert_at] + new + lines[insert_at:]
-        idx, rest = hit
-        if last:
-            comment = ""
-            m = re.search(r"\s+#.*$", rest)
-            if m:
-                comment = m.group(0)
-            lines[idx] = f"{' ' * indent}{key}: {value}{comment}"
-            return lines
-        # Bloque intermedio: sus hijos van hasta la próxima clave con indent <= actual.
-        start = idx + 1
-        end = _block_end(lines, start, end, parent_indent=indent)
-        child = _child_indent(lines, start, end, indent)
-        if child is None:
-            # Bloque vacío o flow style: forzamos +2 y dejamos que la verificación juzgue.
-            child = indent + 2
-        indent = child
-    return lines
-
-
-def _find_key(
-    lines: list[str], start: int, end: int, indent: int, key: str
-) -> tuple[int, str] | None:
-    for i in range(start, end):
-        m = _KEY_RE.match(lines[i])
-        if m and len(m.group("indent")) == indent and m.group("key") == key:
-            return i, m.group("rest")
-    return None
-
-
-def _block_end(lines: list[str], start: int, end: int, *, parent_indent: int = -1) -> int:
-    """Índice de la primera línea (≥ start) que ya no pertenece al bloque."""
-    last_content = start
-    for i in range(start, end):
-        stripped = lines[i].strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        ind = len(lines[i]) - len(lines[i].lstrip(" "))
-        if ind <= parent_indent:
-            break
-        last_content = i + 1
-    return last_content
-
-
-def _child_indent(lines: list[str], start: int, end: int, parent: int) -> int | None:
-    for i in range(start, end):
-        stripped = lines[i].strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        ind = len(lines[i]) - len(lines[i].lstrip(" "))
-        return ind if ind > parent else None
-    return None
+    try:
+        doc = YamlDocument.load(config_path)
+        for field, path in _PATHS:
+            value = getattr(ov, field)
+            if value is not None:
+                doc.set(path, value)
+        result = doc.write(verify=verify)
+    except (YamlDocumentError, YamlWriteError) as exc:
+        raise PersistError(str(exc)) from exc
+    return PersistResult(config=result.value, backup_path=result.backup_path, changed=changed)

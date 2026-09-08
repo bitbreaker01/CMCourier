@@ -24,6 +24,7 @@ repos:
           - "textual>=0.80,<6.0"
           - "psutil>=5.9,<7.0"
           - "types-psutil>=5.9,<7.0"
+          - "ruamel.yaml>=0.18,<0.19"
         files: ^src/cmcourier/
         # Run only on staged Python files within src/cmcourier/.
         # `click` ships its own type hints (PEP 561) but the hook's isolated
