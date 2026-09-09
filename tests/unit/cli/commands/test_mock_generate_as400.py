@@ -43,7 +43,7 @@ def _make_config(
 def _stub_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     """``_build_source`` llama ``load_secrets`` adentro; le proveemos credenciales fake."""
 
-    def fake_load_secrets(config: Any = None) -> Secrets:
+    def fake_load_secrets(config: Any = None, *, require_cmis: bool = True) -> Secrets:
         return Secrets({"cmis": Credential("c", "c"), "as400": Credential("user", "pass")})
 
     monkeypatch.setattr(mock_cmd, "load_secrets", fake_load_secrets)
@@ -138,3 +138,27 @@ class TestFallbackTablePrependsSchema:
             config=config,  # type: ignore[arg-type]
         )
         assert captured_kwargs.get("table") == "MYLIB.MYTABLE"
+
+
+class TestNoCmisCredentialsNeeded:
+    """``mock generate --rvabrep-as400`` sólo lee el AS400: exigir
+    ``CMIS_USERNAME`` / ``CMIS_PASSWORD`` era un error (el operador en
+    PowerShell sin las env vars de CMIS no podía materializar el árbol)."""
+
+    def test_loads_secrets_without_requiring_cmis(
+        self, monkeypatch: pytest.MonkeyPatch, captured_kwargs: dict[str, Any]
+    ) -> None:
+        seen: dict[str, Any] = {}
+
+        def fake_load_secrets(config: Any = None, *, require_cmis: bool = True) -> Secrets:
+            seen["require_cmis"] = require_cmis
+            return Secrets({"cmis": Credential("", ""), "as400": Credential("user", "pass")})
+
+        monkeypatch.setattr(mock_cmd, "load_secrets", fake_load_secrets)
+        mock_cmd._build_source(  # type: ignore[attr-defined]
+            rvabrep_csv=None,
+            rvabrep_as400=True,
+            config=_make_config(table="RVABREP"),  # type: ignore[arg-type]
+        )
+        assert seen["require_cmis"] is False
+        assert captured_kwargs["username"] == "user"

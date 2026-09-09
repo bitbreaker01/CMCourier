@@ -34,6 +34,10 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Fixed
 
+- **`mock generate --rvabrep-as400` exigía `CMIS_USERNAME` /
+  `CMIS_PASSWORD`.** El comando sólo lee el AS400 para materializar el
+  árbol; ahora carga las credenciales con `require_cmis=False` (el
+  alias de la conexión sigue siendo obligatorio).
 - **Consola `[2] CREDENCIALES`: "probar conexión" sólo se veía en la
   tarjeta CMIS.** Reporte del operador. Un `Static` sin `width` dentro
   de un `Horizontal` llena la fila (Textual: *fill available space*): el

@@ -248,7 +248,8 @@ def _build_source(
         raise ConfigurationError("indexing.source has no AS400 connection")
     conn = ref.spec
     # 129: la credencial es la del alias de la conexión (inline → `as400`).
-    credential = load_secrets(config).require(ref.alias)
+    # Sólo se lee el AS400: las env vars de CMIS no hacen falta acá.
+    credential = load_secrets(config, require_cmis=False).require(ref.alias)
     # 073: si el operador definió ``source.query`` con WHERE / JOIN /
     # filtros, respetarlo — el adapter lo wrappea como ``(query) AS T``.
     # Pre-073 esto se ignoraba y ``mock generate --rvabrep-as400`` leía
