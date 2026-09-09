@@ -23,8 +23,30 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
   lo dice ("conectó · sin tabla asignada todavía"); el PASS/FAIL nombra
   la consulta y su origen (`probe_query` / `derivada de <sitio>`).
 
+- **Sync AS400 con progreso (144).** `sync recover` (CLI y `[8] SYNC`)
+  reporta fase y avance — `leyendo tracking`, `consultando NIARVILOG
+  0/2000`, `consultando RVABREP 0/1000`, `insertando 250/1000` — por
+  stderr en el CLI y como línea viva bajo el log en la consola. La
+  pasada final del reconciliador (`as400_sync.mode: periodic`) ya no es
+  muda: el monitor `[6]` muestra `cerrando · sincronizando AS400 k/N`
+  en lugar de `corriendo`, y `completada` recién cuando todo quedó
+  escrito.
+
 ### Changed
 
+- **`sync recover` y la pasada final del reconciliador dejan de ser un
+  N+1 (144).** Las filas RVABREP de los faltantes se leen en UNA
+  consulta `IN` (chunks de 1000) en vez de un `SELECT` por doc (~120 ms
+  cada uno sobre `(query) AS T`), y los `INSERT`/`UPDATE` a `NIARVILOG`
+  corren en un pool de 8 hilos (uno por conexión ODBC) preservando la
+  semántica por fila (fallas aisladas, conflictos, `stop_event`
+  cooperativo). Medido por el operador: 1000 faltantes = 2 min dry-run
+  / 5 min apply; el cierre de una corrida de 3000 docs quedaba minutos
+  en "corriendo" después del último upload.
+- **El monitor ya no cuenta las píldoras de parada como documentos.**
+  `S5 UPLOAD 3000 / 3030 · 30 pending · idle 30` al final de la corrida
+  eran las 30 `_POISON` de los consumers en la cola; ahora se descuentan
+  y el último doc deja `3000 / 3000 · 0 pending`.
 - **`SYSIBM.SYSDUMMY1` desaparece del probe.** Motivo real del FAIL del
   operador: el iSeries corre SafeNet/i (exit program `SAFENET` en
   `PCSECLIB`), que whitelistea objetos por perfil — el login pasaba y la

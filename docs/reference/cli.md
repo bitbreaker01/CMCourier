@@ -494,6 +494,8 @@ Recupera filas faltantes en `NIARVILOG` para documentos ya subidos a CM (`S5_DON
 
 Un `txn` sin fila RVABREP o con id RVI no mapeado se reporta como `unrecoverable` — nunca se inserta a ciegas.
 
+Desde 144 el recover es batcheado de punta a punta: la existencia en `NIARVILOG` y las filas RVABREP de los faltantes se leen en una consulta `IN` cada una (chunks de 1000), y los `INSERT` de `--apply` corren en un pool de 8 hilos (uno por conexión ODBC). El progreso sale por **stderr** — una línea por fase (`leyendo tracking`, `consultando NIARVILOG 0/2000`, `consultando RVABREP 0/1000`, `insertando 250/1000`…) — y el reporte final por stdout, así que `2>/dev/null` deja sólo el resultado. En la consola `[8]` la misma información aparece como línea viva debajo del log.
+
 ---
 
 ## `mock` — synthetic file tree (031, 039)

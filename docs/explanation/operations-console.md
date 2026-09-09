@@ -142,6 +142,12 @@ Se podría contar el total al arrancar — un `SELECT COUNT(*)` sobre la RVABREP
 
 Cuando el operador **sí** pone `--total` — que es el caso normal en una ventana de mantenimiento, donde el lote está acotado a propósito — la ETA sale de la tasa observada y del faltante conocido. Y como la corrida se puede pausar, la ETA también pasa a `—` durante la pausa: extrapolar una tasa de cero no da un número, da un infinito.
 
+### El cierre: `cerrando · sincronizando AS400 k/N`
+
+Después del último upload la corrida **no terminó**: falta la pasada final del reconciliador (`tracking.as400_sync.mode: periodic`), que propaga a `NIARVILOG` todo lo que quedó en el buffer desde la última pasada periódica. Antes de 144 ese tramo era un write + commit por documento, en serie, y la cabecera decía `corriendo` con `0.0 docs/s` hasta que terminaba — minutos de silencio que parecían un cuelgue. Ahora la cabecera cambia a `cerrando · sincronizando AS400 k/N` y avanza de a 50 documentos; los writes corren en un pool de 8 hilos (uno por conexión ODBC) con la misma semántica por fila de siempre (conflictos, re-encolado de fallas). `completada` aparece recién cuando esa pasada terminó y el tracking local quedó flusheado — es la única señal de que *todo* quedó escrito. Si querés que el cierre sea corto, bajá `periodic.interval_minutes`: el buffer al final es lo acumulado desde la última pasada.
+
+Detalle relacionado: el `S5 UPLOAD 3000 / 3030` con `30 pending` y `idle 30` que se veía justo al final eran las 30 píldoras de parada de los consumers contadas como documentos. Desde 144 la cola las descuenta: el último doc deja `3000 / 3000 · 0 pending`.
+
 ## Un tiro antes de la corrida
 
 Antes de 141, probar un código CM contra el servidor de verdad significaba `single-doc run`: corre el pipeline entero (RVABREP, fuentes de metadata, ensamblado del archivo real) para terminar con el adapter descartando la `httpx.Response` y truncando el cuerpo del error a 1024 caracteres. Para ver qué contestaba el servidor ante un tipo mal declarado o una carpeta que no existía, el operador terminaba armando el POST a mano con `curl`.
