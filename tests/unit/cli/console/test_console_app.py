@@ -174,6 +174,42 @@ class TestCredsFlow:
 
         asyncio.run(_run())
 
+    def test_apply_callback_error_never_kills_the_console(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reporte del operador: un `TypeError` dentro del callback que pinta
+        la tarjeta (copia parcial de archivos) cerró TODA la consola con
+        traceback. El worker ya protegía el check; el callback en el hilo de
+        UI no. La app tiene que seguir viva y avisar por notificación."""
+
+        async def _run() -> None:
+            monkeypatch.setattr(
+                app_module,
+                "run_single_check",
+                lambda which, console: (
+                    CheckResult(name=which, status=CheckStatus.PASS, message="conectado"),
+                    1.0,
+                ),
+            )
+
+            def _broken(which: str, result: CheckResult, ms: float) -> None:
+                raise TypeError("record_conn_result() got an unexpected keyword argument")
+
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                app.run_check_worker("cmis", _broken)
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                assert await wait_for(
+                    pilot,
+                    lambda: any("TypeError" in n.message for n in app._notifications),  # noqa: SLF001
+                )
+                assert app.is_running
+                assert app.return_code is None
+
+        asyncio.run(_run())
+
 
 class TestDoctorFlow:
     def test_d_runs_doctor_and_summarizes(

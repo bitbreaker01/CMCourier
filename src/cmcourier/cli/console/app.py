@@ -12,10 +12,11 @@ from __future__ import annotations
 __all__ = ["ConsoleApp"]
 
 import contextlib
+import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from textual import events
 from textual.app import App, ComposeResult
@@ -69,6 +70,7 @@ _TABS = [
 ]
 # La décima pantalla no puede ser la tecla "10": usa el 0 (y F10).
 _TAB_KEYS = [*(str(i + 1) for i in range(9)), "0"]
+_log = logging.getLogger(__name__)
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -817,6 +819,25 @@ class ConsoleApp(App[None]):
 
     # ------------------------------------------------------------ workers
 
+    def _apply_on_ui(self, apply_cb: Callable[..., None], *args: Any) -> None:
+        """Corre *apply_cb* en el hilo de UI SIN dejar que una excepción suya
+        cierre la consola: un bug en el callback que pinta el resultado (copia
+        parcial de archivos, widget que ya no existe) se convierte en
+        notificación, no en traceback y app muerta."""
+
+        def guarded() -> None:
+            try:
+                apply_cb(*args)
+            except Exception as exc:  # noqa: BLE001 — la UI sobrevive a sus propios bugs
+                _log.exception("error aplicando resultado de worker")
+                self.notify(
+                    f"Error interno al aplicar el resultado: {type(exc).__name__}: {exc}",
+                    severity="error",
+                    timeout=15,
+                )
+
+        self.call_from_thread(guarded)
+
     def run_check_worker(
         self, which: str, apply_cb: Callable[[str, CheckResult, float], None]
     ) -> None:
@@ -828,7 +849,7 @@ class ConsoleApp(App[None]):
                     CheckResult(name=which, status=CheckStatus.FAIL, message=str(exc)),
                     0.0,
                 )
-            self.call_from_thread(apply_cb, which, result, ms)
+            self._apply_on_ui(apply_cb, which, result, ms)
 
         self.run_worker(work, thread=True, exclusive=False)
 
@@ -851,7 +872,7 @@ class ConsoleApp(App[None]):
                     ),
                     elapsed_seconds=0.0,
                 )
-            self.call_from_thread(apply_cb, report, group)
+            self._apply_on_ui(apply_cb, report, group)
 
         self.run_worker(work, thread=True, exclusive=True)
 

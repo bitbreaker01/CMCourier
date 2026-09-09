@@ -50,6 +50,14 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
   `connect` (en `query` el contador vuelve a 0: QMAXSIGN cuenta sign-ons
   inválidos consecutivos y el login pasó). `cmcourier doctor` muestra el
   mismo detalle.
+- **Consola: un error en el callback que pinta el resultado de un worker
+  cerraba TODA la consola con traceback.** Reporte del operador (un
+  `TypeError` por copia parcial de archivos tras "probar conexión"). Los
+  workers de check y de doctor ya protegían el trabajo en el hilo, pero
+  el callback corría en el hilo de UI sin red: ahora pasa por
+  `ConsoleApp._apply_on_ui`, que convierte cualquier excepción en
+  notificación de error (15 s) + log, y la app sigue viva. Test de pilot
+  con un callback que revienta: la app sigue corriendo y notifica.
 
 ---
 
