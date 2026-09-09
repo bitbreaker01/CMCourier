@@ -41,6 +41,12 @@
 # Console (`cmcourier console`): this registry can be managed entirely from
 # `[2] CREDENCIALES` — add / edit / remove an alias, or move an inline as400
 # connection into it — without hand-editing this file (138).
+# Connection test (`doctor` / "probar conexión"), 143: after the login the
+# doctor runs ONE cheap query. Order: `probe_query` if set → derived from
+# the site that uses the alias (indexing query, metadata table/query,
+# tracking.as400_sync library.table) → ping only when the alias has no site
+# yet. There is NO fixed pseudo-table (SYSIBM.SYSDUMMY1) any more: on an
+# iSeries behind SafeNet/i only whitelisted objects are readable per profile.
 # -----------------------------------------------------------------------------
 connections:
   rvi:                                     # → RVI_USERNAME / RVI_PASSWORD
@@ -50,6 +56,9 @@ connections:
     database: RVILIB                       # (default: "RVILIB")
     driver: "iSeries Access ODBC Driver"   # (default: "iSeries Access ODBC Driver")
     table: null                            # (default: null) optional bare-table hint
+    probe_query: null                      # (default: null) 143: SQL for the connection
+                                           #   test, e.g. "SELECT 1 FROM RVILIB.RVABREP
+                                           #   FETCH FIRST 1 ROW ONLY"; null → derived
   clientes_sql:                            # → CLIENTES_SQL_USERNAME / CLIENTES_SQL_PASSWORD
     kind: mssql                            # 130: SQL Server via ODBC
     host: 127.0.0.1                        # (REQUIRED)
@@ -58,6 +67,8 @@ connections:
     driver: "ODBC Driver 18 for SQL Server"  # (default) msodbcsql18
     encrypt: true                          # (default: true)  Encrypt=yes
     trust_server_certificate: false        # (default: false) yes → accept self-signed certs
+    probe_query: null                      # (default: null) 143: e.g. "SELECT TOP 1 1 FROM
+                                           #   dbo.clientes"; null → derived from the site
 
 
 # -----------------------------------------------------------------------------

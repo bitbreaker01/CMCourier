@@ -235,7 +235,7 @@ def check_connection(config: PipelineConfig, secrets: Secrets, alias: str) -> Ch
     return CheckResult(
         name=name,
         status=CheckStatus.PASS,
-        message=f"{ref.kind} reachable at {ref.spec.host} ({alias})",
+        message=f"{ref.kind} reachable at {ref.spec.host} ({alias}) · {probe.detail}",
         details=details,
     )
 
@@ -502,17 +502,6 @@ def _check_cmis_connectivity(config: PipelineConfig, secrets: Secrets) -> CheckR
     )
 
 
-# 073: DB2 / AS400 exige una cláusula FROM. SYSIBM.SYSDUMMY1 es la
-# pseudo-tabla canónica de IBM para health checks (siempre 1 fila, 1
-# columna IBMREQD, sin permisos especiales).
-_AS400_PROBE_SQL = "SELECT 1 FROM SYSIBM.SYSDUMMY1"
-# 130: SQL Server sí acepta un SELECT sin FROM.
-_MSSQL_PROBE_SQL = "SELECT 1"
-_PROBE_SQL_BY_KIND: Mapping[str, str] = MappingProxyType(
-    {"as400": _AS400_PROBE_SQL, "mssql": _MSSQL_PROBE_SQL}
-)
-
-
 def _check_as400_connectivity(config: PipelineConfig, secrets: Secrets) -> CheckResult:
     """129: prueba CADA conexión as400 que la config necesita, una fila por alias."""
     return _check_connections("as400_connectivity", config, secrets, kind="as400")
@@ -535,9 +524,11 @@ def _check_connections(
     # la fila de detalle se desambigua por host para no pisar ninguna.
     alias_counts = Counter(ref.alias for ref, _ in groups)
     for ref, sites in groups:
-        outcome = _probe_connection(ref, secrets).outcome
+        probe = _probe_connection(ref, secrets)
+        outcome = probe.outcome
         key = ref.alias if alias_counts[ref.alias] == 1 else f"{ref.alias}@{ref.spec.host}"
-        details[key] = f"{outcome} · {' · '.join(sites)}"
+        detail = f" · {probe.detail}" if probe.detail else ""
+        details[key] = f"{outcome} · {' · '.join(sites)}{detail}"
         if outcome != "PASS":
             failures.append(f"{ref.alias} ({', '.join(sites)}): {outcome.removeprefix('FAIL: ')}")
     if failures:
@@ -574,10 +565,25 @@ class _Probe(NamedTuple):
     ``"FAIL: <motivo>"``; ``phase`` dice DÓNDE falló — ``connect`` (login
     rechazado / host inalcanzable: cuenta como intento de sign-on en el
     iSeries) o ``query`` (el login pasó y falló la consulta de prueba: NO
-    es un sign-on fallido y no acerca al perfil al lockout)."""
+    es un sign-on fallido y no acerca al perfil al lockout). ``detail``
+    acompaña al PASS: qué consulta se corrió y de dónde salió."""
 
     outcome: str
     phase: str
+    detail: str = ""
+
+
+def _probe_sql(ref: ConnectionRef) -> tuple[str, str] | None:
+    """143 — ``(sql, origen)`` de la consulta de prueba, o None si no hay
+    ninguna. Orden: ``probe_query`` explícita de la conexión → derivada de
+    la tabla/query del sitio que la usa → nada (sólo ping). Nunca una
+    pseudo-tabla fija: con SafeNet/i sólo hay permiso sobre los objetos
+    whitelisteados para el perfil, y ``SYSIBM.SYSDUMMY1`` no lo está."""
+    if ref.spec.probe_query:
+        return ref.spec.probe_query.strip(), "probe_query"
+    if ref.probe_sql:
+        return ref.probe_sql, f"derivada de {ref.site}"
+    return None
 
 
 def _probe_connection(ref: ConnectionRef, secrets: Secrets) -> _Probe:
@@ -590,22 +596,26 @@ def _probe_connection(ref: ConnectionRef, secrets: Secrets) -> _Probe:
         src = _open_odbc(ref, secrets)
     except Exception as exc:  # noqa: BLE001
         return _Probe(f"FAIL: {_describe_error(exc)}", "config")
+    probe = _probe_sql(ref)
     try:
         try:
             src.ping()
         except Exception as exc:  # noqa: BLE001
             return _Probe(f"FAIL: no conectó — {_describe_error(exc)}", "connect")
+        if probe is None:
+            return _Probe("PASS", "ok", "conectó · sin tabla asignada todavía")
+        sql, origin = probe
         try:
-            src.query(_PROBE_SQL_BY_KIND[ref.kind], [])
+            src.query(sql, [])
         except Exception as exc:  # noqa: BLE001
             return _Probe(
                 "FAIL: conectó (usuario y contraseña aceptados) pero la consulta de prueba "
-                f"{_PROBE_SQL_BY_KIND[ref.kind]!r} falló — {_describe_error(exc)}",
+                f"{sql!r} ({origin}) falló — {_describe_error(exc)}",
                 "query",
             )
     finally:
         src.close()
-    return _Probe("PASS", "ok")
+    return _Probe("PASS", "ok", f"consulta de prueba {sql!r} ({origin}) OK")
 
 
 def _describe_error(exc: BaseException, *, limit: int = 300) -> str:

@@ -96,7 +96,7 @@ Fuente: `src/cmcourier/cli/doctor.py`.
 - **Qué valida**: para cada source AS400 en el config (indexing, metadata, tracking sync), abre conexión.
 - **Skip**: si no hay sources AS400 en todo el config.
 - **Falla típica**: driver ODBC no instalado, host inaccesible, credenciales mal, puerto bloqueado por firewall.
-- **Fix**: chequear `pyodbc.drivers()` desde Python para confirmar driver instalado; probar con `cmcourier as400-query --query "SELECT 1 FROM SYSIBM.SYSDUMMY1"`.
+- **Fix**: chequear `pyodbc.drivers()` desde Python para confirmar driver instalado; probar con `cmcourier as400-query --query "SELECT 1 FROM RVILIB.RVABREP FETCH FIRST 1 ROW ONLY"` (una tabla a la que el perfil tenga permiso). Si el login pasa pero la consulta de prueba falla con `PWS9801 … SAFENET`, el iSeries whitelistea objetos por perfil: fijá `probe_query` en la conexión con una tabla permitida (143).
 
 ### `tracking_openable`
 
@@ -239,7 +239,7 @@ Incluí `cmcourier doctor` como step de CI. Si el exit code no es 0, falla el jo
 |-------------|-------------------|
 | `log_dir_writable` | `ls -ld $(grep log_dir config.yaml)` — chequear perms |
 | `cmis_connectivity` | `curl -u $CMIS_USERNAME:$CMIS_PASSWORD <base_url>` |
-| `as400_connectivity` | `cmcourier as400-query --query "SELECT 1 FROM SYSIBM.SYSDUMMY1"` |
+| `as400_connectivity` | `cmcourier as400-query --query "SELECT 1 FROM RVILIB.RVABREP FETCH FIRST 1 ROW ONLY"` |
 | `tracking_openable` | `mkdir -p $(dirname db_path)`, chequear permisos |
 | `as400_sync` | Verificar que NIARVILOG existe en la library y matchea `columns` |
 | `mapping_completeness` | `cmcourier inspect mapping-stats` para detalle |

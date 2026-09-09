@@ -399,7 +399,7 @@ cmcourier cache clear --config prod.yaml --txn 0001234
 | Ver el estado de un batch viejo | `batch show <batch_id>` |
 | Re-correr los fallos | `batch retry-failed --batch <batch_id>` |
 | Diagnosticar un doc puntual | `single-doc run` o `inspect trigger` |
-| Validar conectividad AS400 | `as400-query "SELECT 1 FROM SYSIBM.SYSDUMMY1"` |
+| Validar conectividad AS400 | `as400-query "SELECT 1 FROM RVILIB.RVABREP FETCH FIRST 1 ROW ONLY"` |
 | Cron de migración | `background` |
 | Acotar una corrida por tiempo | `<pipeline-name> run --max-duration 2h` |
 | Ver bottlenecks de un run | `analyze batch <batch_id>` o `diagnose --latest` |

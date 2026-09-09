@@ -65,7 +65,9 @@ __all__ = [
     "TriggerConfigUnion",
     "TriggerCsvConfig",
     "ValidationModel",
+    "as400_probe_sql",
     "credential_env_vars",
+    "mssql_probe_sql",
     "split_lookup_source_type",
 ]
 
@@ -137,6 +139,10 @@ class As400ConnectionConfig(BaseModel):
     database: str = "RVILIB"
     driver: str = "iSeries Access ODBC Driver"
     table: str | None = None
+    # 143: consulta con la que el doctor / "probar conexión" verifica la
+    # conexión. Sin ella se deriva de la tabla del sitio que la usa (con
+    # SafeNet/i sólo hay permiso sobre objetos whitelisteados por perfil).
+    probe_query: str | None = None
 
 
 class MssqlConnectionConfig(BaseModel):
@@ -156,6 +162,7 @@ class MssqlConnectionConfig(BaseModel):
     driver: str = "ODBC Driver 18 for SQL Server"
     encrypt: bool = True
     trust_server_certificate: bool = False
+    probe_query: str | None = None  # 143: ver As400ConnectionConfig
 
 
 AnyConnectionConfig = As400ConnectionConfig | MssqlConnectionConfig
@@ -189,6 +196,9 @@ class ConnectionRef:
     kind: ConnectionKind
     spec: AnyConnectionConfig
     site: str
+    # 143: consulta de prueba DERIVADA de la tabla/query del sitio (None
+    # si el sitio no la conoce). `spec.probe_query` explícita tiene prioridad.
+    probe_sql: str | None = None
 
     @property
     def env_vars(self) -> tuple[str, str]:
@@ -199,6 +209,28 @@ def credential_env_vars(alias: str) -> tuple[str, str]:
     """Nombres de las env vars de credenciales del alias (``X_USERNAME``, ``X_PASSWORD``)."""
     prefix = alias.upper()
     return (f"{prefix}_USERNAME", f"{prefix}_PASSWORD")
+
+
+def as400_probe_sql(table: str | None, query: str | None) -> str | None:
+    """143 — prueba mínima sobre la tabla/query real del sitio (DB2 for i).
+
+    Una sola fila, sin columnas de la tabla: barata y sólo exige el
+    permiso de lectura que el pipeline necesita de todas formas.
+    """
+    if table:
+        return f"SELECT 1 FROM {table} FETCH FIRST 1 ROW ONLY"
+    if query:
+        return f"SELECT 1 FROM ({query.strip().rstrip(';')}) AS T FETCH FIRST 1 ROW ONLY"
+    return None
+
+
+def mssql_probe_sql(table: str | None, query: str | None) -> str | None:
+    """143 — ídem para SQL Server (``TOP`` en vez de ``FETCH FIRST``)."""
+    if table:
+        return f"SELECT TOP 1 1 FROM {table}"
+    if query:
+        return f"SELECT TOP 1 1 FROM ({query.strip().rstrip(';')}) AS T"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1055,10 +1087,12 @@ class PipelineConfig(BaseModel):
         pipeline jamás abre esa conexión) salvo ``include_disabled``, que
         existe sólo para validar el alias.
         """
-        sites: list[tuple[str, AnyConnectionConfig | str, ConnectionKind, str]] = []
+        sites: list[tuple[str, AnyConnectionConfig | str, ConnectionKind, str, str | None]] = []
         source = self.indexing.source
         if isinstance(source, As400RvabrepSource):
-            sites.append(("indexing", source.connection, "as400", "indexing.source.connection"))
+            probe = as400_probe_sql(None, source.query)
+            path = "indexing.source.connection"
+            sites.append(("indexing", source.connection, "as400", path, probe))
         for meta_source in self.metadata.sources:
             if isinstance(meta_source, As400MetadataSourceConfig):
                 sites.append(
@@ -1067,6 +1101,7 @@ class PipelineConfig(BaseModel):
                         meta_source.as400_connection,
                         "as400",
                         f"metadata.sources[{meta_source.alias}].as400_connection",
+                        as400_probe_sql(meta_source.table, meta_source.query),
                     )
                 )
             elif isinstance(meta_source, MssqlMetadataSourceConfig):
@@ -1076,16 +1111,15 @@ class PipelineConfig(BaseModel):
                         meta_source.connection,
                         "mssql",
                         f"metadata.sources[{meta_source.alias}].connection",
+                        mssql_probe_sql(meta_source.table, meta_source.query),
                     )
                 )
         sync = self.tracking.as400_sync
         if sync.connection is not None and (sync.enabled or include_disabled):
-            sites.append(
-                ("tracking.as400_sync", sync.connection, "as400", "tracking.as400_sync.connection")
-            )
-        return tuple(
-            self._resolve_site(site, value, expected, path) for site, value, expected, path in sites
-        )
+            probe = as400_probe_sql(f"{sync.library}.{sync.table}", None)
+            path = "tracking.as400_sync.connection"
+            sites.append(("tracking.as400_sync", sync.connection, "as400", path, probe))
+        return tuple(self._resolve_site(*site) for site in sites)
 
     def _resolve_site(
         self,
@@ -1093,9 +1127,10 @@ class PipelineConfig(BaseModel):
         value: AnyConnectionConfig | str,
         expected: ConnectionKind,
         path: str,
+        probe_sql: str | None,
     ) -> ConnectionRef:
         if not isinstance(value, str):
-            return ConnectionRef(INLINE_CONNECTION_ALIAS, value.kind, value, site)
+            return ConnectionRef(INLINE_CONNECTION_ALIAS, value.kind, value, site, probe_sql)
         spec = self.connections.get(value)
         if spec is None:
             raise ValueError(
@@ -1107,7 +1142,7 @@ class PipelineConfig(BaseModel):
                 f"{path}: connection {value!r} is kind {spec.kind!r}, "
                 f"this site requires kind {expected!r}"
             )
-        return ConnectionRef(value, spec.kind, spec, site)
+        return ConnectionRef(value, spec.kind, spec, site, probe_sql)
 
     def required_aliases(self) -> tuple[str, ...]:
         """Aliases de conexión que la config usa, deduplicados en orden de aparición."""

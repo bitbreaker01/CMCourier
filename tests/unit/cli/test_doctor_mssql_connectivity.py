@@ -1,5 +1,5 @@
 """130 E5 — check ``mssql_connectivity`` del doctor: una fila por conexión
-``mssql`` del registro, ``SELECT 1`` como probe, SKIP sin conexiones."""
+``mssql`` del registro, probe derivada del sitio (143), SKIP sin conexiones."""
 
 from __future__ import annotations
 
@@ -38,14 +38,18 @@ class _StubConfig:
         return {r.alias: r.spec for r in self.refs if isinstance(r.spec, MssqlConnectionConfig)}
 
 
+_MSSQL_PROBE = "SELECT TOP 1 1 FROM dbo.clientes"
+_AS400_PROBE = "SELECT 1 FROM RVILIB.RVABREP FETCH FIRST 1 ROW ONLY"
+
+
 def _mssql_ref(alias: str, site: str, host: str = "sql.test") -> ConnectionRef:
     spec = MssqlConnectionConfig(host=host, database="cmcourier")
-    return ConnectionRef(alias=alias, kind="mssql", spec=spec, site=site)
+    return ConnectionRef(alias=alias, kind="mssql", spec=spec, site=site, probe_sql=_MSSQL_PROBE)
 
 
 def _as400_ref(alias: str, site: str) -> ConnectionRef:
     spec = As400ConnectionConfig(host="as400.test", port=446, database="RVILIB")
-    return ConnectionRef(alias=alias, kind="as400", spec=spec, site=site)
+    return ConnectionRef(alias=alias, kind="as400", spec=spec, site=site, probe_sql=_AS400_PROBE)
 
 
 def _secrets(**aliases: tuple[str, str]) -> Secrets:
@@ -96,12 +100,12 @@ class TestMssqlConnectivityCheck:
         assert "CLIENTES_SQL_USERNAME" in result.message
         assert "metadata:clientes" in result.message
 
-    def test_probes_with_select_1_and_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_probes_with_site_table_and_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_sources(monkeypatch)
         config = _StubConfig(refs=(_mssql_ref("clientes_sql", "metadata:clientes"),))
         result = _check_mssql_connectivity(config, _secrets(clientes_sql=("u", "p")))  # type: ignore[arg-type]
         assert result.status == CheckStatus.PASS
-        assert captured["mssql"] == [("SELECT 1", [])]
+        assert captured["mssql"] == [(_MSSQL_PROBE, [])]
         assert captured["as400"] == []
         assert "clientes_sql@sql.test" in result.message
 
@@ -115,8 +119,8 @@ class TestMssqlConnectivityCheck:
         as400 = _check_as400_connectivity(config, secrets)  # type: ignore[arg-type]
         mssql = _check_mssql_connectivity(config, secrets)  # type: ignore[arg-type]
         assert as400.status == CheckStatus.PASS and mssql.status == CheckStatus.PASS
-        assert captured["as400"] == [("SELECT 1 FROM SYSIBM.SYSDUMMY1", [])]
-        assert captured["mssql"] == [("SELECT 1", [])]
+        assert captured["as400"] == [(_AS400_PROBE, [])]
+        assert captured["mssql"] == [(_MSSQL_PROBE, [])]
         assert "clientes_sql" not in as400.details
         assert "as400" not in mssql.details
 
@@ -152,7 +156,7 @@ class TestCheckConnection:
         assert result.name == "connection:clientes_sql"
         assert "sql.test" in result.message
         assert captured["as400"] == []
-        assert captured["mssql"] == [("SELECT 1", [])]
+        assert captured["mssql"] == [(_MSSQL_PROBE, [])]
 
     def test_fails_naming_env_vars_when_credentials_missing(self) -> None:
         config = _StubConfig(refs=(_mssql_ref("clientes_sql", "metadata:clientes"),))
@@ -164,13 +168,15 @@ class TestCheckConnection:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """138: una conexión recién creada desde [2] no tiene sitio todavía —
-        el botón "probar" igual la prueba (el registro es la fuente)."""
+        el botón "probar" igual la prueba (el registro es la fuente). 143:
+        sin sitio no hay tabla que derivar → sólo ping, y el mensaje lo dice."""
         captured = _patch_sources(monkeypatch)
         config = _StubConfig(refs=(_mssql_ref("nueva", "metadata:x"),))
         monkeypatch.setattr(_StubConfig, "connection_refs", lambda self: ())
         result = check_connection(config, _secrets(nueva=("u", "p")), "nueva")  # type: ignore[arg-type]
         assert result.status == CheckStatus.PASS
-        assert captured["mssql"] == [("SELECT 1", [])]
+        assert captured["mssql"] == []
+        assert "sin tabla asignada" in result.message
 
     def test_unknown_alias_fails_without_probing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_sources(monkeypatch)

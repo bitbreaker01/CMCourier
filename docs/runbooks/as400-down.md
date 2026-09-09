@@ -23,7 +23,7 @@ ping -c 3 <as400-host>
 # 2. ¿La auth funciona? Query mínima que no toca tablas reales:
 cmcourier as400-query \
     --config sample/config.yaml \
-    "SELECT 1 FROM SYSIBM.SYSDUMMY1"
+    "SELECT 1 FROM RVILIB.RVABREP FETCH FIRST 1 ROW ONLY"   # una tabla a la que el perfil tenga permiso (143: SafeNet/i rechaza SYSDUMMY1)
 # Esto exige AS400_USERNAME y AS400_PASSWORD en el environment.
 # Si dice "ConfigurationError: AS400_USERNAME and AS400_PASSWORD must be set"
 # → no es el server, son las credenciales.
@@ -78,7 +78,7 @@ cmcourier doctor --config sample/config.yaml --check connections
 # 2. Query simple devuelve
 cmcourier as400-query \
     --config sample/config.yaml \
-    "SELECT 1 FROM SYSIBM.SYSDUMMY1"
+    "SELECT 1 FROM RVILIB.RVABREP FETCH FIRST 1 ROW ONLY"   # una tabla a la que el perfil tenga permiso (143: SafeNet/i rechaza SYSDUMMY1)
 
 # 3. Si el batch estaba a medias, reanudá
 cmcourier csv-trigger-pipeline run \

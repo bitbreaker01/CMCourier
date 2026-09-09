@@ -1704,3 +1704,66 @@ class TestMssqlMetadataSource:
     )
     def test_split_lookup_source_type(self, value: str, expected: tuple[str, str] | None) -> None:
         assert split_lookup_source_type(value) == expected
+
+
+class TestConnectionProbeQuery:
+    """143 — la prueba de conexión toca la tabla REAL del pipeline (SafeNet/i
+    whitelistea objetos por perfil: ``SYSIBM.SYSDUMMY1`` no vale)."""
+
+    def _data(self, fixture_paths: dict[str, Path], tmp_path: Path) -> dict[str, Any]:
+        data = _build_full_data(
+            fixture_paths["trigger"],
+            fixture_paths["rvabrep"],
+            fixture_paths["modelo"],
+            fixture_paths["clients"],
+            fixture_paths["assembly_root"],
+            tmp_path,
+        )
+        data["connections"] = {
+            "rvi": {"kind": "as400", "host": "h"},
+            "sql": {"kind": "mssql", "host": "h", "database": "db"},
+        }
+        return data
+
+    def test_probe_query_optional_on_both_kinds(self) -> None:
+        assert As400ConnectionConfig(host="h").probe_query is None
+        assert MssqlConnectionConfig(host="h", database="d").probe_query is None
+        as400 = As400ConnectionConfig(host="h", probe_query="SELECT 1 FROM RVILIB.X")
+        assert as400.probe_query == "SELECT 1 FROM RVILIB.X"
+
+    def test_indexing_query_derives_wrapped_probe(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        data = self._data(fixture_paths, tmp_path)
+        query = "SELECT A FROM RVILIB.RVABREP"
+        data["indexing"] = {"source": {"kind": "as400", "connection": "rvi", "query": query}}
+        (ref,) = PipelineConfig.model_validate(data).connection_refs()
+        assert ref.probe_sql == f"SELECT 1 FROM ({query}) AS T FETCH FIRST 1 ROW ONLY"
+
+    def test_metadata_sites_derive_probe_per_kind(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        data = self._data(fixture_paths, tmp_path)
+        data["metadata"]["sources"] += [
+            {"kind": "as400", "alias": "a", "as400_connection": "rvi", "table": "RVILIB.CLI"},
+            {"kind": "as400", "alias": "b", "as400_connection": "rvi", "query": "SELECT X FROM Y"},
+            {"kind": "mssql", "alias": "c", "connection": "sql", "table": "dbo.clientes"},
+            {"kind": "mssql", "alias": "d", "connection": "sql", "query": "SELECT X FROM Y"},
+        ]
+        config = PipelineConfig.model_validate(data)
+        by_site = {ref.site: ref.probe_sql for ref in config.connection_refs()}
+        assert by_site == {
+            "metadata:a": "SELECT 1 FROM RVILIB.CLI FETCH FIRST 1 ROW ONLY",
+            "metadata:b": "SELECT 1 FROM (SELECT X FROM Y) AS T FETCH FIRST 1 ROW ONLY",
+            "metadata:c": "SELECT TOP 1 1 FROM dbo.clientes",
+            "metadata:d": "SELECT TOP 1 1 FROM (SELECT X FROM Y) AS T",
+        }
+
+    def test_sync_site_derives_probe_from_library_and_table(
+        self, fixture_paths: dict[str, Path], tmp_path: Path
+    ) -> None:
+        data = self._data(fixture_paths, tmp_path)
+        data["tracking"]["as400_sync"] = {"enabled": True, "connection": "rvi", "library": "LIB"}
+        (ref,) = PipelineConfig.model_validate(data).connection_refs()
+        assert ref.site == "tracking.as400_sync"
+        assert ref.probe_sql == "SELECT 1 FROM LIB.NIARVILOG FETCH FIRST 1 ROW ONLY"

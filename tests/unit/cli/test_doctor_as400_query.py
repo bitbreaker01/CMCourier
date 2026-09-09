@@ -32,9 +32,15 @@ class _StubConfig:
         return self.refs
 
 
-def _ref(alias: str, site: str, host: str = "as400.test") -> ConnectionRef:
-    spec = As400ConnectionConfig(host=host, port=446, database="RVILIB")
-    return ConnectionRef(alias=alias, kind="as400", spec=spec, site=site)
+def _ref(
+    alias: str,
+    site: str,
+    host: str = "as400.test",
+    probe_sql: str | None = "SELECT 1 FROM RVILIB.RVABREP FETCH FIRST 1 ROW ONLY",
+    probe_query: str | None = None,
+) -> ConnectionRef:
+    spec = As400ConnectionConfig(host=host, port=446, database="RVILIB", probe_query=probe_query)
+    return ConnectionRef(alias=alias, kind="as400", spec=spec, site=site, probe_sql=probe_sql)
 
 
 def _secrets(**aliases: tuple[str, str]) -> Secrets:
@@ -53,19 +59,20 @@ def _patch_source(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, list[Any]]
 
 
 class TestAs400ConnectivityQuery:
-    """073: el health-check debe usar ``SELECT 1 FROM SYSIBM.SYSDUMMY1``,
-    la pseudo-tabla canónica de DB2 / iSeries. ``SELECT 1`` solo (sin
-    ``FROM``) es legal en MySQL/Postgres/SQL Server pero DB2 lo rechaza
-    con sqlstate 42000 (syntax error).
+    """143: el health-check toca la tabla REAL del sitio (``probe_sql``
+    derivada en ``connection_refs()``), nunca ``SYSIBM.SYSDUMMY1``: con
+    SafeNet/i en el iSeries sólo hay permiso sobre objetos whitelisteados
+    por perfil y la pseudo-tabla canónica se rechaza (``PWS9801``).
     """
 
-    def test_health_check_uses_sysdummy1(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_health_check_uses_site_derived_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured = _patch_source(monkeypatch)
         config = _StubConfig(refs=(_ref("as400", "indexing"),))
         result = _check_as400_connectivity(config, _secrets(as400=("dbuser", "dbpass")))  # type: ignore[arg-type]
 
         assert result.status == CheckStatus.PASS
-        assert captured == [("SELECT 1 FROM SYSIBM.SYSDUMMY1", [])]
+        assert captured == [("SELECT 1 FROM RVILIB.RVABREP FETCH FIRST 1 ROW ONLY", [])]
+        assert "SYSDUMMY1" not in result.details["as400"]
 
     def test_skips_when_no_as400_connection(self) -> None:
         # Sin conexiones AS400 el check debe skipear sin tocar pyodbc.
@@ -169,4 +176,47 @@ class TestProbeFailureDetail:
 
         assert result.status == CheckStatus.PASS
         src.ping.assert_called_once()
-        src.query.assert_called_once_with("SELECT 1 FROM SYSIBM.SYSDUMMY1", [])
+        src.query.assert_called_once_with("SELECT 1 FROM RVILIB.RVABREP FETCH FIRST 1 ROW ONLY", [])
+        assert "derivada de indexing" in result.message
+
+
+class TestProbeQuerySelection:
+    """143 — orden: ``probe_query`` explícita → derivada del sitio → sólo ping."""
+
+    def _probe(self, monkeypatch: pytest.MonkeyPatch, ref: ConnectionRef) -> tuple[Any, Any]:
+        src = MagicMock()
+        monkeypatch.setattr(doctor_module, "As400DataSource", lambda **kwargs: src)
+        config = _StubConfig(refs=(ref,))
+        return src, check_connection(config, _secrets(rvi=("u", "p")), "rvi")  # type: ignore[arg-type]
+
+    def test_explicit_probe_query_wins_over_derived(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ref = _ref("rvi", "indexing", probe_query="SELECT 1 FROM RVILIB.PERMITIDA")
+        src, result = self._probe(monkeypatch, ref)
+        assert result.status == CheckStatus.PASS
+        src.query.assert_called_once_with("SELECT 1 FROM RVILIB.PERMITIDA", [])
+        assert "probe_query" in result.message
+        assert "RVILIB.PERMITIDA" in result.message
+
+    def test_without_any_query_only_pings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Conexión recién creada desde [2]: sin sitio no hay tabla que derivar.
+        src, result = self._probe(monkeypatch, _ref("rvi", "connections", probe_sql=None))
+        assert result.status == CheckStatus.PASS
+        src.ping.assert_called_once()
+        src.query.assert_not_called()
+        assert "sin tabla asignada" in result.message
+
+    def test_query_failure_names_the_query_and_its_origin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = MagicMock()
+        src.query = _raising(
+            IndexingError("AS400 query failed", sql_prefix="SELECT 1", sqlstate="HY000"),
+            RuntimeError("PWS9801 - Function rejected by user exit program SAFENET"),
+        )
+        monkeypatch.setattr(doctor_module, "As400DataSource", lambda **kwargs: src)
+        config = _StubConfig(refs=(_ref("rvi", "metadata:clientes"),))
+        result = check_connection(config, _secrets(rvi=("u", "p")), "rvi")  # type: ignore[arg-type]
+        assert result.status == CheckStatus.FAIL
+        assert "PWS9801" in result.message
+        assert "derivada de metadata:clientes" in result.message
+        assert result.details["phase"] == "query"

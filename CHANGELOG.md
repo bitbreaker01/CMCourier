@@ -10,6 +10,28 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Added
+
+- **Prueba de conexión configurable o derivada del sitio (143).** Las
+  conexiones `as400` y `mssql` del registro aceptan `probe_query`
+  (opcional; también desde `[2] editar` y `[9] YAML`). Sin ella, el
+  doctor y "probar conexión" derivan la consulta de la tabla/query REAL
+  del sitio que usa la conexión: `indexing` (`SELECT 1 FROM (<query>) AS
+  T FETCH FIRST 1 ROW ONLY`), `metadata:<alias>` (tabla o query, con
+  `TOP 1` en SQL Server) y `tracking.as400_sync` (`<library>.<table>`).
+  Una conexión sin sitio ni `probe_query` sólo hace login y la tarjeta
+  lo dice ("conectó · sin tabla asignada todavía"); el PASS/FAIL nombra
+  la consulta y su origen (`probe_query` / `derivada de <sitio>`).
+
+### Changed
+
+- **`SYSIBM.SYSDUMMY1` desaparece del probe.** Motivo real del FAIL del
+  operador: el iSeries corre SafeNet/i (exit program `SAFENET` en
+  `PCSECLIB`), que whitelistea objetos por perfil — el login pasaba y la
+  pseudo-tabla "canónica" se rechazaba con `PWS9801 - Function rejected
+  by user exit program`. Una prueba fija no sirve cuando el permiso se
+  da tabla por tabla: ahora se toca la tabla que el pipeline va a usar.
+
 ### Fixed
 
 - **Consola `[2] CREDENCIALES`: "probar conexión" sólo se veía en la

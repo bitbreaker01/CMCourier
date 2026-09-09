@@ -171,7 +171,9 @@ class TestDraftToYaml:
         }
 
     def test_kind_fields_and_placeholders_come_from_the_model(self) -> None:
-        assert KIND_FIELDS["as400"] == ("host", "port", "database", "driver", "table")
+        # 143: `probe_query` llega al editor sola, por venir del modelo.
+        as400_fields = ("host", "port", "database", "driver", "table", "probe_query")
+        assert KIND_FIELDS["as400"] == as400_fields
         assert KIND_FIELDS["mssql"] == (
             "host",
             "port",
@@ -179,6 +181,7 @@ class TestDraftToYaml:
             "driver",
             "encrypt",
             "trust_server_certificate",
+            "probe_query",
         )
         assert field_default("as400", "port") == "446"
         assert field_default("mssql", "port") == "1433"
@@ -256,6 +259,7 @@ class TestPlanWrite:
             Edit(("connections", "rvi", "database"), "RVILIB"),
             Edit(("connections", "rvi", "driver"), DELETE),
             Edit(("connections", "rvi", "table"), DELETE),
+            Edit(("connections", "rvi", "probe_query"), DELETE),
         ]
         doc = YamlDocument.load(path)
         apply_edits(doc, edits)

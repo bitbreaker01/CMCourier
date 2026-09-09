@@ -255,8 +255,8 @@ Checks individuales (`CHECK_NAMES`, en orden de ejecución):
 |-------|-------|------------|
 | `log_dir_writable` | connections | `observability.log_dir` se crea y admite escritura. |
 | `cmis_connectivity` | connections | `repositoryInfo` del CMIS. |
-| `as400_connectivity` | connections | Cada conexión `as400` del registro (129): credenciales presentes + `SELECT 1 FROM SYSIBM.SYSDUMMY1`. SKIP si no hay ninguna. |
-| `mssql_connectivity` | connections | Cada conexión `mssql` del registro (130): credenciales presentes + `SELECT 1`. SKIP si no hay ninguna. |
+| `as400_connectivity` | connections | Cada conexión `as400` del registro (129): credenciales presentes + login + la consulta de prueba de la conexión (143: `probe_query` o derivada de la tabla/query del sitio; sin sitio, sólo login). SKIP si no hay ninguna. |
+| `mssql_connectivity` | connections | Cada conexión `mssql` del registro (130): credenciales presentes + login + la consulta de prueba (143, ídem con `SELECT TOP 1 1`). SKIP si no hay ninguna. |
 | `tracking_openable` | connections | La SQLite de tracking abre en WAL. |
 | `as400_sync` | connections | Conexión + tabla NIARVILOG cuando `tracking.as400_sync.enabled`. SKIP si está off. |
 | `mapping_completeness` | mapping | El Modelo Documental tiene ≥1 fila. |
