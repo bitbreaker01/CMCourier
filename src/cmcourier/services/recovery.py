@@ -39,22 +39,14 @@ from cmcourier.domain.ports import IDataSource
 from cmcourier.services.indexing import IndexingService
 from cmcourier.services.mapping import MappingService
 
+# 144: ``SyncProgress`` vive en ``sync_progress`` (lo comparte el
+# reconciliador); se re-exporta acá para los imports pre-existentes.
+from cmcourier.services.sync_progress import ProgressEmitter, SyncProgress
+
 _log = logging.getLogger(__name__)
 
 # 144: cada cuántos INSERT completados se emite progreso en `insertando`.
 _INSERT_PROGRESS_EVERY = 50
-
-
-@dataclass(frozen=True, slots=True)
-class SyncProgress:
-    """144: un evento de progreso del sync con AS400.
-
-    ``phase`` es texto para el operador (``"insertando"``); ``done`` /
-    ``total`` son ``0/0`` en fases sin conteo previo."""
-
-    phase: str
-    done: int
-    total: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,22 +78,6 @@ class _InsertPlan:
     document: RVABREPDocument
     idnbac: str
     tipidn: str
-
-
-class _ProgressEmitter:
-    """144: envuelve ``on_progress`` para que un callback roto (UI
-    muerta, widget que ya no existe) no aborte el recover."""
-
-    def __init__(self, on_progress: Callable[[SyncProgress], None] | None) -> None:
-        self._cb = on_progress
-
-    def __call__(self, phase: str, done: int, total: int) -> None:
-        if self._cb is None:
-            return
-        try:
-            self._cb(SyncProgress(phase, done, total))
-        except Exception:  # noqa: BLE001 — el progreso es cosmético, el recover no
-            _log.exception("recover: on_progress falló en fase %r (%d/%d)", phase, done, total)
 
 
 class As400Recovery:
@@ -145,7 +121,7 @@ class As400Recovery:
         (default) es dry-run: arma el plan sin escribir AS400.
         ``on_progress`` (144) recibe un :class:`SyncProgress` al empezar
         cada fase y, en ``insertando``, cada 50 docs y al final."""
-        emit = _ProgressEmitter(on_progress)
+        emit = ProgressEmitter(on_progress)
         emit("leyendo tracking", 0, 0)
         records = self._sqlite.uploaded_records(batch_id)
         # 118: el chequeo de existencia es batcheado (IN chunkeado, 113)
@@ -217,7 +193,7 @@ class As400Recovery:
         return _InsertPlan(rec, document, mapping.id_corto, mapping.cmis_type)
 
     def _insert_all(
-        self, plans: list[_InsertPlan], emit: _ProgressEmitter
+        self, plans: list[_InsertPlan], emit: ProgressEmitter
     ) -> tuple[list[str], list[RecoveryItem]]:
         """144: ejecuta los INSERT en un pool acotado. Cada hilo del pool
         tiene su conexión (``ThreadLocalConnectionPool``); la semántica

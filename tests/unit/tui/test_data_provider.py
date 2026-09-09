@@ -79,6 +79,17 @@ class TestTUIDataProvider:
         assert int(snap.stages["S1"]["count"]) == 1
         assert float(snap.stages["S5"]["p95_ms"]) == 500.0
 
+    def test_closing_phase_passes_through_from_pool_stats(self, tmp_path: Path) -> None:
+        # 144: el monitor lee la fase de cierre desde el snapshot.
+        from cmcourier.services.worker_pool_stats import ClosingPhase
+
+        provider, _r, pool, _s = _make_provider(tmp_path)
+        assert provider.snapshot().closing is None
+        pool.set_closing("sincronizando AS400", 50, 120)
+        assert provider.snapshot().closing == ClosingPhase("sincronizando AS400", 50, 120)
+        pool.clear_closing()
+        assert provider.snapshot().closing is None
+
     def test_pool_in_use_reflects_busy_workers(self, tmp_path: Path) -> None:
         provider, _r, pool, sem = _make_provider(tmp_path)
         sem.set_capacity(6)

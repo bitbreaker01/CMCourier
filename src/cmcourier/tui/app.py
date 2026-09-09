@@ -271,8 +271,18 @@ class CMCourierTUI(App[None]):
         # Actualiza ``App.sub_title`` con el estado de la corrida para que
         # aparezca en el header — le da al operador una vista de un
         # vistazo aunque esté enfocado en el cuerpo de un tab.
-        self.sub_title = (
-            "RUN COMPLETE — press Q to exit"
-            if snap.is_complete
-            else f"{snap.pool_in_use}/{snap.pool_capacity} workers busy"
-        )
+        self.sub_title = _sub_title(snap)
+
+
+def _sub_title(snap: TUISnapshot) -> str:
+    """Estado de un vistazo para ``App.sub_title``.
+
+    144: durante la pasada final del reconciler (``snap.closing``) muestra
+    ``cerrando · <label> k/N`` en lugar del conteo de workers.
+    """
+    if snap.is_complete:
+        return "RUN COMPLETE — press Q to exit"
+    closing = snap.closing
+    if closing is not None:
+        return f"cerrando · {closing.label} {closing.done}/{closing.total}"
+    return f"{snap.pool_in_use}/{snap.pool_capacity} workers busy"

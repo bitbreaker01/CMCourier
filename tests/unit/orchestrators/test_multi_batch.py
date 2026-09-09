@@ -585,3 +585,59 @@ class TestFilteredOutcome051:
         # 4 triggers / 2 = 2 chunks, each reporting 1 filtered.
         assert report.s1_filtered == 2
         assert all(s.prep_filtered == 1 for s in orch.chunks_snapshot())
+
+
+# ---------------------------------------------------------------------------
+# 144 — cierre de corrida visible (path N=1 con reconciliador periódico)
+# ---------------------------------------------------------------------------
+
+
+class _FakePeriodicReconciler:
+    def __init__(self, pool_stats) -> None:  # noqa: ANN001
+        self._pool_stats = pool_stats
+        self.started = False
+        self.seen: list[tuple[str, int, int] | None] = []
+
+    def start(self) -> None:
+        self.started = True
+
+    def _peek(self) -> None:
+        c = self._pool_stats.snapshot().closing
+        self.seen.append((c.label, c.done, c.total) if c is not None else None)
+
+    def stop(self, *, on_progress=None):  # noqa: ANN001, ANN202
+        from cmcourier.services.recovery import SyncProgress
+
+        self._peek()
+        assert on_progress is not None
+        on_progress(SyncProgress("sincronizando AS400", 7, 9))
+        self._peek()
+        return
+
+
+class TestRunClose144:
+    def test_sequential_n1_publishes_closing_phase_around_final_pass(self, tmp_path: Path) -> None:
+        from cmcourier.services.worker_pool_stats import WorkerPoolStats
+
+        pipeline = _FakePipeline(triggers_per_call=_make_triggers(6))
+        pipeline.pool_stats = WorkerPoolStats()
+        recon = _FakePeriodicReconciler(pipeline.pool_stats)
+        pipeline._periodic_reconciler = recon
+        orch = _build_orchestrator(pipeline, tmp_path)
+
+        orch.run(source_descriptor="", batch_size=3, batches_in_flight=1)
+
+        assert recon.started
+        assert recon.seen == [("sincronizando AS400", 0, 0), ("sincronizando AS400", 7, 9)]
+        assert pipeline.pool_stats.snapshot().closing is None
+
+    def test_sequential_n1_without_pool_stats_still_stops(self, tmp_path: Path) -> None:
+        # Doble sin ``pool_stats`` (como los fakes pre-144): stop() pelado.
+        pipeline = _FakePipeline(triggers_per_call=_make_triggers(2))
+        recon = MagicMock()
+        pipeline._periodic_reconciler = recon
+        orch = _build_orchestrator(pipeline, tmp_path)
+
+        orch.run(source_descriptor="", batch_size=3, batches_in_flight=1)
+
+        recon.stop.assert_called_once_with()

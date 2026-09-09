@@ -543,7 +543,8 @@ class TestCli:
         )
         assert result.exit_code == 0, result.stdout
         assert "credentials missing" not in result.stdout
-        assert probed == ["SELECT 1"], result.stdout
+        # 143: la prueba se deriva del sitio (metadata:clientes → su tabla).
+        assert probed == ["SELECT TOP 1 1 FROM dbo.clientes"], result.stdout
 
     def test_doctor_missing_config_exit_2(
         self,

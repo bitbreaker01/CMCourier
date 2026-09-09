@@ -70,17 +70,7 @@ class MonitorPane(Vertical):
         done = int(s5.get("count", 0))
         failed = snap.failed_total
         skipped = snap.s1_filtered
-        if snap.is_complete:
-            state = "completada"
-        elif getattr(mgr, "paused", False):
-            # 132
-            state = (
-                "PAUSADA · esperando credenciales CMIS"
-                if getattr(mgr, "reauth_pending", False)
-                else "PAUSADA"
-            )
-        else:
-            state = "corriendo"
+        state = self._state_word(mgr, snap)
         header = (
             f"[b]batch[/b] {snap.batch_id or '—'}  [b]{state}[/b]  "
             f"[b]elapsed[/b] {int(snap.elapsed_s)}s\n"
@@ -104,6 +94,25 @@ class MonitorPane(Vertical):
         if snap.mode == "streaming":
             body += "\n\n" + render_bucket(snap)
         self.query_one("#mon-body", Static).update(body)
+
+    @staticmethod
+    def _state_word(mgr: object, snap: TUISnapshot) -> str:
+        """Palabra de estado del header: completada / cerrando / PAUSADA / corriendo."""
+        if snap.is_complete:
+            return "completada"
+        # 144: la pasada final del reconciler ya no se esconde detrás de
+        # "corriendo": el operador ve qué se está cerrando y cuánto falta.
+        closing = getattr(snap, "closing", None)
+        if closing is not None:
+            return f"cerrando · {closing.label} {closing.done}/{closing.total}"
+        if getattr(mgr, "paused", False):
+            # 132
+            return (
+                "PAUSADA · esperando credenciales CMIS"
+                if getattr(mgr, "reauth_pending", False)
+                else "PAUSADA"
+            )
+        return "corriendo"
 
     @staticmethod
     def _window_fragment(snap: TUISnapshot) -> str:

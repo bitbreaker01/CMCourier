@@ -530,3 +530,83 @@ class TestStreaming067LiveTUIBindings:
         assert max(observed_light) <= 4
         # Sanity: it actually got SOME items routed (test isn't trivially passing).
         assert max(observed_heavy + observed_light) >= 1
+
+
+# ---------------------------------------------------------------------------
+# 144 — cierre de corrida visible + cola sin píldoras
+# ---------------------------------------------------------------------------
+
+
+class _FakePeriodicReconciler:
+    """Doble del PeriodicReconciler: ``stop`` emite progreso y registra
+    qué veía ``pool_stats.closing`` en cada momento."""
+
+    def __init__(self, pool_stats) -> None:  # noqa: ANN001
+        self._pool_stats = pool_stats
+        self.started = False
+        self.seen: list[tuple[str, int, int] | None] = []
+
+    def start(self) -> None:
+        self.started = True
+
+    def _peek(self) -> None:
+        c = self._pool_stats.snapshot().closing
+        self.seen.append((c.label, c.done, c.total) if c is not None else None)
+
+    def stop(self, *, on_progress=None):  # noqa: ANN001, ANN202
+        from cmcourier.services.recovery import SyncProgress
+
+        self._peek()
+        assert on_progress is not None
+        on_progress(SyncProgress("sincronizando AS400", 50, 120))
+        self._peek()
+        return
+
+
+class TestRunClose144:
+    def test_final_pass_is_published_as_closing_phase(self, tmp_path: Path) -> None:
+        pipeline = _FakePipeline(triggers=_make_triggers(3))
+        recon = _FakePeriodicReconciler(pipeline.pool_stats)
+        pipeline._periodic_reconciler = recon
+        orch = _build_orch(pipeline, tmp_path)
+
+        orch.run(source_descriptor="", batch_size=100, batches_in_flight=2)
+
+        assert recon.started
+        assert recon.seen == [("sincronizando AS400", 0, 0), ("sincronizando AS400", 50, 120)]
+        assert pipeline.pool_stats.snapshot().closing is None
+
+    @pytest.mark.parametrize("lanes_enabled", [False, True])
+    def test_queue_depth_is_zero_after_run_pills_excluded(
+        self, tmp_path: Path, lanes_enabled: bool
+    ) -> None:
+        # Pre-144 las N `_POISON` quedaban contadas por qsize() en la última
+        # publicación → el monitor mostraba `30 pending · idle 30` para siempre.
+        pipeline = _FakePipeline(triggers=_make_triggers(6), pool_ceiling=2, upload_sleep_s=0.02)
+        orch = _build_orch(pipeline, tmp_path, bucket_size=8, lanes_enabled=lanes_enabled)
+
+        orch.run(source_descriptor="", batch_size=100, batches_in_flight=2)
+
+        assert len(pipeline.upload_calls) == 6
+        assert pipeline.pool_stats.snapshot().queue_depth == 0
+
+    def test_published_depth_never_counts_pills_mid_run(self, tmp_path: Path) -> None:
+        # Con 2 consumers dormidos y 1 doc en cola, las 2 píldoras ya
+        # encoladas no pueden inflar el pending por encima de 1.
+        pipeline = _FakePipeline(triggers=_make_triggers(4), pool_ceiling=2, upload_sleep_s=0.03)
+        orch = _build_orch(pipeline, tmp_path, bucket_size=8)
+        observed: list[int] = []
+
+        def _poll() -> None:
+            for _ in range(60):
+                observed.append(pipeline.pool_stats.snapshot().queue_depth)
+                time.sleep(0.003)
+
+        t = threading.Thread(target=_poll)
+        t.start()
+        orch.run(source_descriptor="", batch_size=100, batches_in_flight=2)
+        t.join()
+
+        # 4 docs, 2 consumers: nunca hay más de 4 pendientes reales; con
+        # píldoras contadas se vería hasta 6.
+        assert max(observed) <= 4

@@ -48,6 +48,7 @@ from cmcourier.observability.metrics import MetricsRecorder
 from cmcourier.orchestrators.chunked import chunked
 from cmcourier.orchestrators.staged import RunReport, StagedPipeline, _StageItem
 from cmcourier.services.cancellation import CancellationToken
+from cmcourier.services.reconciler import stop_reconciler_visibly
 
 _log = logging.getLogger(__name__)
 
@@ -459,7 +460,9 @@ class MultiBatchOrchestrator:
                     )
         finally:
             if periodic_recon is not None:
-                periodic_recon.stop()
+                # 144: la pasada final se ve en el monitor como fase de
+                # cierre (``cerrando · sincronizando AS400 k/N``).
+                stop_reconciler_visibly(periodic_recon, getattr(self._pipeline, "pool_stats", None))
             if controller is not None:
                 controller.stop(timeout=2.0)
             if sampler is not None:

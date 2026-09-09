@@ -4,6 +4,7 @@ de `chunk` (052)."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 
 import pytest
 from textual.widgets import Static
@@ -95,6 +96,43 @@ class TestDetailPaneSelection:
                 assert app.query_one(TabbedContent).active == "detail"
 
         asyncio.run(_run())
+
+
+class TestSubTitleClosing144:
+    """144: el header del TUI batched refleja la fase de cierre."""
+
+    @staticmethod
+    def _snap(**kw: object) -> TUISnapshot:
+        return TUISnapshot(
+            pipeline="p",
+            batch_id="B0",
+            elapsed_s=1.0,
+            throughput_docs_per_s=0.0,
+            is_complete=False,
+            pool_in_use=2,
+            pool_capacity=8,
+            **kw,  # type: ignore[arg-type]
+        )
+
+    def test_sub_title_shows_closing_phase(self) -> None:
+        from cmcourier.services.worker_pool_stats import ClosingPhase
+        from cmcourier.tui.app import _sub_title
+
+        snap = self._snap(closing=ClosingPhase("sincronizando AS400", 50, 120))
+        assert _sub_title(snap) == "cerrando · sincronizando AS400 50/120"
+
+    def test_sub_title_without_closing_keeps_workers_busy(self) -> None:
+        from cmcourier.tui.app import _sub_title
+
+        assert _sub_title(self._snap()) == "2/8 workers busy"
+
+    def test_sub_title_complete_wins_over_closing(self) -> None:
+        from cmcourier.services.worker_pool_stats import ClosingPhase
+        from cmcourier.tui.app import _sub_title
+
+        snap = self._snap(closing=ClosingPhase("sincronizando AS400", 1, 1))
+        snap = dataclasses.replace(snap, is_complete=True)
+        assert _sub_title(snap).startswith("RUN COMPLETE")
 
 
 class TestDetailPaneScroll058:

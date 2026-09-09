@@ -19,6 +19,12 @@ nuevo (``reconcile-*.jsonl``):
   importada a SQLite.
 * ``conflict``         — el doc está en las dos bases con estado
   divergente y no lo escribió esta corrida → resolución manual.
+
+144: la propagación a AS400 corre en un pool acotado (``write_workers``,
+cada hilo con su conexión vía ``ThreadLocalConnectionPool``) y reporta
+progreso por ``on_progress`` — la pasada FINAL de la corrida era un
+write + commit por doc, en serie, y muda; el monitor se quedaba en
+"corriendo" minutos después del último upload.
 """
 
 from __future__ import annotations
@@ -30,21 +36,30 @@ __all__ = [
     "PeriodicReconciler",
     "ReconcileConflict",
     "ReconcileResult",
+    "stop_reconciler_visibly",
 ]
 
 import logging
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Literal
 
 from cmcourier.adapters.tracking.as400_niarvilog import As400NiarvilogStore, NiarvilogRow
 from cmcourier.adapters.tracking.sqlite import SQLiteTrackingStore
 from cmcourier.domain.models import CMMapping, MigrationRecord, RVABREPDocument, Trigger
+from cmcourier.services.sync_progress import ProgressEmitter, SyncProgress
+from cmcourier.services.worker_pool_stats import WorkerPoolStats
 
 _log = logging.getLogger(__name__)
 _reconcile_log = logging.getLogger("cmcourier.metrics.reconcile")
+
+# 144: fase que ve el operador durante la pasada final, y cada cuántos
+# items completados se re-emite.
+SYNC_PHASE_LABEL = "sincronizando AS400"
+_PROGRESS_EVERY = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +112,20 @@ class ReconcileConflict:
     as400_objidn: str
 
 
+_ItemOutcome = ReconcileConflict | Literal["synced", "consistent"]
+
+
+@dataclass(slots=True)
+class _PassTally:
+    """144: acumulador mutable de una pasada — lo llena el hilo llamador
+    a medida que los futures del pool terminan (nunca los workers)."""
+
+    synced: list[str] = field(default_factory=list)
+    conflicts: list[ReconcileConflict] = field(default_factory=list)
+    requeued: list[PendingSyncItem] = field(default_factory=list)
+    failed: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class ReconcileResult:
     """Resultado de una pasada de reconciliación."""
@@ -120,9 +149,13 @@ class As400Reconciler:
         *,
         sqlite_store: SQLiteTrackingStore,
         as400_store: As400NiarvilogStore,
+        write_workers: int = 8,
     ) -> None:
         self._sqlite = sqlite_store
         self._as400 = as400_store
+        # 144: hilos del pool de writes. Cada uno usa su propia conexión
+        # ODBC (``ThreadLocalConnectionPool``), igual que los workers S5.
+        self._write_workers = max(1, int(write_workers))
 
     def run_pass(
         self,
@@ -130,6 +163,7 @@ class As400Reconciler:
         *,
         import_scope: set[str] | None = None,
         stop_event: threading.Event | None = None,
+        on_progress: Callable[[SyncProgress], None] | None = None,
     ) -> ReconcileResult:
         """Una pasada: propaga ``items`` a AS400 e importa filas ``O``
         ajenas del ``import_scope`` a SQLite. Emite el log de la pasada.
@@ -138,74 +172,124 @@ class As400Reconciler:
         ítem**. Una falla per-ítem se aísla (el ítem va a ``requeued``,
         los demás siguen). Si ``stop_event`` se setea, corta entre ítems
         y manda el resto a ``requeued`` para que ``run_one`` los
-        re-encole."""
+        re-encole.
+
+        144: los writes corren en el pool acotado; ``on_progress``
+        recibe ``SyncProgress("sincronizando AS400", k, N)`` al empezar,
+        cada 50 items completados y al final — siempre desde ESTE hilo."""
         t0 = time.monotonic()
         try:
             stale = self._as400.cleanup_stale_in_progress()
         except Exception:  # noqa: BLE001 — un cleanup fallido no aborta la pasada
             _log.exception("reconcile: cleanup_stale_in_progress falló")
             stale = 0
-        synced_as400: list[str] = []
-        conflicts: list[ReconcileConflict] = []
-        requeued: list[PendingSyncItem] = []
-        failed = 0
-        # 117: UNA lectura batcheada (IN chunkeado, 113) para todo el
-        # batch — pre-117 era un SELECT por item. Si la lectura falla
-        # (AS400 caído), TODO el batch va a requeued (098: nunca se
-        # pierde un item).
-        states: dict[str, object] = {}
-        if items:
-            try:
-                states = dict(
-                    self._as400.read_states_by_txns([it.document.txn_num for it in items])
-                )
-            except Exception as exc:  # noqa: BLE001
-                _log.exception("reconcile: lectura batcheada falló — se re-encola el batch")
-                for item in items:
-                    failed += 1
-                    requeued.append(item)
-                    self._log_failure(item, exc)
-                items = []
-        for idx, item in enumerate(items):
-            if stop_event is not None and stop_event.is_set():
-                # Corte cooperativo — el resto del batch vuelve al buffer.
-                requeued.extend(items[idx:])
-                break
-            try:
-                outcome = self._propagate_item(item, states.get(item.document.txn_num))
-            except Exception as exc:  # noqa: BLE001
-                # Una falla per-ítem NO arrastra al resto del batch.
-                failed += 1
-                requeued.append(item)
-                self._log_failure(item, exc)
-                continue
-            if isinstance(outcome, ReconcileConflict):
-                conflicts.append(outcome)
-            elif outcome == "synced":
-                synced_as400.append(item.document.txn_num)
-            # "consistent" → AS400 ya estaba al día: ni sync ni conflicto.
+        tally = _PassTally()
+        states = self._read_states(items, tally)
+        if states is None:
+            items = []  # la lectura falló: ya está todo en requeued
+            states = {}
+        self._propagate_all(items, states, stop_event, tally, ProgressEmitter(on_progress))
         try:
             synced_local = self._import_foreign_uploads(import_scope or set())
         except Exception:  # noqa: BLE001
             _log.exception("reconcile: import_foreign_uploads falló")
             synced_local = []
         result = ReconcileResult(
-            synced_to_as400=synced_as400,
+            synced_to_as400=tally.synced,
             synced_to_local=synced_local,
-            conflicts=conflicts,
+            conflicts=tally.conflicts,
             stale_cleaned=stale,
-            failed=failed,
-            requeued=requeued,
+            failed=tally.failed,
+            requeued=tally.requeued,
         )
         self._log_pass(result, duration_ms=round((time.monotonic() - t0) * 1000.0, 3))
         return result
 
     # ------------------------------------------------------------- internos
 
-    def _propagate_item(
-        self, item: PendingSyncItem, row: object
-    ) -> ReconcileConflict | Literal["synced", "consistent"]:
-        """117: propaga un doc local a AS400 con UN solo write.
+    def _read_states(
+        self, items: list[PendingSyncItem], tally: _PassTally
+    ) -> dict[str, object] | None:
+        """117: UNA lectura batcheada (IN chunkeado, 113) para todo el
+        batch — pre-117 era un SELECT por item. Si la lectura falla
+        (AS400 caído), TODO el batch va a requeued (098: nunca se pierde
+        un item) y devuelve ``None``."""
+        if not items:
+            return {}
+        try:
+            return dict(self._as400.read_states_by_txns([it.document.txn_num for it in items]))
+        except Exception as exc:  # noqa: BLE001
+            _log.exception("reconcile: lectura batcheada falló — se re-encola el batch")
+            for item in items:
+                tally.failed += 1
+                tally.requeued.append(item)
+                self._log_failure(item, exc)
+            return None
+
+    def _propagate_all(
+        self,
+        items: list[PendingSyncItem],
+        states: dict[str, object],
+        stop_event: threading.Event | None,
+        tally: _PassTally,
+        emit: ProgressEmitter,
+    ) -> None:
+        """144: despacha los writes al pool con una ventana de a lo sumo
+        ``write_workers`` en vuelo. La ventana (y no un ``submit`` de
+        todo el batch) es lo que mantiene al ``stop_event`` cooperativo:
+        se chequea antes de CADA despacho, y lo no despachado vuelve
+        al buffer. Los ya despachados terminan — un write a medias no
+        se corta."""
+        total = len(items)
+        emit(SYNC_PHASE_LABEL, 0, total)
+        done = next_idx = 0
+        pending: dict[Future[_ItemOutcome], PendingSyncItem] = {}
+        with ThreadPoolExecutor(
+            max_workers=min(self._write_workers, max(1, total)), thread_name_prefix="reconcile-w"
+        ) as pool:
+            while next_idx < total or pending:
+                while next_idx < total and len(pending) < self._write_workers:
+                    if stop_event is not None and stop_event.is_set():
+                        # Corte cooperativo — el resto del batch vuelve al buffer.
+                        tally.requeued.extend(items[next_idx:])
+                        next_idx = total
+                        break
+                    item = items[next_idx]
+                    row = states.get(item.document.txn_num)
+                    pending[pool.submit(self._propagate_item, item, row)] = item
+                    next_idx += 1
+                if not pending:
+                    break
+                finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    self._collect(pending.pop(future), future, tally)
+                    done += 1
+                    if done % _PROGRESS_EVERY == 0:
+                        emit(SYNC_PHASE_LABEL, done, total)
+        if done % _PROGRESS_EVERY != 0:
+            emit(SYNC_PHASE_LABEL, done, total)
+
+    def _collect(
+        self, item: PendingSyncItem, future: Future[_ItemOutcome], tally: _PassTally
+    ) -> None:
+        """Clasifica el resultado de UN write. Una falla per-ítem NO
+        arrastra al resto del batch (098)."""
+        try:
+            outcome = future.result()
+        except Exception as exc:  # noqa: BLE001
+            tally.failed += 1
+            tally.requeued.append(item)
+            self._log_failure(item, exc)
+            return
+        if isinstance(outcome, ReconcileConflict):
+            tally.conflicts.append(outcome)
+        elif outcome == "synced":
+            tally.synced.append(item.document.txn_num)
+        # "consistent" → AS400 ya estaba al día: ni sync ni conflicto.
+
+    def _propagate_item(self, item: PendingSyncItem, row: object) -> _ItemOutcome:
+        """117: propaga un doc local a AS400 con UN solo write. 144:
+        corre en un hilo del pool — no toca estado compartido.
 
         ``row`` viene de la lectura batcheada de ``run_pass`` (por
         TRNNUM — convención del banco: máx. una fila por txn, 034 fase
@@ -373,16 +457,24 @@ class PeriodicReconciler:
         while not self._stop.wait(self._interval_s):
             self.run_one(stop_event=self._stop)
 
-    def run_one(self, *, stop_event: threading.Event | None = None) -> ReconcileResult:
+    def run_one(
+        self,
+        *,
+        stop_event: threading.Event | None = None,
+        on_progress: Callable[[SyncProgress], None] | None = None,
+    ) -> ReconcileResult:
         """Una pasada: drena el buffer, reconcilia, y **re-encola** los
         ítems que fallaron o quedaron sin procesar (098 — nunca se pierde
-        un ítem drenado). No propaga excepciones."""
+        un ítem drenado). No propaga excepciones. ``on_progress`` (144)
+        va tal cual a ``run_pass``."""
         items = self._buffer.drain()
         scope: set[str] = set()
         if self._import_scope_provider is not None:
             scope = self._import_scope_provider()
         try:
-            result = self._reconciler.run_pass(items, import_scope=scope, stop_event=stop_event)
+            result = self._reconciler.run_pass(
+                items, import_scope=scope, stop_event=stop_event, on_progress=on_progress
+            )
         except Exception:  # noqa: BLE001 — defensa: run_pass ya no debería levantar
             _log.exception("periodic reconcile pass failed — se re-encola el batch entero")
             # Nada de lo drenado se pierde: vuelve completo al buffer.
@@ -394,16 +486,44 @@ class PeriodicReconciler:
             self._buffer.append(it)
         return result
 
-    def stop(self, *, join_timeout_s: float = 120.0) -> ReconcileResult:
+    def stop(
+        self,
+        *,
+        join_timeout_s: float = 120.0,
+        on_progress: Callable[[SyncProgress], None] | None = None,
+    ) -> ReconcileResult:
         """Para el daemon y corre la pasada FINAL.
 
         098: el daemon corta rápido (chequea ``_stop`` entre ítems) y
         re-encola lo que no procesó. La pasada final corre **sin**
         ``stop_event`` — procesa el buffer completo — y en el thread
         no-daemon que la llama, así que el cierre del proceso no la
-        puede matar a mitad."""
+        puede matar a mitad. 144: sólo ESTA pasada reporta progreso
+        (``on_progress``) — es la que el operador ve como cierre."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=join_timeout_s)
             self._thread = None
-        return self.run_one()  # sin stop_event → drena y procesa TODO
+        # sin stop_event → drena y procesa TODO
+        return self.run_one(on_progress=on_progress)
+
+
+def stop_reconciler_visibly(
+    reconciler: PeriodicReconciler, pool_stats: WorkerPoolStats | None
+) -> ReconcileResult:
+    """144: para el reconciliador publicando la pasada final como fase
+    de cierre en ``pool_stats`` — el monitor muestra ``cerrando ·
+    sincronizando AS400 k/N`` en lugar de "corriendo".
+
+    Lo comparten los tres orquestadores (streaming, batched, multi-batch).
+    ``pool_stats=None`` (dobles de test sin stats) degrada a un ``stop()``
+    pelado. La fase se limpia SIEMPRE, incluso si ``stop`` levanta."""
+    if pool_stats is None:
+        return reconciler.stop()
+    pool_stats.set_closing(SYNC_PHASE_LABEL, 0, 0)
+    try:
+        return reconciler.stop(
+            on_progress=lambda ev: pool_stats.set_closing(ev.phase, ev.done, ev.total)
+        )
+    finally:
+        pool_stats.clear_closing()

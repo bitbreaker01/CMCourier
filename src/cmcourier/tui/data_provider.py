@@ -38,6 +38,7 @@ from cmcourier.orchestrators.streaming import StreamingSnapshot
 from cmcourier.services.auto_tune import AutoTuneController
 from cmcourier.services.lane_controller import LaneController, LaneSnapshot
 from cmcourier.services.worker_pool_stats import (
+    ClosingPhase,
     ResizableSemaphore,
     WorkerPoolStats,
     WorkerPoolStatsSnapshot,
@@ -131,6 +132,11 @@ class TUISnapshot:
 
     # ---------- 064: snapshot del tab BUCKET en `streaming` (None en `batched`)
     bucket: StreamingSnapshot | None = None
+
+    # ---------- 144: fase de cierre (pasada final del reconciler). None fuera
+    # del cierre; mientras exista, el monitor muestra "cerrando · label k/N"
+    # en lugar de "corriendo".
+    closing: ClosingPhase | None = None
 
 
 class TUIDataProvider:
@@ -326,6 +332,7 @@ class TUIDataProvider:
             pool_in_use=pool.busy,
             pool_idle=max(0, self._concurrency_limit.capacity - pool.busy),
             queue_depth=pool.queue_depth,
+            closing=pool.closing,
             auto_tune_enabled=bw_cfg.enabled,
             auto_tune_target_p95_ms=bw_cfg.target_p95_ms,
             auto_tune_observed_p95_ms=self._metrics.current_stage_p95(UPLOAD_STAGE),

@@ -26,14 +26,17 @@ class _FakeProvider:
         planned_total: int | None = None,
         window_rate: float | None = 1.0,
         eta_run_s: float | None = None,
+        closing: object | None = None,
     ) -> None:
         self._complete = complete
         self._planned_total = planned_total
         self._window_rate = window_rate
         self._eta_run_s = eta_run_s
+        self._closing = closing
 
     def snapshot(self) -> TUISnapshot:
         return TUISnapshot(
+            closing=self._closing,  # type: ignore[arg-type]
             pipeline="csv-trigger",
             batch_id="b-mock",
             elapsed_s=12.0,
@@ -155,6 +158,40 @@ class TestMonitor:
                 header = str(app.query_one("#mon-header", Static).renderable)
                 assert "subidos 42" in header
                 assert "503 server" in header
+
+        asyncio.run(_run())
+
+    def test_monitor_shows_closing_phase_instead_of_corriendo(self, tmp_path: Path) -> None:
+        # 144: mientras la pasada final del reconciliador corre, el estado
+        # es `cerrando · sincronizando AS400 k/N`, no "corriendo".
+        from cmcourier.services.worker_pool_stats import ClosingPhase
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            provider = _FakeProvider(closing=ClosingPhase("sincronizando AS400", 50, 120))
+            app.run_manager = _FakeManager(provider)  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                app.query_one(MonitorPane).refresh_monitor()
+                await pilot.pause()
+                header = str(app.query_one("#mon-header", Static).renderable)
+                assert "cerrando · sincronizando AS400 50/120" in header
+                assert "corriendo" not in header
+
+        asyncio.run(_run())
+
+    def test_monitor_says_corriendo_without_closing_phase(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            app.run_manager = _FakeManager(_FakeProvider())  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                app.query_one(MonitorPane).refresh_monitor()
+                await pilot.pause()
+                header = str(app.query_one("#mon-header", Static).renderable)
+                assert "corriendo" in header
 
         asyncio.run(_run())
 

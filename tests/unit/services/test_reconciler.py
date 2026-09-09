@@ -97,6 +97,10 @@ def _item(
     )
 
 
+def _boom() -> bool:
+    raise RuntimeError("AS400 boom")
+
+
 def _row(*, txn: str = "0000001", stscod: str = "O", objidn: str = "cm-aaa") -> NiarvilogRow:
     now = datetime(2025, 11, 17, 10, 0, 0)
     return NiarvilogRow(
@@ -358,8 +362,12 @@ class TestReconcilerResilience:
         as400 = MagicMock()
         as400.cleanup_stale_in_progress.return_value = 0
         as400.read_states_by_txns.return_value = {}
-        # El 2do ítem explota en el write; el 1ro y el 3ro están OK.
-        as400.insert_terminal.side_effect = [True, RuntimeError("AS400 boom"), True]
+        # El 2do ítem explota en el write; el 1ro y el 3ro están OK. 144:
+        # el write es paralelo, así que la falla se ata al txn, no al
+        # orden de llamada.
+        as400.insert_terminal.side_effect = lambda **kw: (
+            _boom() if kw["document"].txn_num == "0000002" else True
+        )
         rec = As400Reconciler(sqlite_store=sqlite, as400_store=as400)
 
         items = [_item(txn="0000001"), _item(txn="0000002"), _item(txn="0000003")]
@@ -425,3 +433,227 @@ class TestReconcilerResilience:
         periodic.run_one()
         # El ítem que falló volvió al buffer — no se perdió.
         assert len(buf) == 1
+
+
+# ---------------------------------------------------------------------------
+# 144 — pasada en paralelo + progreso
+# ---------------------------------------------------------------------------
+
+
+def _as400_ok() -> MagicMock:
+    as400 = MagicMock()
+    as400.cleanup_stale_in_progress.return_value = 0
+    as400.read_states_by_txns.return_value = {}
+    as400.insert_terminal.return_value = True
+    return as400
+
+
+class TestReconcilerParallelPass144:
+    """144: ``run_pass`` propaga con un pool acotado (``write_workers``)."""
+
+    def test_all_items_propagated_with_bounded_concurrency(self) -> None:
+        import time
+
+        as400 = _as400_ok()
+        lock = threading.Lock()
+        in_flight = 0
+        peak = 0
+
+        def _insert(**kw: object) -> bool:
+            nonlocal in_flight, peak
+            with lock:
+                in_flight += 1
+                peak = max(peak, in_flight)
+            time.sleep(0.005)
+            with lock:
+                in_flight -= 1
+            return True
+
+        as400.insert_terminal.side_effect = _insert
+        rec = As400Reconciler(sqlite_store=MagicMock(), as400_store=as400, write_workers=4)
+
+        items = [_item(txn=f"{i:07d}") for i in range(1, 21)]
+        result = rec.run_pass(items)
+
+        assert sorted(result.synced_to_as400) == [f"{i:07d}" for i in range(1, 21)]
+        assert result.failed == 0 and result.requeued == []
+        assert peak <= 4, f"el pool superó write_workers: {peak}"
+        assert peak >= 2, "los writes no se solaparon — la pasada sigue siendo serial"
+
+    def test_one_failing_item_is_requeued_and_the_rest_synced(self) -> None:
+        as400 = _as400_ok()
+        as400.insert_terminal.side_effect = lambda **kw: (
+            _boom() if kw["document"].txn_num == "0000005" else True
+        )
+        rec = As400Reconciler(sqlite_store=MagicMock(), as400_store=as400, write_workers=3)
+
+        items = [_item(txn=f"{i:07d}") for i in range(1, 11)]
+        result = rec.run_pass(items)
+
+        assert result.failed == 1
+        assert [it.document.txn_num for it in result.requeued] == ["0000005"]
+        assert len(result.synced_to_as400) == 9
+        assert "0000005" not in result.synced_to_as400
+
+    def test_stop_event_mid_pass_requeues_unsubmitted_items(self) -> None:
+        as400 = _as400_ok()
+        stop = threading.Event()
+
+        def _insert_and_stop(**kw: object) -> bool:
+            stop.set()  # se pide parar mientras el 1er write está en vuelo
+            return True
+
+        as400.insert_terminal.side_effect = _insert_and_stop
+        rec = As400Reconciler(sqlite_store=MagicMock(), as400_store=as400, write_workers=1)
+
+        items = [_item(txn="0000001"), _item(txn="0000002"), _item(txn="0000003")]
+        result = rec.run_pass(items, stop_event=stop)
+
+        # El ya despachado termina; los no despachados vuelven al buffer.
+        assert result.synced_to_as400 == ["0000001"]
+        assert [it.document.txn_num for it in result.requeued] == ["0000002", "0000003"]
+        assert result.failed == 0
+
+    def test_conflicts_still_detected_in_parallel(self) -> None:
+        as400 = _as400_ok()
+        as400.read_states_by_txns.return_value = {
+            "0000002": _row(txn="0000002", stscod="O", objidn="cm-OTHER"),
+        }
+        # El 3ro pierde la race del write.
+        as400.insert_terminal.side_effect = lambda **kw: kw["document"].txn_num != "0000003"
+        rec = As400Reconciler(sqlite_store=MagicMock(), as400_store=as400, write_workers=4)
+
+        result = rec.run_pass([_item(txn=f"{i:07d}") for i in range(1, 4)])
+
+        assert result.synced_to_as400 == ["0000001"]
+        assert sorted(c.txn_num for c in result.conflicts) == ["0000002", "0000003"]
+        assert result.failed == 0
+
+    def test_progress_events_start_every_50_and_end(self) -> None:
+        from cmcourier.services.recovery import SyncProgress
+
+        as400 = _as400_ok()
+        rec = As400Reconciler(sqlite_store=MagicMock(), as400_store=as400, write_workers=4)
+        events: list[SyncProgress] = []
+        calling_thread = threading.get_ident()
+        emitting_threads: set[int] = set()
+
+        def _on_progress(ev: SyncProgress) -> None:
+            emitting_threads.add(threading.get_ident())
+            events.append(ev)
+
+        items = [_item(txn=f"{i:07d}") for i in range(1, 121)]
+        rec.run_pass(items, on_progress=_on_progress)
+
+        assert [(e.done, e.total) for e in events] == [(0, 120), (50, 120), (100, 120), (120, 120)]
+        assert {e.phase for e in events} == {"sincronizando AS400"}
+        # Nunca desde los hilos del pool — el callback toca UI.
+        assert emitting_threads == {calling_thread}
+
+    def test_progress_exact_multiple_does_not_emit_twice_at_end(self) -> None:
+        as400 = _as400_ok()
+        rec = As400Reconciler(sqlite_store=MagicMock(), as400_store=as400, write_workers=2)
+        seen: list[tuple[int, int]] = []
+        rec.run_pass(
+            [_item(txn=f"{i:07d}") for i in range(1, 51)],
+            on_progress=lambda ev: seen.append((ev.done, ev.total)),
+        )
+        assert seen == [(0, 50), (50, 50)]
+
+    def test_progress_with_no_items_emits_zero_over_zero(self) -> None:
+        as400 = _as400_ok()
+        rec = As400Reconciler(sqlite_store=MagicMock(), as400_store=as400)
+        seen: list[tuple[int, int]] = []
+        rec.run_pass([], on_progress=lambda ev: seen.append((ev.done, ev.total)))
+        assert seen == [(0, 0)]
+
+    def test_raising_progress_callback_does_not_abort_pass(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        as400 = _as400_ok()
+        rec = As400Reconciler(sqlite_store=MagicMock(), as400_store=as400)
+
+        def _broken(ev: object) -> None:
+            raise RuntimeError("widget muerto")
+
+        with caplog.at_level("ERROR", logger="cmcourier.services"):
+            result = rec.run_pass([_item(txn="0000001")], on_progress=_broken)
+        assert result.synced_to_as400 == ["0000001"]
+        assert any("on_progress" in r.getMessage() for r in caplog.records)
+
+
+class TestPeriodicReconcilerProgress144:
+    def test_run_one_forwards_on_progress(self) -> None:
+        reconciler = MagicMock()
+        periodic = PeriodicReconciler(
+            reconciler=reconciler, buffer=PendingSyncBuffer(), interval_s=999
+        )
+        cb = MagicMock()
+        periodic.run_one(on_progress=cb)
+        assert reconciler.run_pass.call_args.kwargs["on_progress"] is cb
+
+    def test_stop_forwards_on_progress_to_the_final_pass(self) -> None:
+        reconciler = MagicMock()
+        periodic = PeriodicReconciler(
+            reconciler=reconciler, buffer=PendingSyncBuffer(), interval_s=999
+        )
+        cb = MagicMock()
+        periodic.stop(join_timeout_s=1.0, on_progress=cb)
+        kwargs = reconciler.run_pass.call_args.kwargs
+        assert kwargs["on_progress"] is cb
+        assert kwargs["stop_event"] is None  # la pasada final procesa TODO
+
+    def test_daemon_pass_does_not_forward_progress(self) -> None:
+        # Sólo la pasada FINAL reporta al monitor; el daemon corre mudo.
+        reconciler = MagicMock()
+        periodic = PeriodicReconciler(
+            reconciler=reconciler, buffer=PendingSyncBuffer(), interval_s=999
+        )
+        periodic.run_one(stop_event=threading.Event())
+        assert reconciler.run_pass.call_args.kwargs["on_progress"] is None
+
+
+class TestStopReconcilerVisibly144:
+    """144: el helper compartido por los tres orquestadores."""
+
+    def test_sets_progress_on_pool_stats_and_clears_at_the_end(self) -> None:
+        from cmcourier.services.reconciler import stop_reconciler_visibly
+        from cmcourier.services.recovery import SyncProgress
+        from cmcourier.services.worker_pool_stats import WorkerPoolStats
+
+        stats = WorkerPoolStats()
+        seen: list[tuple[str, int, int] | None] = []
+
+        class _Recon:
+            def stop(self, *, on_progress=None):  # noqa: ANN001, ANN202
+                c = stats.snapshot().closing
+                seen.append((c.label, c.done, c.total) if c else None)
+                on_progress(SyncProgress("sincronizando AS400", 50, 120))
+                c = stats.snapshot().closing
+                seen.append((c.label, c.done, c.total) if c else None)
+                return "final-result"
+
+        result = stop_reconciler_visibly(_Recon(), stats)  # type: ignore[arg-type]
+
+        assert result == "final-result"
+        assert seen == [("sincronizando AS400", 0, 0), ("sincronizando AS400", 50, 120)]
+        assert stats.snapshot().closing is None
+
+    def test_clears_closing_even_if_stop_raises(self) -> None:
+        from cmcourier.services.reconciler import stop_reconciler_visibly
+        from cmcourier.services.worker_pool_stats import WorkerPoolStats
+
+        stats = WorkerPoolStats()
+        recon = MagicMock()
+        recon.stop.side_effect = RuntimeError("boom")
+        with pytest.raises(RuntimeError):
+            stop_reconciler_visibly(recon, stats)
+        assert stats.snapshot().closing is None
+
+    def test_without_pool_stats_just_stops(self) -> None:
+        from cmcourier.services.reconciler import stop_reconciler_visibly
+
+        recon = MagicMock()
+        recon.stop.return_value = "r"
+        assert stop_reconciler_visibly(recon, None) == "r"
+        recon.stop.assert_called_once_with()

@@ -36,6 +36,9 @@ def _make_orchestrator(bucket_size: int = 4) -> StreamingOrchestrator:
     orch._pipeline = SimpleNamespace(lane_controller=None)  # noqa: SLF001
     orch._bucket_size = bucket_size  # noqa: SLF001
     orch._publish_pending_count = lambda: None  # type: ignore[method-assign] # noqa: SLF001
+    # 144: contador de píldoras que el dispatcher mantiene al fan-outear.
+    orch._pills_pending = 0  # noqa: SLF001
+    orch._pills_lock = threading.Lock()  # noqa: SLF001
     return orch
 
 

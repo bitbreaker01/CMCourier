@@ -57,6 +57,7 @@ from cmcourier.orchestrators.multi_batch import ChunkState, MultiBatchRunReport
 from cmcourier.orchestrators.staged import RunReport, StagedPipeline, _StageItem
 from cmcourier.services.cancellation import CancellationToken
 from cmcourier.services.lane_controller import Lane, LaneController, LaneSnapshot
+from cmcourier.services.reconciler import stop_reconciler_visibly
 
 _log = logging.getLogger(__name__)
 
@@ -199,6 +200,11 @@ class StreamingOrchestrator:
         # el qsize real de vuelta a pool_stats y al lane controller.
         self._heavy_queue: queue.Queue[_StageItem | object] | None = None
         self._light_queue: queue.Queue[_StageItem | object] | None = None
+        # 144: píldoras `_POISON` encoladas y todavía no retiradas. Se
+        # descuentan del pending publicado — pre-144 ``qsize()`` las
+        # contaba y el monitor mostraba ``30 pending`` tras el último doc.
+        self._pills_pending = 0
+        self._pills_lock = threading.Lock()
         # 065: `lane`s heavy/light. ``None`` mantiene el path
         # single-lane de 063 byte-idéntico.
         # 070: el LaneController es propiedad del StagedPipeline
@@ -304,7 +310,25 @@ class StreamingOrchestrator:
             total += int(self._heavy_queue.qsize())
         if self._light_queue is not None:
             total += int(self._light_queue.qsize())
-        self._pipeline.pool_stats.set_queue_depth(total)
+        # 144: las píldoras no son trabajo pendiente.
+        with self._pills_lock:
+            total -= self._pills_pending
+        self._pipeline.pool_stats.set_queue_depth(max(0, total))
+
+    def _put_pill(self, target: queue.Queue[_StageItem | object]) -> None:
+        """144: encola una ``_POISON`` contándola ANTES del ``put`` — si
+        un consumer la retira antes de que actualicemos el contador, el
+        pending publicado nunca queda negativo ni la cuenta dos veces."""
+        with self._pills_lock:
+            self._pills_pending += 1
+        target.put(_POISON)
+
+    def _pop_pill(self) -> None:
+        """144: un consumer/dispatcher retiró una píldora → republica el
+        pending para que el monitor baje a ``0 pending`` con el último doc."""
+        with self._pills_lock:
+            self._pills_pending = max(0, self._pills_pending - 1)
+        self._publish_pending_count()
 
     def _publish_chunk_state(
         self,
@@ -389,6 +413,8 @@ class StreamingOrchestrator:
         bucket: queue.Queue[_StageItem | object] = queue.Queue(maxsize=self._bucket_size)
         self._bucket = bucket
         self._peak_qsize = 0
+        with self._pills_lock:
+            self._pills_pending = 0
         tally = _StreamingTally()
         tally_lock = threading.Lock()
 
@@ -519,7 +545,7 @@ class StreamingOrchestrator:
                 # Señaliza fin de `stream` al dispatcher; éste
                 # forwardea `_POISON` a ambas `queue`s de `lane` ×
                 # cantidad de `consumer`s.
-                bucket.put(_POISON)
+                self._put_pill(bucket)
                 dispatcher.join()
                 for c in heavy_consumers:
                     c.join()
@@ -545,7 +571,7 @@ class StreamingOrchestrator:
                 # Los `producer`s terminaron; aseguramos que los
                 # `consumer`s reciban N `poison pill`s.
                 for _ in range(self._consumer_count):
-                    bucket.put(_POISON)
+                    self._put_pill(bucket)
                 for c in consumers:
                     c.join()
         finally:
@@ -558,7 +584,9 @@ class StreamingOrchestrator:
             if shutdown_pools is not None:
                 shutdown_pools()
             if periodic_recon is not None:
-                periodic_recon.stop()
+                # 144: la pasada final se ve en el monitor como fase de
+                # cierre (``cerrando · sincronizando AS400 k/N``).
+                stop_reconciler_visibly(periodic_recon, getattr(self._pipeline, "pool_stats", None))
             if self._lane_controller is not None:
                 self._lane_controller.stop()
             if controller is not None:
@@ -704,6 +732,7 @@ class StreamingOrchestrator:
             item = bucket.get()
             try:
                 if item is _POISON:
+                    self._pop_pill()  # 144: republica sin la píldora
                     return
                 # 067: un `consumer` acaba de hacer pop → los
                 # pendientes bajan en 1.
@@ -810,10 +839,13 @@ class StreamingOrchestrator:
                         while buf:
                             queues[lane].put(buf.popleft())
                         report_depth(lane)
+                    # 144: la píldora del bucket se retira y se fan-outea
+                    # a las lanes — el contador sigue a cada una.
+                    self._pop_pill()
                     for _ in range(heavy_consumer_count):
-                        heavy_queue.put(_POISON)
+                        self._put_pill(heavy_queue)
                     for _ in range(light_consumer_count):
-                        light_queue.put(_POISON)
+                        self._put_pill(light_queue)
                     return
                 stage_item: _StageItem = item  # type: ignore[assignment]
                 size_bytes = (
@@ -855,6 +887,7 @@ class StreamingOrchestrator:
             item = lane_queue.get()
             try:
                 if item is _POISON:
+                    self._pop_pill()  # 144: republica sin la píldora
                     return
                 # 067: el `consumer` acaba de hacer pop → reporta el
                 # qsize en vivo para que la heurística de drenaje

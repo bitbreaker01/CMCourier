@@ -7,11 +7,45 @@ import threading
 import pytest
 
 from cmcourier.services.worker_pool_stats import (
+    ClosingPhase,
     WorkerPoolStats,
     WorkerPoolStatsSnapshot,
 )
 
 pytestmark = pytest.mark.unit
+
+
+class TestClosingPhase144:
+    """144: fase de cierre visible (pasada final del reconciliador)."""
+
+    def test_closing_is_none_by_default(self) -> None:
+        assert WorkerPoolStats().snapshot().closing is None
+
+    def test_set_closing_is_visible_in_snapshot(self) -> None:
+        stats = WorkerPoolStats()
+        stats.set_closing("sincronizando AS400", 50, 3000)
+        assert stats.snapshot().closing == ClosingPhase("sincronizando AS400", 50, 3000)
+
+    def test_set_closing_overwrites_previous_phase(self) -> None:
+        stats = WorkerPoolStats()
+        stats.set_closing("sincronizando AS400", 0, 0)
+        stats.set_closing("sincronizando AS400", 100, 3000)
+        closing = stats.snapshot().closing
+        assert closing is not None
+        assert (closing.done, closing.total) == (100, 3000)
+
+    def test_clear_closing_resets_to_none(self) -> None:
+        stats = WorkerPoolStats()
+        stats.set_closing("sincronizando AS400", 1, 2)
+        stats.clear_closing()
+        assert stats.snapshot().closing is None
+
+    def test_snapshot_constructor_keeps_working_without_closing(self) -> None:
+        # Campo trailing con default — los callers pre-144 no cambian.
+        snap = WorkerPoolStatsSnapshot(
+            pool_size=1, busy=0, idle=1, queue_depth=0, completed=0, failed=0
+        )
+        assert snap.closing is None
 
 
 class TestWorkerPoolStats:

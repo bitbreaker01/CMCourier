@@ -86,6 +86,7 @@ from cmcourier.services.lane_splitter import Lane
 from cmcourier.services.lane_splitter import split as split_lanes
 from cmcourier.services.mapping import MappingService
 from cmcourier.services.metadata import MetadataService
+from cmcourier.services.reconciler import stop_reconciler_visibly
 from cmcourier.services.worker_pool_stats import ResizableSemaphore, WorkerPoolStats
 
 _log = logging.getLogger(__name__)
@@ -595,9 +596,10 @@ class StagedPipeline:
                 self._sampler.stop()
             # 096: para el daemon y corre la pasada de reconciliación
             # final. Después del flush de SQLite para que el último
-            # estado terminal esté visible para la pasada final.
+            # estado terminal esté visible para la pasada final. 144:
+            # la pasada se publica como fase de cierre en pool_stats.
             if self._periodic_reconciler is not None:
-                self._periodic_reconciler.stop()
+                stop_reconciler_visibly(self._periodic_reconciler, self._pool_stats)
 
         elapsed = time.monotonic() - start
         total_docs = s1_done + skipped

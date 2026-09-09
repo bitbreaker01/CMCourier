@@ -14,11 +14,22 @@ manera segura desde cualquier `thread`.
 
 from __future__ import annotations
 
-__all__ = ["ResizableSemaphore", "WorkerPoolStats", "WorkerPoolStatsSnapshot"]
+__all__ = ["ClosingPhase", "ResizableSemaphore", "WorkerPoolStats", "WorkerPoolStatsSnapshot"]
 
 import threading
 from dataclasses import dataclass
 from types import TracebackType
+
+
+@dataclass(frozen=True, slots=True)
+class ClosingPhase:
+    """144: fase de cierre de la corrida (p. ej. la pasada final del
+    reconciliador AS400). ``done``/``total`` son ``0/0`` mientras no
+    hay conteo; ``label`` es texto para el operador."""
+
+    label: str
+    done: int
+    total: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +42,9 @@ class WorkerPoolStatsSnapshot:
     queue_depth: int
     completed: int
     failed: int
+    # 144: ``None`` salvo durante el cierre de la corrida. Campo trailing
+    # con default para que los constructores pre-144 sigan funcionando.
+    closing: ClosingPhase | None = None
 
 
 class WorkerPoolStats:
@@ -53,8 +67,19 @@ class WorkerPoolStats:
         self._completed = 0
         self._failed = 0
         self._queue_depth = 0
+        self._closing: ClosingPhase | None = None
 
     # ------------------------------------------------------- mutadores
+
+    def set_closing(self, label: str, done: int, total: int) -> None:
+        """144: publica (o actualiza) la fase de cierre visible."""
+        with self._lock:
+            self._closing = ClosingPhase(label, max(0, int(done)), max(0, int(total)))
+
+    def clear_closing(self) -> None:
+        """144: la corrida terminó de cerrar — vuelve a ``None``."""
+        with self._lock:
+            self._closing = None
 
     def set_pool_size(self, n: int) -> None:
         with self._lock:
@@ -100,6 +125,7 @@ class WorkerPoolStats:
                 queue_depth=self._queue_depth,
                 completed=self._completed,
                 failed=self._failed,
+                closing=self._closing,
             )
 
 
