@@ -523,7 +523,11 @@ class CredsPane(VerticalScroll):
             return  # la tarjeta desapareció mientras el worker corría
         ok = result.status is CheckStatus.PASS
         msg = f"{result.message} · {elapsed_ms:.0f} ms" if ok else result.message
-        self.console.state.record_conn_result(alias, ok=ok, message=msg)
+        # `phase=query`: el iSeries YA aceptó el login y falló la consulta de
+        # prueba — no es un sign-on inválido, no gasta intento de lockout.
+        self.console.state.record_conn_result(
+            alias, ok=ok, message=msg, counts_attempt=result.details.get("phase") != "query"
+        )
         if ok:
             self.console.state.reset_attempts(alias)
         self.render_conn(alias)

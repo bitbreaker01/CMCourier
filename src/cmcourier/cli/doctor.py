@@ -46,7 +46,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 
 from cmcourier.adapters.assembly import PdfAssembler
 from cmcourier.adapters.sources import (
@@ -223,15 +223,20 @@ def check_connection(config: PipelineConfig, secrets: Secrets, alias: str) -> Ch
                 message=f"connection alias {alias!r} is not declared in this config",
             )
         ref = ConnectionRef(alias, spec.kind, spec, "connections")
-    outcome = _probe_connection(ref, secrets)
-    if outcome != "PASS":
+    probe = _probe_connection(ref, secrets)
+    details = _frozen({"phase": probe.phase})
+    if probe.outcome != "PASS":
         return CheckResult(
-            name=name, status=CheckStatus.FAIL, message=outcome.removeprefix("FAIL: ")
+            name=name,
+            status=CheckStatus.FAIL,
+            message=probe.outcome.removeprefix("FAIL: "),
+            details=details,
         )
     return CheckResult(
         name=name,
         status=CheckStatus.PASS,
         message=f"{ref.kind} reachable at {ref.spec.host} ({alias})",
+        details=details,
     )
 
 
@@ -530,7 +535,7 @@ def _check_connections(
     # la fila de detalle se desambigua por host para no pisar ninguna.
     alias_counts = Counter(ref.alias for ref, _ in groups)
     for ref, sites in groups:
-        outcome = _probe_connection(ref, secrets)
+        outcome = _probe_connection(ref, secrets).outcome
         key = ref.alias if alias_counts[ref.alias] == 1 else f"{ref.alias}@{ref.spec.host}"
         details[key] = f"{outcome} · {' · '.join(sites)}"
         if outcome != "PASS":
@@ -564,20 +569,54 @@ def _group_refs(config: PipelineConfig, kind: str) -> list[tuple[ConnectionRef, 
     return list(groups.values())
 
 
-def _probe_connection(ref: ConnectionRef, secrets: Secrets) -> str:
-    """``"PASS"`` o ``"FAIL: <motivo>"`` para una conexión concreta del registro."""
+class _Probe(NamedTuple):
+    """Resultado de ``_probe_connection``: ``outcome`` es ``"PASS"`` o
+    ``"FAIL: <motivo>"``; ``phase`` dice DÓNDE falló — ``connect`` (login
+    rechazado / host inalcanzable: cuenta como intento de sign-on en el
+    iSeries) o ``query`` (el login pasó y falló la consulta de prueba: NO
+    es un sign-on fallido y no acerca al perfil al lockout)."""
+
+    outcome: str
+    phase: str
+
+
+def _probe_connection(ref: ConnectionRef, secrets: Secrets) -> _Probe:
     if secrets.get(ref.alias) is None:
         user_var, pass_var = ref.env_vars
-        return f"FAIL: credentials missing in environment (set {user_var} / {pass_var})"
+        return _Probe(
+            f"FAIL: credentials missing in environment (set {user_var} / {pass_var})", "config"
+        )
     try:
         src = _open_odbc(ref, secrets)
+    except Exception as exc:  # noqa: BLE001
+        return _Probe(f"FAIL: {_describe_error(exc)}", "config")
+    try:
+        try:
+            src.ping()
+        except Exception as exc:  # noqa: BLE001
+            return _Probe(f"FAIL: no conectó — {_describe_error(exc)}", "connect")
         try:
             src.query(_PROBE_SQL_BY_KIND[ref.kind], [])
-        finally:
-            src.close()
-    except Exception as exc:  # noqa: BLE001
-        return f"FAIL: {type(exc).__name__}: {str(exc)[:200]}"
-    return "PASS"
+        except Exception as exc:  # noqa: BLE001
+            return _Probe(
+                "FAIL: conectó (usuario y contraseña aceptados) pero la consulta de prueba "
+                f"{_PROBE_SQL_BY_KIND[ref.kind]!r} falló — {_describe_error(exc)}",
+                "query",
+            )
+    finally:
+        src.close()
+    return _Probe("PASS", "ok")
+
+
+def _describe_error(exc: BaseException, *, limit: int = 300) -> str:
+    """``Tipo: mensaje ← causa`` — la causa es el error crudo del driver
+    (``pyodbc.Error``), que trae el texto REAL (``SQL0332 …``, ``CWBSY0002
+    …``); el ``IndexingError`` que lo envuelve sólo conserva el sqlstate."""
+    text = f"{type(exc).__name__}: {exc}"
+    cause = exc.__cause__
+    if cause is not None and str(cause):
+        text = f"{text} ← {cause}"
+    return text[:limit]
 
 
 def _check_tracking_openable(config: PipelineConfig) -> CheckResult:

@@ -99,6 +99,13 @@ class OdbcDataSource(IDataSource):
 
     # ------------------------------------------------------------------ puertos
 
+    def ping(self) -> None:
+        """Abre (o reusa) la conexión sin ejecutar SQL: la prueba de
+        credenciales del doctor. Falla con ``IndexingError("… connection
+        failed")`` — distinta de la de ``query`` — para que el que llama
+        sepa si el login fue rechazado o si ya estaba adentro."""
+        self._connect()
+
     def query(self, sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
         cursor = self._connect().cursor()
         t0 = time.monotonic()

@@ -204,6 +204,43 @@ class TestCards:
 
         asyncio.run(_run())
 
+    def test_query_phase_failure_does_not_count_as_lockout_try(self, tmp_path: Path) -> None:
+        """Queja del operador: "intento 2 de 3 — al 3° el perfil se bloquea"
+        tras un `AS400 query failed`. Si el driver ya aceptó el login, el
+        fallo de la consulta de prueba NO es un sign-on inválido: la tarjeta
+        no suma intento ni muestra la cuenta regresiva. Un fallo de conexión
+        (`phase=connect`) sí suma."""
+
+        async def _run() -> None:
+            config, path = _registry_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "2")
+                pane = app.query_one(CredsPane)
+                fail = CheckResult(
+                    name="connection:rvi",
+                    status=CheckStatus.FAIL,
+                    message="conectó pero la consulta de prueba falló",
+                    details={"phase": "query"},
+                )
+                pane._apply_result("rvi", fail, 12.0)
+                await pilot.pause()
+                assert app.state.conn["rvi"].attempts == 0
+                assert str(app.query_one("#tries-rvi", Static).renderable) == ""
+                assert not app.state.as400_needs_lockout_confirm("rvi")
+
+                connect_fail = CheckResult(
+                    name="connection:rvi",
+                    status=CheckStatus.FAIL,
+                    message="no conectó",
+                    details={"phase": "connect"},
+                )
+                pane._apply_result("rvi", connect_fail, 12.0)
+                await pilot.pause()
+                assert app.state.conn["rvi"].attempts == 1
+
+        asyncio.run(_run())
+
 
 class TestRecompose:
     """Antagonista 129-131 I1/I2: la rama de remonte de `rebuild_cards` hoy

@@ -242,7 +242,11 @@ class ConsoleState:
             self.conn[alias] = ConnState(attempts=c.attempts, kind=c.kind)
         self.mark_doctor_stale("cambiaron las credenciales")
 
-    def record_conn_result(self, alias: str, *, ok: bool, message: str) -> None:
+    def record_conn_result(
+        self, alias: str, *, ok: bool, message: str, counts_attempt: bool = True
+    ) -> None:
+        """``counts_attempt=False``: el fallo NO fue un sign-on rechazado (el
+        login pasó y falló la consulta de prueba) — no gasta intento de lockout."""
         c = self.conn.get(alias)
         if c is None:
             return
@@ -251,7 +255,10 @@ class ConsoleState:
                 status="ok", message=message, tested_at=time.time(), kind=c.kind
             )
         else:
-            counts = c.kind == "as400"
+            # Sin `counts_attempt` el contador vuelve a 0 a propósito: el
+            # login pasó, y QMAXSIGN cuenta sign-ons inválidos CONSECUTIVOS —
+            # el iSeries también lo reinició.
+            counts = c.kind == "as400" and counts_attempt
             self.conn[alias] = ConnState(
                 status="err",
                 message=message,

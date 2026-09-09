@@ -32,6 +32,24 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
   Tab hasta la tarjeta la traen a la vista. Test de pilot a 100×30 y
   120×24 que exige que el fondo de la última tarjeta sea alcanzable con
   scroll y que ninguna se salga por la derecha.
+- **"probar conexión" as400: la tarjeta escondía el error real del
+  driver y contaba un fallo de consulta como intento de lockout.**
+  Reporte del operador: `AS400 query failed [sql_prefix='SELECT 1 FROM
+  SYSIBM.SYSDUMMY1', sqlstate='HY000']` y "intento 2 de 3". Dos cosas:
+  (1) `HY000` es "error general" — el texto que explica QUÉ pasó
+  (`[IBM][System i Access ODBC Driver] SQL0xxx …`) viajaba en el
+  `__cause__` del `IndexingError` y nadie lo mostraba; (2) "query failed"
+  significa que el login YA fue aceptado (si no, el error es "connection
+  failed"), así que ese fallo no es un sign-on inválido y no puede acercar
+  al perfil al lockout. Ahora el probe corre en dos fases explícitas —
+  `ping()` (abre la conexión: prueba de credenciales) y después la
+  consulta canónica `SELECT 1 FROM SYSIBM.SYSDUMMY1` — y el mensaje dice
+  en cuál falló, con el error crudo del driver a continuación (`… ←
+  ('HY000', '[IBM]…')`). `check_connection` publica `details["phase"]`
+  (`connect` / `query`); la consola sólo suma intento de lockout en
+  `connect` (en `query` el contador vuelve a 0: QMAXSIGN cuenta sign-ons
+  inválidos consecutivos y el login pasó). `cmcourier doctor` muestra el
+  mismo detalle.
 
 ---
 

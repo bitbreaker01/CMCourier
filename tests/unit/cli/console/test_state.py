@@ -206,6 +206,20 @@ class TestConnLifecycle:
         assert st.conn["clientes_sql"].attempts == 0
         assert not st.as400_needs_lockout_confirm("clientes_sql")
 
+    def test_query_phase_failure_does_not_spend_lockout_attempt(self) -> None:
+        """Queja del operador: el login al iSeries fue ACEPTADO y falló la
+        consulta de prueba — eso no es un sign-on inválido y no puede acercar
+        al perfil al lockout (QMAXSIGN sólo cuenta sign-ons fallidos)."""
+        st = ConsoleState.for_config(
+            _Cfg(_as400_ref("rvi", "indexing")), creds=SessionCredentials()
+        )  # type: ignore[arg-type]
+        for _ in range(3):
+            st.record_conn_result("rvi", ok=False, message="HY000", counts_attempt=False)
+        assert st.conn["rvi"].status == "err"
+        assert st.conn["rvi"].message == "HY000"
+        assert st.conn["rvi"].attempts == 0
+        assert not st.as400_needs_lockout_confirm("rvi")
+
 
 class TestDoctorVerdict:
     def test_verdict_progression(self) -> None:
