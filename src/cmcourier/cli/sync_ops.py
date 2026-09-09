@@ -24,6 +24,7 @@ __all__ = [
     "sync_unavailable_reason",
 ]
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -32,7 +33,7 @@ from cmcourier.adapters.tracking.as400_niarvilog import As400NiarvilogStore
 from cmcourier.config.loader import Secrets
 from cmcourier.config.schema import PipelineConfig
 from cmcourier.config.wiring import build_as400_recovery, build_niarvilog_store
-from cmcourier.services.recovery import RecoveryResult
+from cmcourier.services.recovery import RecoveryResult, SyncProgress
 
 
 class SyncOpError(Exception):
@@ -103,8 +104,10 @@ def sync_recover(
     *,
     batch_id: str | None,
     apply: bool,
+    on_progress: Callable[[SyncProgress], None] | None = None,
 ) -> RecoveryResult:
-    """099: recupera filas faltantes en NIARVILOG. ``apply=False`` = dry-run."""
+    """099: recupera filas faltantes en NIARVILOG. ``apply=False`` = dry-run.
+    144: ``on_progress`` va tal cual a :meth:`As400Recovery.recover`."""
     _require_available(config, secrets)
     sqlite = SQLiteTrackingStore(config.tracking.db_path)
     try:
@@ -113,7 +116,7 @@ def sync_recover(
         sqlite.close()
         raise
     try:
-        return recovery.recover(batch_id=batch_id, apply=apply)
+        return recovery.recover(batch_id=batch_id, apply=apply, on_progress=on_progress)
     finally:
         recovery.close()  # store AS400 + fuente RVABREP del wiring
         sqlite.close()

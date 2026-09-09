@@ -12,7 +12,9 @@ errores tipados (:class:`RVABREPNotFoundError` /
 :class:`RVABREPDeletedError`). 121: el lookup batcheado
 ``find_documents_batch`` se eliminó — era código muerto cuya semántica
 (sin distinción not-found vs all-deleted) no matcheaba el contrato de
-`S1_FILTERED` del orchestrator.
+`S1_FILTERED` del orchestrator. 144: :meth:`find_documents_by_txns` es
+un batch DISTINTO — keyed por txn, para el `sync recover`; sin esa
+ambigüedad.
 
 Principio I de la Constitución: este módulo importa solo la
 biblioteca estándar y :mod:`cmcourier.domain`. Principio VIII:
@@ -26,7 +28,7 @@ from __future__ import annotations
 __all__ = ["IndexingColumnsConfig", "IndexingService"]
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -144,6 +146,30 @@ class IndexingService:
         if not rows:
             return None
         return self._row_to_document(dict(rows[0]))
+
+    def find_documents_by_txns(self, txns: Iterable[str]) -> dict[str, RVABREPDocument]:
+        """144: versión batcheada de :meth:`find_document_by_txn` — UNA
+        query ``IN`` chunkeada (113) por ⌈N/1000⌉ viajes, en lugar de un
+        SELECT sobre ``(query) AS T`` por doc.
+
+        Devuelve ``{txn_num: documento}``; un txn sin fila simplemente
+        no está en el dict (el caller lo trata como
+        ``rvabrep_row_not_found``). Mismo contrato que el lookup
+        unitario: la primera fila gana ante duplicados y la marca de
+        borrado NO excluye — el recover re-deriva campos de docs YA
+        subidos. A diferencia del ``find_documents_batch`` eliminado en
+        121, acá la clave es el txn: no hay ambigüedad not-found vs
+        all-deleted que resolver."""
+        values = list(txns)
+        if not values:
+            return {}
+        rows = self._source.get_by_fields_in(self._cfg.txn_num_column, values, {})
+        docs: dict[str, RVABREPDocument] = {}
+        for row in rows:
+            txn = _str(row.get(self._cfg.txn_num_column))
+            if txn not in docs:
+                docs[txn] = self._row_to_document(dict(row))
+        return docs
 
     def _enrich_known_row(self, row: Mapping[str, Any]) -> list[RVABREPDocument]:
         """Envuelve una fila de RVABREP ya conocida en un único

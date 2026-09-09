@@ -28,7 +28,7 @@ from cmcourier.cli.sync_ops import (
     sync_status,
     sync_unavailable_reason,
 )
-from cmcourier.services.recovery import RecoveryResult
+from cmcourier.services.recovery import RecoveryResult, SyncProgress
 
 if TYPE_CHECKING:
     from cmcourier.cli.console.app import ConsoleApp
@@ -60,6 +60,7 @@ class SyncPane(VerticalScroll):
     SyncPane .frow Select { width: 40; }
     SyncPane .frow Button { margin-left: 1; }
     SyncPane #sy-out { height: 10; border: solid $surface-lighten-2; padding: 0 1; }
+    SyncPane #sy-progress { height: 1; color: $text-muted; padding: 0 1; }
     """
 
     def __init__(self, console: ConsoleApp) -> None:
@@ -104,6 +105,10 @@ class SyncPane(VerticalScroll):
                 yield Button("resolver", id="sy-resolve")
         # ``Log``: texto plano (sin markup), auto-scroll al final y tope de líneas.
         yield Log(id="sy-out", max_lines=_MAX_OUT_LINES, auto_scroll=True)
+        # 144: línea VIVA de progreso (``⋯ insertando 250/1000``). Va aparte
+        # del ``Log`` porque éste sólo apendea: cada evento la reemplaza en
+        # vez de acumular 20 líneas por fase. Se limpia al terminar la op.
+        yield Static("", id="sy-progress", markup=False)
 
     def on_mount(self) -> None:
         self._sync_objid_visibility()
@@ -155,6 +160,19 @@ class SyncPane(VerticalScroll):
         """Salida acumulada (para tests y para copiar)."""
         return "\n".join(self.query_one("#sy-out", Log).lines)
 
+    def progress_text(self) -> str:
+        """144: la línea viva de progreso (vacía si no hay op en curso)."""
+        return str(self.query_one("#sy-progress", Static).renderable)
+
+    def _show_progress(self, event: SyncProgress) -> None:
+        """Pinta un evento de progreso (hilo UI). Reemplaza la línea previa."""
+        self.query_one("#sy-progress", Static).update(f"⋯ {event.phase} {event.done}/{event.total}")
+
+    def _on_progress(self, event: SyncProgress) -> None:
+        """144: callback para ``sync_recover`` — corre en el worker thread,
+        así que marshalea al hilo UI con la guarda de ``_apply_on_ui``."""
+        self.console._apply_on_ui(self._show_progress, event)
+
     def _run(self, label: str, op: Callable[[], _T], on_ok: Callable[[_T], None]) -> None:
         """Corre `op` en worker thread; errores al panel, nunca a la UI."""
         self._busy = True
@@ -165,6 +183,7 @@ class SyncPane(VerticalScroll):
             self._busy = False
             # En teardown los widgets pueden no estar: nunca reventar el worker.
             with contextlib.suppress(NoMatches):
+                self.query_one("#sy-progress", Static).update("")
                 if error is not None:
                     self._log(f"✘ {label}: {error}")
                 else:
@@ -181,7 +200,9 @@ class SyncPane(VerticalScroll):
                 result, error = None, f"AS400 error: {exc}"
             except Exception as exc:  # noqa: BLE001 — el worker nunca revienta la UI
                 result, error = None, f"{type(exc).__name__}: {exc}"
-            self.console.call_from_thread(done, result, error)
+            # 144: `_apply_on_ui` — un bug en `on_ok` se vuelve notificación,
+            # no traceback y consola muerta.
+            self.console._apply_on_ui(done, result, error)
 
         self.console.run_worker(work, thread=True, exclusive=False)
 
@@ -209,7 +230,9 @@ class SyncPane(VerticalScroll):
 
         self._run(
             f"simular recover ({batch_id or 'todo'})",
-            lambda: sync_recover(config, secrets, batch_id=batch_id, apply=False),
+            lambda: sync_recover(
+                config, secrets, batch_id=batch_id, apply=False, on_progress=self._on_progress
+            ),
             ok,
         )
 
@@ -241,7 +264,9 @@ class SyncPane(VerticalScroll):
 
         self._run(
             f"aplicar recover ({batch_id or 'todo'})",
-            lambda: sync_recover(config, secrets, batch_id=batch_id, apply=True),
+            lambda: sync_recover(
+                config, secrets, batch_id=batch_id, apply=True, on_progress=self._on_progress
+            ),
             ok,
         )
 

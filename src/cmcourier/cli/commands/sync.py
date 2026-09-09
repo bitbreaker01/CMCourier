@@ -45,6 +45,7 @@ from cmcourier.cli.sync_ops import (
 from cmcourier.config.loader import Secrets, load_config, load_secrets
 from cmcourier.config.schema import PipelineConfig
 from cmcourier.domain.exceptions import ConfigurationError
+from cmcourier.services.recovery import SyncProgress
 
 _log = logging.getLogger(__name__)
 
@@ -173,6 +174,12 @@ def resolve_command(
 # ---------------------------------------------------------------------------
 
 
+def _echo_progress(event: SyncProgress) -> None:
+    """144: una línea por evento en stderr — stdout queda para el reporte
+    (``sync recover > plan.txt`` no se ensucia)."""
+    click.echo(f"{event.phase} {event.done}/{event.total}", err=True)
+
+
 @sync_group.command(name="recover")
 @_CONFIG_OPTION
 @click.option(
@@ -198,7 +205,11 @@ def recover_command(config_path: Path, apply_changes: bool, batch_id: str | None
     escribir efectivamente en AS400.
     """
     config, secrets = _load(config_path)
-    result = _run(lambda: sync_recover(config, secrets, batch_id=batch_id, apply=apply_changes))
+    result = _run(
+        lambda: sync_recover(
+            config, secrets, batch_id=batch_id, apply=apply_changes, on_progress=_echo_progress
+        )
+    )
 
     mode = "APPLY" if apply_changes else "DRY-RUN"
     verbo = "recuperadas" if apply_changes else "a recuperar"

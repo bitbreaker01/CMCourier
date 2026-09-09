@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,7 @@ from cmcourier.cli.console.app import ConfirmScreen, ConsoleApp
 from cmcourier.cli.console.state import SessionCredentials
 from cmcourier.cli.console.sync_pane import SyncPane
 from cmcourier.config.schema import As400ConnectionConfig, As400SyncConfig, PipelineConfig
-from cmcourier.services.recovery import RecoveryResult
+from cmcourier.services.recovery import RecoveryResult, SyncProgress
 from tests.unit.cli.console.conftest import goto
 from tests.unit.cli.console.conftest import wait_for as _wait_for
 from tests.unit.cli.console.test_console_app import _make_config
@@ -79,7 +80,9 @@ class TestRecover:
     ) -> None:
         calls: list[dict[str, Any]] = []
 
-        def fake_recover(config: Any, secrets: Any, *, batch_id: Any, apply: bool) -> Any:
+        def fake_recover(
+            config: Any, secrets: Any, *, batch_id: Any, apply: bool, on_progress: Any = None
+        ) -> Any:
             calls.append({"batch_id": batch_id, "apply": apply})
             return RecoveryResult(recovered=["t1", "t2"], already_present=[], unrecoverable=[])
 
@@ -120,7 +123,9 @@ class TestRecover:
     def test_dry_run_without_rows_keeps_apply_disabled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def fake_recover(config: Any, secrets: Any, *, batch_id: Any, apply: bool) -> Any:
+        def fake_recover(
+            config: Any, secrets: Any, *, batch_id: Any, apply: bool, on_progress: Any = None
+        ) -> Any:
             return RecoveryResult(recovered=[], already_present=["x"], unrecoverable=[])
 
         async def _run() -> None:
@@ -134,6 +139,44 @@ class TestRecover:
                 pane.query_one("#sy-dry", Button).press()
                 assert await _wait_for(pilot, lambda: "already_present=1" in pane.output_text())
                 assert pane.query_one("#sy-apply", Button).disabled is True
+
+        asyncio.run(_run())
+
+    def test_progress_line_is_shown_live_and_replaced_per_phase(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """144: cada evento pinta UNA línea viva (``⋯ fase k/N``) marshalada
+        al hilo UI; la de la misma fase se reemplaza, no se acumula; al
+        terminar la operación la línea desaparece."""
+        release = threading.Event()
+
+        def fake_recover(
+            config: Any, secrets: Any, *, batch_id: Any, apply: bool, on_progress: Any = None
+        ) -> Any:
+            on_progress(SyncProgress("consultando RVABREP", 0, 100))
+            on_progress(SyncProgress("insertando", 0, 100))
+            on_progress(SyncProgress("insertando", 50, 100))
+            release.wait(5)
+            on_progress(SyncProgress("insertando", 100, 100))
+            return RecoveryResult(recovered=["t1"], already_present=[], unrecoverable=[])
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            monkeypatch.setattr(sync_pane_module, "sync_recover", fake_recover)
+            app = ConsoleApp(config=_with_sync(config), config_path=path)
+            async with app.run_test() as pilot:
+                app.state.creds = _as400_creds()
+                await goto(pilot, app, "8")
+                pane = app.query_one(SyncPane)
+                assert pane.progress_text() == ""
+                pane.query_one("#sy-dry", Button).press()
+                assert await _wait_for(pilot, lambda: "insertando 50/100" in pane.progress_text())
+                # una sola línea viva: la fase previa y el 0/100 fueron reemplazados
+                assert pane.progress_text() == "⋯ insertando 50/100"
+                assert "insertando" not in pane.output_text()
+                release.set()
+                assert await _wait_for(pilot, lambda: "a recuperar=1" in pane.output_text())
+                assert await _wait_for(pilot, lambda: pane.progress_text() == "")
 
         asyncio.run(_run())
 

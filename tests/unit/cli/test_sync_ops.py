@@ -141,9 +141,23 @@ class TestRecover:
             out = sync_recover(_config(), _secrets(), batch_id="b1", apply=False)
         assert out == "result"
         assert build.call_args.kwargs["sqlite_store"] is sqlite
-        recovery.recover.assert_called_once_with(batch_id="b1", apply=False)
+        recovery.recover.assert_called_once_with(batch_id="b1", apply=False, on_progress=None)
         recovery.close.assert_called_once()
         sqlite.close.assert_called_once()
+
+    def test_recover_forwards_on_progress_as_is(self) -> None:
+        """144: el callback de progreso llega al servicio tal cual."""
+        recovery, sqlite = MagicMock(), MagicMock()
+
+        def on_progress(_: object) -> None:
+            pass
+
+        with (
+            patch.object(ops, "SQLiteTrackingStore", return_value=sqlite),
+            patch.object(ops, "build_as400_recovery", return_value=recovery),
+        ):
+            sync_recover(_config(), _secrets(), batch_id=None, apply=True, on_progress=on_progress)
+        assert recovery.recover.call_args.kwargs["on_progress"] is on_progress
 
     def test_recover_closes_sqlite_when_build_fails(self) -> None:
         sqlite = MagicMock()

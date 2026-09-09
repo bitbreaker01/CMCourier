@@ -6,13 +6,14 @@ mockean con :class:`MagicMock`.
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock
 
 import pytest
 
 from cmcourier.adapters.tracking.sqlite import UploadedRecord
 from cmcourier.domain.exceptions import IDRViNotMappedError
-from cmcourier.services.recovery import As400Recovery, RecoveryItem
+from cmcourier.services.recovery import As400Recovery, RecoveryItem, SyncProgress
 
 pytestmark = pytest.mark.unit
 
@@ -70,7 +71,7 @@ class TestRecoverHappyPath:
         as400 = MagicMock()
         as400.read_states_by_txns.return_value = {}  # ausente en NIARVILOG
         indexing = MagicMock()
-        indexing.find_document_by_txn.return_value = _document()
+        indexing.find_documents_by_txns.return_value = {"0000001": _document()}
         mapping = MagicMock()
         mapping.get_mapping.return_value = _mapping()
         rec = _recovery(
@@ -87,7 +88,9 @@ class TestRecoverHappyPath:
         as400 = MagicMock()
         as400.read_states_by_txns.return_value = {}
         indexing = MagicMock()
-        indexing.find_document_by_txn.return_value = _document(index7="FF17", image_type="O")
+        indexing.find_documents_by_txns.return_value = {
+            "0000001": _document(index7="FF17", image_type="O")
+        }
         mapping = MagicMock()
         mapping.get_mapping.return_value = _mapping(id_corto="CN09", cmis_type="TipoX")
         rec = _recovery(
@@ -109,7 +112,7 @@ class TestRecoverHappyPath:
         as400 = MagicMock()
         as400.read_states_by_txns.return_value = {}
         indexing = MagicMock()
-        indexing.find_document_by_txn.return_value = _document()
+        indexing.find_documents_by_txns.return_value = {"0000001": _document()}
         mapping = MagicMock()
         mapping.get_mapping.return_value = _mapping()
         rec = _recovery(
@@ -149,7 +152,7 @@ class TestRecoverSkipsAndFailures:
         as400 = MagicMock()
         as400.read_states_by_txns.return_value = {}
         indexing = MagicMock()
-        indexing.find_document_by_txn.return_value = None  # sin fila RVABREP
+        indexing.find_documents_by_txns.return_value = {}  # sin fila RVABREP
         rec = _recovery(
             uploaded=[_uploaded("0000001")],
             as400=as400,
@@ -167,7 +170,7 @@ class TestRecoverSkipsAndFailures:
         as400 = MagicMock()
         as400.read_states_by_txns.return_value = {}
         indexing = MagicMock()
-        indexing.find_document_by_txn.return_value = _document(index7="CC99")
+        indexing.find_documents_by_txns.return_value = {"0000001": _document(index7="CC99")}
         mapping = MagicMock()
         mapping.get_mapping.side_effect = IDRViNotMappedError(id_rvi="CC99")
         rec = _recovery(
@@ -185,11 +188,19 @@ class TestRecoverSkipsAndFailures:
         as400 = MagicMock()
         as400.read_states_by_txns.return_value = {}
         indexing = MagicMock()
-        indexing.find_document_by_txn.return_value = _document()
+        indexing.find_documents_by_txns.return_value = {
+            t: _document() for t in ("0000001", "0000002", "0000003")
+        }
         mapping = MagicMock()
         mapping.get_mapping.return_value = _mapping()
-        # El INSERT del 2do txn explota; el 1ro y el 3ro están OK.
-        as400.insert_recovered_row.side_effect = [None, RuntimeError("AS400 boom"), None]
+
+        # El INSERT del 2do txn explota; el 1ro y el 3ro están OK. 144: los
+        # INSERT corren en paralelo → se discrimina por txn, no por orden.
+        def insert(**kwargs: object) -> None:
+            if kwargs["trnnum"] == "0000002":
+                raise RuntimeError("AS400 boom")
+
+        as400.insert_recovered_row.side_effect = insert
         rec = _recovery(
             uploaded=[_uploaded("0000001"), _uploaded("0000002"), _uploaded("0000003")],
             as400=as400,
@@ -223,3 +234,223 @@ class TestBatchedExistenceCheck118:
         as400.read_states_by_txns.assert_called_once()
         as400.read_state_by_txn.assert_not_called()
         as400.insert_recovered_row.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 144 — RVABREP batcheado, INSERT en paralelo, progreso
+# ---------------------------------------------------------------------------
+
+
+def _missing_setup(n: int) -> tuple[list[str], MagicMock, MagicMock, MagicMock]:
+    """N docs ausentes en NIARVILOG, todos con fila RVABREP y mapping."""
+    txns = [f"{i:07d}" for i in range(n)]
+    as400 = MagicMock()
+    as400.read_states_by_txns.return_value = {}
+    indexing = MagicMock()
+    indexing.find_documents_by_txns.return_value = {t: _document() for t in txns}
+    mapping = MagicMock()
+    mapping.get_mapping.return_value = _mapping()
+    return txns, as400, indexing, mapping
+
+
+class TestBatchedRvabrepLookup144:
+    def test_single_batched_rvabrep_read_for_all_missing(self) -> None:
+        """144: N faltantes → UNA llamada a ``find_documents_by_txns`` con
+        exactamente los txns faltantes; nunca ``find_document_by_txn``."""
+        txns, as400, indexing, mapping = _missing_setup(120)
+        # uno ya presente: no debe pedirse a RVABREP
+        as400.read_states_by_txns.return_value = {txns[0]: object()}
+        rec = _recovery(
+            uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
+        )
+
+        result = rec.recover(apply=False)
+
+        indexing.find_documents_by_txns.assert_called_once_with(txns[1:])
+        indexing.find_document_by_txn.assert_not_called()
+        assert result.recovered == txns[1:]
+        assert result.already_present == [txns[0]]
+
+    def test_nothing_missing_skips_rvabrep_and_insert(self) -> None:
+        txns, as400, indexing, mapping = _missing_setup(3)
+        as400.read_states_by_txns.return_value = {t: object() for t in txns}
+        rec = _recovery(
+            uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
+        )
+
+        result = rec.recover(apply=True)
+
+        assert result.already_present == txns
+        indexing.find_documents_by_txns.assert_not_called()
+        as400.insert_recovered_row.assert_not_called()
+
+
+class TestParallelInserts144:
+    def test_all_inserts_happen_with_bounded_pool(self) -> None:
+        """144: los INSERT corren en un pool acotado (``write_workers``):
+        se ejecutan TODOS y nunca más de ``write_workers`` a la vez."""
+        txns, as400, indexing, mapping = _missing_setup(40)
+        lock = threading.Lock()
+        active = 0
+        peak = 0
+        threads: set[int] = set()
+
+        def insert(**kwargs: object) -> None:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                threads.add(threading.get_ident())
+            threading.Event().wait(0.005)
+            with lock:
+                active -= 1
+
+        as400.insert_recovered_row.side_effect = insert
+        sqlite = MagicMock()
+        sqlite.uploaded_records.return_value = [_uploaded(t) for t in txns]
+        rec = As400Recovery(
+            sqlite_store=sqlite,
+            as400_store=as400,
+            indexing_service=indexing,
+            mapping_service=mapping,
+            write_workers=4,
+        )
+
+        result = rec.recover(apply=True)
+
+        assert sorted(result.recovered) == txns
+        assert result.unrecoverable == []
+        assert as400.insert_recovered_row.call_count == 40
+        assert 1 < peak <= 4  # paralelo, pero acotado
+        assert len(threads) <= 4
+
+    def test_default_write_workers_is_eight(self) -> None:
+        rec = _recovery(uploaded=[], as400=MagicMock(), indexing=MagicMock(), mapping=MagicMock())
+        assert rec._write_workers == 8
+
+    def test_one_failing_insert_does_not_block_the_rest(self) -> None:
+        txns, as400, indexing, mapping = _missing_setup(30)
+
+        def insert(**kwargs: object) -> None:
+            if kwargs["trnnum"] == txns[7]:
+                raise RuntimeError("SQLSTATE 23505")
+
+        as400.insert_recovered_row.side_effect = insert
+        rec = _recovery(
+            uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
+        )
+
+        result = rec.recover(apply=True)
+
+        assert sorted(result.recovered) == [t for t in txns if t != txns[7]]
+        assert result.unrecoverable == [RecoveryItem(txns[7], "error: SQLSTATE 23505")]
+        assert as400.insert_recovered_row.call_count == 30
+
+    def test_recovered_keeps_tracking_order(self) -> None:
+        """El orden de ``recovered`` sigue al de SQLite aunque los INSERT
+        terminen desordenados — el reporte es determinista."""
+        txns, as400, indexing, mapping = _missing_setup(25)
+        rec = _recovery(
+            uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
+        )
+
+        result = rec.recover(apply=True)
+
+        assert result.recovered == txns
+
+
+class TestProgress144:
+    def test_sync_progress_is_frozen(self) -> None:
+        import dataclasses
+
+        p = SyncProgress("insertando", 1, 2)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            p.done = 5  # type: ignore[misc]
+
+    def test_dry_run_emits_read_phases_only(self) -> None:
+        txns, as400, indexing, mapping = _missing_setup(3)
+        as400.read_states_by_txns.return_value = {txns[0]: object()}
+        events: list[SyncProgress] = []
+        rec = _recovery(
+            uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
+        )
+
+        rec.recover(apply=False, on_progress=events.append)
+
+        assert events == [
+            SyncProgress("leyendo tracking", 0, 0),
+            SyncProgress("consultando NIARVILOG", 0, 3),
+            SyncProgress("consultando RVABREP", 0, 2),
+        ]
+
+    def test_apply_emits_insert_progress_every_50_and_at_end(self) -> None:
+        txns, as400, indexing, mapping = _missing_setup(120)
+        events: list[SyncProgress] = []
+        rec = _recovery(
+            uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
+        )
+
+        rec.recover(apply=True, on_progress=events.append)
+
+        inserting = [e for e in events if e.phase == "insertando"]
+        assert inserting == [
+            SyncProgress("insertando", 0, 120),
+            SyncProgress("insertando", 50, 120),
+            SyncProgress("insertando", 100, 120),
+            SyncProgress("insertando", 120, 120),
+        ]
+        assert [e.phase for e in events[:3]] == [
+            "leyendo tracking",
+            "consultando NIARVILOG",
+            "consultando RVABREP",
+        ]
+
+    def test_exact_multiple_of_50_does_not_duplicate_final_event(self) -> None:
+        txns, as400, indexing, mapping = _missing_setup(100)
+        events: list[SyncProgress] = []
+        rec = _recovery(
+            uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
+        )
+
+        rec.recover(apply=True, on_progress=events.append)
+
+        inserting = [e for e in events if e.phase == "insertando"]
+        assert [e.done for e in inserting] == [0, 50, 100]
+
+    def test_failed_inserts_still_count_as_done(self) -> None:
+        txns, as400, indexing, mapping = _missing_setup(60)
+        as400.insert_recovered_row.side_effect = RuntimeError("boom")
+        events: list[SyncProgress] = []
+        rec = _recovery(
+            uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
+        )
+
+        result = rec.recover(apply=True, on_progress=events.append)
+
+        assert len(result.unrecoverable) == 60
+        assert events[-1] == SyncProgress("insertando", 60, 60)
+
+    def test_raising_callback_does_not_abort_recover(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        txns, as400, indexing, mapping = _missing_setup(2)
+        rec = _recovery(
+            uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
+        )
+
+        def bad_callback(_: SyncProgress) -> None:
+            raise ValueError("UI muerta")
+
+        with caplog.at_level("ERROR", logger="cmcourier.services.recovery"):
+            result = rec.recover(apply=True, on_progress=bad_callback)
+
+        assert result.recovered == txns
+        assert as400.insert_recovered_row.call_count == 2
+        assert any("on_progress" in r.getMessage() for r in caplog.records)
+
+    def test_no_callback_is_fine(self) -> None:
+        txns, as400, indexing, mapping = _missing_setup(2)
+        rec = _recovery(
+            uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
+        )
+        assert rec.recover(apply=True).recovered == txns

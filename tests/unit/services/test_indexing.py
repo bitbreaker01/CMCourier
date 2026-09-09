@@ -379,3 +379,48 @@ class TestLoggingDiscipline:
         for record in caplog.records:
             assert "456789" not in record.getMessage()
             assert "456789" not in str(record.__dict__.get("extra", ""))
+
+
+# ---------------------------------------------------------------------------
+# Grupo 8 — 144: lookup batcheado por txn_num (sync recover)
+# ---------------------------------------------------------------------------
+
+
+class TestFindDocumentsByTxns144:
+    def test_returns_dict_keyed_by_txn_in_one_in_query(self, source: TabularDataSource) -> None:
+        counting = _CallCountingSource(source)
+        service = IndexingService(counting, _friendly_config())
+
+        docs = service.find_documents_by_txns(["TXN0000001", "TXN0000013", "TXN0000006"])
+
+        assert set(docs) == {"TXN0000001", "TXN0000013", "TXN0000006"}
+        assert docs["TXN0000001"].index7 == "FF17"
+        assert docs["TXN0000013"].image_type == "O"
+        assert counting.get_by_fields_in_calls == 1
+        assert counting.get_by_fields_calls == 0
+
+    def test_missing_txns_are_simply_absent(self, service: IndexingService) -> None:
+        docs = service.find_documents_by_txns(["TXN0000001", "NOPE-1", "NOPE-2"])
+        assert list(docs) == ["TXN0000001"]
+
+    def test_empty_input_does_not_query(self, source: TabularDataSource) -> None:
+        counting = _CallCountingSource(source)
+        service = IndexingService(counting, _friendly_config())
+        assert service.find_documents_by_txns([]) == {}
+        assert counting.get_by_fields_in_calls == 0
+
+    def test_duplicate_txn_rows_keep_first_like_single_lookup(
+        self, service: IndexingService
+    ) -> None:
+        # DUPECLIENT tiene 2 filas con TXN0000009; ``find_document_by_txn``
+        # devuelve la primera — el batch hace lo mismo.
+        single = service.find_document_by_txn("TXN0000009")
+        batch = service.find_documents_by_txns(["TXN0000009"])
+        assert single is not None
+        assert batch["TXN0000009"] == single
+
+    def test_deleted_rows_are_returned_like_single_lookup(self, service: IndexingService) -> None:
+        # El recover re-deriva campos de un doc YA subido: la marca de
+        # borrado no lo excluye (mismo contrato que ``find_document_by_txn``).
+        docs = service.find_documents_by_txns(["TXN0000004"])
+        assert docs["TXN0000004"].delete_code == "D"
