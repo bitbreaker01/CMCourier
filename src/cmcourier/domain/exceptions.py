@@ -33,6 +33,7 @@ __all__ = [
     "ConfigurationError",
     "DefaultValidationFailedError",
     "IDRViNotMappedError",
+    "IdentityResolutionError",
     "IndexingError",
     "MappingError",
     "MetadataError",
@@ -169,6 +170,43 @@ class IDRViNotMappedError(MappingError):
         )
         self.id_rvi = id_rvi
         self.txn_num = txn_num
+
+
+class IdentityResolutionError(MappingError):
+    """147 REQ-002: un slot de ``identity:`` con ``on_missing: fail`` no resolvió.
+
+    Desciende de :class:`MappingError` a propósito: la identidad se resuelve al
+    INICIO de S2 (147 REQ-003), así que un `handler` que ya filtra por etapa la
+    clasifica como ``S2_FAILED`` sin enumerar la subclase.
+
+    ``chain`` es el punto de la excepción: la cadena COMPLETA que se intentó,
+    fuente por fuente y en orden, incluyendo los saltos previos de los que
+    dependía el campo. Sin eso el operador ve "no resolvió el CIF" y no tiene
+    forma de saber cuál de los tres saltos se cortó. Nunca lleva VALORES
+    resueltos (Principio VIII: son PII); sólo nombres de campo, de fuente y el
+    motivo de cada descarte.
+    """
+
+    def __init__(
+        self,
+        *,
+        slot: str,
+        field_name: str,
+        reason: str,
+        chain: tuple[str, ...] = (),
+    ) -> None:
+        rendered = "; ".join(chain) if chain else "<no sources tried>"
+        super().__init__(
+            f"identity.{slot} could not be resolved from field {field_name!r}: "
+            f"{reason} | chain tried: {rendered}",
+            slot=slot,
+            field_name=field_name,
+            reason=reason,
+        )
+        self.slot = slot
+        self.field_name = field_name
+        self.reason = reason
+        self.chain = chain
 
 
 # ---------------------------------------------------------------------------

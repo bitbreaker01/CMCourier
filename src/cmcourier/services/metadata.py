@@ -1,10 +1,16 @@
 """Servicio de resolución de metadata.
 
 Cadena de fallback de fuente por campo, con regexes de validación,
-fallback a valor por defecto, self-healing de CIF, normalización
+fallback a valor por defecto, cadenas de dependencia entre campos
+(``field.<NAME>``, 147) resueltas en orden topológico, normalización
 de aliases de campos y pre-fetching ansioso de fuentes ``csv:<alias>``
 al construirse. El stage S3 de cada `pipeline` depende de este
 servicio.
+
+147 REQ-001 sacó el self-healing de CIF hardcodeado: en vez de curar
+``BAC_CIF`` de un solo salto con un ``cif_override`` hilvanado a mano,
+cualquier campo puede declarar que su clave de búsqueda es el valor ya
+resuelto de otro campo, y el orden de resolución sale del grafo.
 
 Principio I de la Constitución: importa solo ``cmcourier.domain.*`` y
 stdlib. Principio VIII: nunca loguear VALORES resueltos de campos
@@ -14,6 +20,7 @@ stdlib. Principio VIII: nunca loguear VALORES resueltos de campos
 from __future__ import annotations
 
 __all__ = [
+    "FieldResolution",
     "FieldSourceConfig",
     "MetadataConfig",
     "MetadataResolution",
@@ -27,14 +34,15 @@ __all__ = [
 
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from cmcourier.config.schema import split_lookup_source_type
+from cmcourier.config.schema import split_field_reference, split_lookup_source_type
 from cmcourier.domain.exceptions import (
     ConfigurationError,
     DefaultValidationFailedError,
+    MetadataError,
     SourceFailedError,
 )
 from cmcourier.domain.models import (
@@ -129,6 +137,9 @@ class SourceConfig:
     - ``"rvabrep.<col>"`` — atributo del :class:`RVABREPDocument`
       (cualquier columna del modelo: ``txn_num``, ``index1`` … ``index7``,
       ``image_type``, etc.).
+    - ``"field.<CANONICAL_NAME>"`` (147) — el valor YA RESUELTO de otro
+      campo. Es lo que permite encadenar saltos, y crea una arista en el
+      grafo de dependencias que ordena la resolución.
     """
 
     source_type: str
@@ -182,6 +193,22 @@ class MetadataResolution:
     # `document_cache` pueda persistirlo sin inspeccionar el subtipo
     # de trigger.
     healed_cif: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FieldResolution:
+    """147: el valor de un campo MÁS la cadena que se intentó para llegar.
+
+    ``value`` en ``None`` significa "ninguna fuente dio y no hubo default".
+    ``chain`` lista cada fuente probada, en orden, incluyendo los saltos de
+    los campos de los que éste dependía — es lo que vuelve diagnóstico al
+    error de :class:`~cmcourier.domain.exceptions.IdentityResolutionError`.
+    Nunca lleva VALORES (Principio VIII): sólo nombres y motivos.
+    """
+
+    field: str
+    value: str | None
+    chain: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -240,17 +267,35 @@ def _validates(value: str, validation: ValidationConfig | None) -> bool:
     return re.fullmatch(validation.allowed_pattern, value) is not None
 
 
+def _record(attempts: list[str] | None, field: str, sc: SourceConfig, outcome: str) -> None:
+    """147: anota un intento en la traza de la cadena. Sin VALORES (PII):
+    sólo el campo, la coordenada de la fuente y por qué se descartó."""
+    if attempts is None:
+        return
+    if split_lookup_source_type(sc.source_type) is None:
+        where = f"{sc.source_type}.{sc.lookup_value_column}"
+    else:
+        where = f"{sc.source_type}[key={sc.lookup_value_source}]"
+    attempts.append(f"{field} <- {where}: {outcome}")
+
+
 # ---------------------------------------------------------------------------
 # Servicio
 # ---------------------------------------------------------------------------
 
 
 class MetadataService:
-    """Resolución de metadata por campo con fallback y self-healing
-    de CIF.
+    """Resolución de metadata por campo, con cadenas de fallback y cadenas
+    de DEPENDENCIA entre campos (147).
 
-    Ver ``specs/005-metadata-service/{spec,plan}.md`` para el contexto
-    completo.
+    Un campo puede declarar ``lookup_value_source: "field.<OTRO>"``: su clave
+    de búsqueda es el valor ya resuelto de otro campo. El servicio arma el
+    grafo, lo ordena topológicamente y resuelve en ese orden. Eso reemplaza
+    al self-healing de CIF hardcodeado pre-147 (que sólo curaba ``BAC_CIF``,
+    de un solo salto, con un ``cif_override`` hilvanado a mano).
+
+    Ver ``specs/005-metadata-service/{spec,plan}.md`` y
+    ``specs/147-identity-resolution/spec.md`` para el contexto completo.
     """
 
     def __init__(
@@ -266,8 +311,26 @@ class MetadataService:
         # Forma de la clave de cache:
         # (alias, key_column, key_value, value_column) -> value.
         self._csv_cache: dict[tuple[str, str, str, str], str] = {}
+        # 147 REQ-001: grafo campo → dependencias, congelado al construir.
+        self._dependencies = {
+            name: self._declared_dependencies(name) for name in config.field_sources
+        }
+        self._order_cache: dict[tuple[str, ...], tuple[str, ...]] = {}
+        # 147 REQ-005: memo de la CADENA, con vida de corrida. Ortogonal al
+        # `prefetch` de tablas (que indexa la tabla entera al arrancar) y al
+        # cache de metadata cross-batch de 037 (que vive en SQLite): éste
+        # evita repetir el MISMO salto para todos los documentos de un mismo
+        # cliente dentro de la misma corrida. Memoiza también los misses: un
+        # cliente que no está en la tabla no se vuelve a preguntar.
+        self._lookup_memo: dict[tuple[str, str, str, str, str], str | None] = {}
+        self._memo_hits = 0
         if config.prefetch_enabled:
             self._prefetch_csv_sources()
+
+    @property
+    def memo_hits(self) -> int:
+        """147 REQ-005: cuántos saltos de cadena se ahorraron por el memo."""
+        return self._memo_hits
 
     # --- construcción --------------------------------------------------
 
@@ -316,28 +379,26 @@ class MetadataService:
         document: RVABREPDocument,
         mapping: CMMapping,
     ) -> MetadataResolution:
-        """Resuelve cada campo requerido de metadata."""
+        """Resuelve cada campo requerido de metadata.
+
+        147 REQ-001: se resuelve en orden TOPOLÓGICO, no en el orden de
+        entrada, y sólo los campos pedidos más sus dependencias transitivas
+        (el resto de ``field_sources`` ni se toca).
+        """
         canonical_fields, canonical_to_friendly = self._normalize_fields_with_friendly(
             mapping.required_metadata_fields
         )
-        resolved: dict[str, str] = {}
+        values = self._resolve_graph(canonical_fields, trigger, document)
+        resolved = {f: values[f] for f in canonical_fields if f in values}
 
         # 046: el trigger es polimórfico. ``_trigger_cif`` extrae el
         # CIF del atributo que use cada subtipo (``ClientTrigger.cif``
         # o ``row[col_cif]`` para los subtipos basados en fila).
-        current_cif = _trigger_cif(trigger)
-
-        # Self-healing de CIF PRIMERO, para que los lookups de CSV
-        # subsiguientes puedan usar el valor resuelto.
-        if current_cif is None and "BAC_CIF" in canonical_fields:
-            cif_value = self._resolve_one("BAC_CIF", trigger, document, cif_override=current_cif)
-            current_cif = cif_value
-            resolved["BAC_CIF"] = cif_value
-
-        for f in canonical_fields:
-            if f in resolved:
-                continue
-            resolved[f] = self._resolve_one(f, trigger, document, cif_override=current_cif)
+        # 147: el nombre ``BAC_CIF`` sobrevive SÓLO acá, alimentando los
+        # campos deprecados ``healed_trigger`` / ``healed_cif`` (REQ-004 los
+        # reemplaza por ``ResolvedIdentity``). La resolución en sí ya no
+        # conoce ningún nombre de campo.
+        current_cif = _trigger_cif(trigger) or values.get("BAC_CIF")
 
         # 038: traduce las claves de propiedad a IDs de propiedad
         # `cmis` cuando el mapping incluye un catálogo
@@ -373,6 +434,125 @@ class MetadataService:
             healed_cif=current_cif,
         )
 
+    # --- 147 REQ-001: grafo de dependencias entre campos ------------------
+
+    def _declared_dependencies(self, canonical_field: str) -> tuple[str, ...]:
+        """Los campos referenciados por ``field.<NAME>`` en la cadena de
+        *canonical_field*, deduplicados y en orden de config.
+
+        Una referencia a un campo que no existe en ``field_sources`` se
+        ignora acá: el schema ya la rechazó al cargar el YAML (147 REQ-001) y
+        en runtime se comporta como una dependencia que no resolvió.
+        """
+        fsc = self._config.field_sources.get(canonical_field)
+        if fsc is None:
+            return ()
+        deps: list[str] = []
+        for sc in fsc.sources:
+            dep = split_field_reference(sc.lookup_value_source)
+            if dep is None or dep not in self._config.field_sources or dep in deps:
+                continue
+            deps.append(dep)
+        return tuple(deps)
+
+    def _resolution_order(self, requested: Sequence[str]) -> tuple[str, ...]:
+        """Orden topológico del cierre transitivo de *requested*: dependencias
+        antes que dependientes, y NADA que no haga falta para lo pedido."""
+        cache_key = tuple(requested)
+        cached = self._order_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        order: list[str] = []
+        done: set[str] = set()
+        on_stack: set[str] = set()
+
+        def visit(field: str) -> None:
+            if field in done:
+                return
+            if field in on_stack:
+                # Inalcanzable vía YAML (el schema rechaza los ciclos al
+                # cargar); sólo lo alcanza una MetadataConfig armada a mano.
+                raise ConfigurationError("field dependency cycle", field=field)
+            on_stack.add(field)
+            for dep in self._dependencies.get(field, ()):
+                visit(dep)
+            on_stack.discard(field)
+            done.add(field)
+            order.append(field)
+
+        for field in requested:
+            visit(field)
+        self._order_cache[cache_key] = tuple(order)
+        return tuple(order)
+
+    def _resolve_graph(
+        self,
+        requested: Sequence[str],
+        trigger: Trigger,
+        document: RVABREPDocument,
+    ) -> dict[str, str]:
+        """Resuelve el cierre transitivo de *requested* en orden topológico.
+
+        Una dependencia que no resolvió NO aborta el documento: se queda
+        fuera del dict y su dependiente saltea esa fuente igual que un valor
+        vacío. Un campo PEDIDO que no resolvió sí propaga su error — es el
+        contrato pre-147 y no cambia.
+        """
+        wanted = set(requested)
+        values: dict[str, str] = {}
+        for field in self._resolution_order(requested):
+            try:
+                values[field] = self._resolve_one(field, trigger, document, values)
+            except MetadataError:
+                if field in wanted:
+                    raise
+                _logger.debug("dependency field=%s did not resolve; dependents skip it", field)
+        return values
+
+    def resolve_fields(
+        self,
+        canonical_fields: Sequence[str],
+        trigger: Trigger,
+        document: RVABREPDocument,
+    ) -> dict[str, FieldResolution]:
+        """147 REQ-002: resuelve campos sueltos (sin ``CMMapping``) y devuelve
+        la CADENA intentada junto al valor.
+
+        No levanta por un campo que no resolvió — devuelve ``value=None`` con
+        la traza. Quién decide qué hacer con eso es el
+        :class:`~cmcourier.services.identity.IdentityResolver`, vía
+        ``on_missing``. Los errores de CONFIG (``ConfigurationError``) sí
+        propagan: son bugs del YAML, no datos faltantes.
+        """
+        order = self._resolution_order(canonical_fields)
+        values: dict[str, str] = {}
+        traces: dict[str, tuple[str, ...]] = {}
+        for field in order:
+            attempts: list[str] = []
+            try:
+                values[field] = self._resolve_one(field, trigger, document, values, attempts)
+            except MetadataError as exc:
+                attempts.append(f"{field} <- (all sources exhausted): {type(exc).__name__}")
+            traces[field] = tuple(attempts)
+        return {
+            field: FieldResolution(
+                field=field,
+                value=values.get(field),
+                chain=self._chain_trace(field, traces),
+            )
+            for field in canonical_fields
+        }
+
+    def _chain_trace(
+        self, canonical_field: str, traces: Mapping[str, tuple[str, ...]]
+    ) -> tuple[str, ...]:
+        """La traza del campo MÁS la de cada salto previo del que dependía,
+        en orden de resolución."""
+        lines: list[str] = []
+        for field in self._resolution_order([canonical_field]):
+            lines.extend(traces.get(field, ()))
+        return tuple(lines)
+
     # --- resolución por campo ------------------------------------------
 
     def _resolve_one(
@@ -380,8 +560,8 @@ class MetadataService:
         canonical_field: str,
         trigger: Trigger,
         document: RVABREPDocument,
-        *,
-        cif_override: str | None = None,
+        values: Mapping[str, str],
+        attempts: list[str] | None = None,
     ) -> str:
         if canonical_field not in self._config.field_sources:
             raise ConfigurationError(
@@ -391,31 +571,60 @@ class MetadataService:
         fsc = self._config.field_sources[canonical_field]
 
         for sc in fsc.sources:
-            raw = self._fetch_from_source(sc, trigger, document, cif_override=cif_override)
-            if raw is None:
-                continue
-            # 146 (a): el formato por fuente corre ANTES de validar —
-            # normaliza la vestimenta para que el patrón pueda ser estricto.
-            value = apply_format(raw, sc.format)
-            if value == "":
-                # Vacío después de formatear = esta fuente no dio (el
-                # caso `CHAR(n)` de AS400 todo espacios con `trim`).
-                continue
-            if not _validates(value, sc.validation):
-                _logger.debug(
-                    "validation failed for field=%s source=%s",
-                    canonical_field,
-                    sc.source_type,
-                )
-                continue
-            # 146 (b): el formato por campo es la garantía de salida.
-            return apply_format(value, fsc.format)
+            value = self._try_source(canonical_field, sc, trigger, document, values, attempts)
+            if value is not None:
+                # 146 (b): el formato por campo es la garantía de salida.
+                return apply_format(value, fsc.format)
 
         # Todas las fuentes fallaron. Intentar el `default` si existe.
-        return self._resolve_default(canonical_field, fsc)
+        return self._resolve_default(canonical_field, fsc, attempts)
+
+    def _try_source(
+        self,
+        canonical_field: str,
+        sc: SourceConfig,
+        trigger: Trigger,
+        document: RVABREPDocument,
+        values: Mapping[str, str],
+        attempts: list[str] | None,
+    ) -> str | None:
+        """Un paso de la cadena: ``None`` significa "esta fuente no dio, pasar
+        a la siguiente"."""
+        dep = split_field_reference(sc.lookup_value_source)
+        if dep is not None and dep not in values:
+            # 147 REQ-001: la dependencia no resolvió ⇒ se saltea SÓLO esta
+            # fuente. Ni siquiera se toca la tabla.
+            _record(attempts, canonical_field, sc, f"skipped (dependency {dep!r} unresolved)")
+            return None
+        raw = self._fetch_from_source(canonical_field, sc, trigger, document, values)
+        if raw is None:
+            _record(attempts, canonical_field, sc, "no value")
+            return None
+        # 146 (a): el formato por fuente corre ANTES de validar —
+        # normaliza la vestimenta para que el patrón pueda ser estricto.
+        value = apply_format(raw, sc.format)
+        if value == "":
+            # Vacío después de formatear = esta fuente no dio (el
+            # caso `CHAR(n)` de AS400 todo espacios con `trim`).
+            _record(attempts, canonical_field, sc, "empty value")
+            return None
+        if not _validates(value, sc.validation):
+            _logger.debug(
+                "validation failed for field=%s source=%s",
+                canonical_field,
+                sc.source_type,
+            )
+            _record(attempts, canonical_field, sc, "failed validation")
+            return None
+        _record(attempts, canonical_field, sc, "resolved")
+        return value
 
     @staticmethod
-    def _resolve_default(canonical_field: str, fsc: FieldSourceConfig) -> str:
+    def _resolve_default(
+        canonical_field: str,
+        fsc: FieldSourceConfig,
+        attempts: list[str] | None = None,
+    ) -> str:
         """El `default` del campo, ya formateado (146).
 
         El orden es formatear y DESPUÉS validar, y es deliberado: el
@@ -429,14 +638,20 @@ class MetadataService:
                 "all sources failed for field=%s (no default configured)",
                 canonical_field,
             )
+            if attempts is not None:
+                attempts.append(f"{canonical_field} <- default: none configured")
             raise SourceFailedError(field_name=canonical_field, source=_ALL_SOURCES_SENTINEL)
         default = apply_format(fsc.default_value, fsc.format)
         first_validation = fsc.sources[0].validation if fsc.sources else None
         if not _validates(default, first_validation):
+            if attempts is not None:
+                attempts.append(f"{canonical_field} <- default: failed validation")
             raise DefaultValidationFailedError(
                 field_name=canonical_field,
                 default_value=default,
             )
+        if attempts is not None:
+            attempts.append(f"{canonical_field} <- default: used")
         return default
 
     # --- normalización de nombres de campo -----------------------------
@@ -481,11 +696,11 @@ class MetadataService:
 
     def _fetch_from_source(
         self,
+        canonical_field: str,
         sc: SourceConfig,
         trigger: Trigger,
         document: RVABREPDocument,
-        *,
-        cif_override: str | None = None,
+        values: Mapping[str, str],
     ) -> str | None:
         if sc.source_type == "trigger":
             return self._fetch_trigger(sc, trigger)
@@ -494,7 +709,7 @@ class MetadataService:
         lookup = split_lookup_source_type(sc.source_type)
         if lookup is not None:
             kind, alias = lookup
-            return self._fetch_lookup(sc, alias, kind, trigger, document, cif_override=cif_override)
+            return self._fetch_lookup(canonical_field, sc, alias, kind, trigger, document, values)
         raise ConfigurationError("unknown source_type", source_type=sc.source_type)
 
     def _fetch_trigger(self, sc: SourceConfig, trigger: Trigger) -> str | None:
@@ -537,13 +752,13 @@ class MetadataService:
 
     def _fetch_lookup(
         self,
+        canonical_field: str,
         sc: SourceConfig,
         alias: str,
         kind_label: str,
         trigger: Trigger,
         document: RVABREPDocument,
-        *,
-        cif_override: str | None = None,
+        values: Mapping[str, str],
     ) -> str | None:
         """084: path unificado de lookup contra CSV o AS400.
 
@@ -551,26 +766,50 @@ class MetadataService:
         valor de lookup sale de ``sc.lookup_value_source`` (default
         ``"trigger.cif"`` para backward-compat). AS400 hereda el mismo
         contrato — el adapter ``As400DataSource`` ya implementa
-        ``IDataSource`` (``get_all`` + ``get_by_fields``)."""
+        ``IDataSource`` (``get_all`` + ``get_by_fields``).
+
+        147 REQ-005: el resultado (hit Y miss) se memoiza por corrida."""
         if alias not in self._sources_registry:
             raise ConfigurationError(
                 f"unknown {kind_label} alias at resolution time",
                 alias=alias,
             )
-        if sc.lookup_key_column is None:
+        key_column = sc.lookup_key_column
+        if key_column is None:
             raise ConfigurationError(
                 f"{kind_label} source requires lookup_key_column",
                 source_type=sc.source_type,
             )
-        lookup_value = self._resolve_lookup_value(
-            sc.lookup_value_source, trigger, document, cif_override=cif_override
-        )
+        lookup_value = self._resolve_lookup_value(sc.lookup_value_source, trigger, document, values)
         if lookup_value is None:
             return None
+        # 147 REQ-005: la clave lleva las coordenadas COMPLETAS de la fuente,
+        # no sólo (campo, valor de clave): dos fuentes de lookup distintas del
+        # mismo campo pueden compartir el valor de clave y devolver cosas
+        # distintas.
+        memo_key = (
+            canonical_field,
+            sc.source_type,
+            key_column,
+            sc.lookup_value_column,
+            lookup_value,
+        )
+        if memo_key in self._lookup_memo:
+            self._memo_hits += 1
+            return self._lookup_memo[memo_key]
+        found = self._lookup_uncached(sc, alias, key_column, lookup_value)
+        self._lookup_memo[memo_key] = found
+        return found
+
+    def _lookup_uncached(
+        self, sc: SourceConfig, alias: str, key_column: str, lookup_value: str
+    ) -> str | None:
+        """El salto real contra la fuente: índice del `prefetch` si está
+        prendido, ``get_by_fields`` si no."""
         if self._config.prefetch_enabled:
-            cache_key = (alias, sc.lookup_key_column, lookup_value, sc.lookup_value_column)
+            cache_key = (alias, key_column, lookup_value, sc.lookup_value_column)
             return self._csv_cache.get(cache_key)
-        rows = self._sources_registry[alias].get_by_fields({sc.lookup_key_column: lookup_value})
+        rows = self._sources_registry[alias].get_by_fields({key_column: lookup_value})
         if not rows:
             return None
         raw = rows[0].get(sc.lookup_value_column)
@@ -581,27 +820,30 @@ class MetadataService:
         spec: str,
         trigger: Trigger,
         document: RVABREPDocument,
-        *,
-        cif_override: str | None = None,
+        values: Mapping[str, str],
     ) -> str | None:
-        """084: parsea ``lookup_value_source`` y devuelve el valor a
+        """084 + 147: parsea ``lookup_value_source`` y devuelve el valor a
         buscar en la fuente de lookup.
 
-        Sintaxis: ``"<scope>.<attr>"`` donde scope es ``trigger`` o
-        ``rvabrep``. Caso especial ``"trigger.cif"`` honra el CIF
-        self-healed (``cif_override``) para preservar la lógica
-        pre-084.
+        Sintaxis: ``"<scope>.<attr>"`` con scope ``trigger``, ``rvabrep`` o
+        ``field`` (147 REQ-001). El scope ``field`` lee de *values*, el dict
+        de lo YA RESUELTO en esta pasada — es lo que permite encadenar
+        saltos. Reemplaza al ``cif_override`` pre-147, que era un único valor
+        suelto y sólo servía para ``trigger.cif``.
         """
         if "." not in spec:
             raise ConfigurationError(
                 "lookup_value_source must be of the form '<scope>.<attr>' "
-                "(e.g. 'trigger.cif' or 'rvabrep.txn_num')",
+                "(e.g. 'trigger.cif', 'rvabrep.txn_num' or 'field.BAC_CIF')",
                 lookup_value_source=spec,
             )
         scope, attr = spec.split(".", 1)
+        if scope == "field":
+            # Ausente = la dependencia no resolvió: esta fuente se saltea.
+            return values.get(attr)
         if scope == "trigger":
             if attr == "cif":
-                return cif_override if cif_override is not None else _trigger_cif(trigger)
+                return _trigger_cif(trigger)
             if hasattr(trigger, attr):
                 value = getattr(trigger, attr)
                 return None if value is None else str(value)
@@ -623,6 +865,6 @@ class MetadataService:
             value = getattr(document, attr)
             return None if value is None else str(value)
         raise ConfigurationError(
-            "unknown scope in lookup_value_source (expected 'trigger' or 'rvabrep')",
+            "unknown scope in lookup_value_source (expected 'trigger', 'rvabrep' or 'field')",
             scope=scope,
         )

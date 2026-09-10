@@ -8,7 +8,13 @@ Constitución (separación de capas).
 
 from __future__ import annotations
 
-__all__ = ["build_metadata_config", "build_niarvilog_store", "build_pipeline"]
+__all__ = [
+    "build_identity_config",
+    "build_identity_resolver",
+    "build_metadata_config",
+    "build_niarvilog_store",
+    "build_pipeline",
+]
 
 import atexit
 from concurrent.futures import ProcessPoolExecutor
@@ -35,6 +41,8 @@ from cmcourier.config.schema import (
     CsvMetadataSourceConfig,
     CsvRvabrepSource,
     CsvTriggerConfig,
+    IdentityConfigModel,
+    IdentitySlotModel,
     IndexingColumnsModel,
     LocalScanTriggerConfig,
     MetadataConfigModel,
@@ -58,6 +66,11 @@ from cmcourier.observability.system_metrics import (
 from cmcourier.orchestrators.staged import StagedPipeline
 from cmcourier.services.document_cache import DocumentCacheService
 from cmcourier.services.idempotency import IdempotencyCoordinator
+from cmcourier.services.identity import (
+    IdentityConfig,
+    IdentityResolver,
+    IdentitySlotConfig,
+)
 from cmcourier.services.indexing import IndexingColumnsConfig, IndexingService
 from cmcourier.services.mapping import MappingColumnsConfig, MappingService
 from cmcourier.services.metadata import (
@@ -694,6 +707,44 @@ def _metadata_config_from_schema(model: MetadataConfigModel) -> MetadataConfig:
         field_sources=field_sources,
         prefetch_enabled=model.prefetch_enabled,
     )
+
+
+def _identity_slot_from_schema(model: IdentitySlotModel | None) -> IdentitySlotConfig | None:
+    if model is None:
+        return None
+    return IdentitySlotConfig(
+        field=model.field,
+        on_missing=model.on_missing,
+        max_digits=model.max_digits,
+        default_value=model.default_value,
+    )
+
+
+def build_identity_config(model: IdentityConfigModel) -> IdentityConfig:
+    """147 REQ-002: ``IdentityConfigModel`` → :class:`IdentityConfig`.
+
+    Un slot ausente en el YAML queda ausente en el dominio, y el resolver lo
+    lee de ``trigger.audit_row()`` (comportamiento pre-147).
+    """
+    return IdentityConfig(
+        shortname=_identity_slot_from_schema(model.shortname),
+        cif=_identity_slot_from_schema(model.cif),
+        system_id=_identity_slot_from_schema(model.system_id),
+    )
+
+
+def build_identity_resolver(
+    config: PipelineConfig,
+    metadata_service: MetadataService,
+) -> IdentityResolver:
+    """147 REQ-002: el resolver de identidad, sobre el MISMO
+    :class:`MetadataService` que usa S3.
+
+    Compartir la instancia no es un detalle: el memo por corrida (REQ-005)
+    vive adentro del servicio, así que un CIF resuelto para la identidad no
+    se vuelve a consultar cuando S3 pide el mismo salto.
+    """
+    return IdentityResolver(build_identity_config(config.identity), metadata_service)
 
 
 def build_metadata_config(model: MetadataConfigModel) -> MetadataConfig:

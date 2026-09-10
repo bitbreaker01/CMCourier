@@ -39,6 +39,8 @@ __all__ = [
     "FieldSourceItem",
     "HeavyLightLanesConfig",
     "INLINE_CONNECTION_ALIAS",
+    "IdentityConfigModel",
+    "IdentitySlotModel",
     "IndexingColumnsModel",
     "IndexingConfig",
     "IndexingSourceConfig",
@@ -71,6 +73,7 @@ __all__ = [
     "as400_probe_sql",
     "credential_env_vars",
     "mssql_probe_sql",
+    "split_field_reference",
     "split_lookup_source_type",
 ]
 
@@ -547,6 +550,57 @@ def split_lookup_source_type(source_type: str) -> tuple[str, str] | None:
     return kind, alias
 
 
+# 147: scopes admitidos por ``lookup_value_source``. ``field`` es el tercero
+# (REQ-001): la clave de búsqueda es el valor YA RESUELTO de otro campo.
+LOOKUP_VALUE_SCOPES: tuple[str, ...] = ("trigger", "rvabrep", "field")
+
+
+def split_field_reference(lookup_value_source: str) -> str | None:
+    """``"field.BAC_CIF"`` → ``"BAC_CIF"``; ``None`` si no es scope ``field``.
+
+    Único parser de la arista campo → campo del grafo de dependencias (147
+    REQ-001). Lo consumen el validador de :class:`MetadataConfigModel` (al
+    cargar el YAML) y el resolver de metadata (al ordenar topológicamente).
+    """
+    scope, sep, attr = lookup_value_source.partition(".")
+    if not sep or scope != "field":
+        return None
+    return attr
+
+
+def _find_dependency_cycle(graph: dict[str, list[str]]) -> list[str] | None:
+    """El PRIMER ciclo del grafo, completo y en orden (``A -> B -> C -> A``).
+
+    Devolver el ciclo entero y no un "cycle detected" pelado es el punto:
+    el operador tiene que poder ir al YAML y cortar la arista concreta.
+    """
+    done: set[str] = set()
+    stack: list[str] = []
+    on_stack: set[str] = set()
+
+    def visit(node: str) -> list[str] | None:
+        if node in done:
+            return None
+        if node in on_stack:
+            return [*stack[stack.index(node) :], node]
+        on_stack.add(node)
+        stack.append(node)
+        for dep in graph.get(node, ()):
+            cycle = visit(dep)
+            if cycle is not None:
+                return cycle
+        stack.pop()
+        on_stack.discard(node)
+        done.add(node)
+        return None
+
+    for root in graph:
+        cycle = visit(root)
+        if cycle is not None:
+            return cycle
+    return None
+
+
 class ValidationModel(BaseModel):
     model_config = _STRICT
     allowed_pattern: str | None = None
@@ -624,6 +678,12 @@ class FieldSourceItem(BaseModel):
 
     Para sources `trigger` y `rvabrep` puros, ``lookup_value_source``
     se ignora — esos paths leen directamente sin lookup.
+
+    147 agrega el tercer scope ``"field.<CANONICAL_NAME>"``: la clave de
+    búsqueda es el valor YA RESUELTO de otro campo, que es lo que permite
+    encadenar saltos (hijo → padre → shortname → CIF). El grafo que arman
+    esas referencias se valida al CARGAR el YAML — ver
+    :class:`MetadataConfigModel`.
     """
 
     model_config = _STRICT
@@ -651,9 +711,9 @@ class FieldSourceItem(BaseModel):
         if "." not in value:
             raise ValueError(f"lookup_value_source must be '<scope>.<attr>' (got {value!r})")
         scope = value.split(".", 1)[0]
-        if scope not in ("trigger", "rvabrep"):
+        if scope not in LOOKUP_VALUE_SCOPES:
             raise ValueError(
-                f"lookup_value_source scope must be 'trigger' or 'rvabrep' (got {scope!r})"
+                f"lookup_value_source scope must be 'trigger', 'rvabrep' or 'field' (got {scope!r})"
             )
         return value
 
@@ -724,6 +784,111 @@ class MetadataConfigModel(BaseModel):
                         f"field_sources[{field_name}]: source_type {item.source_type!r} "
                         f"but metadata.sources[{alias}] is kind {declared!r}"
                     )
+        return self
+
+    def field_dependency_graph(self) -> dict[str, list[str]]:
+        """147 REQ-001: campo → campos de los que depende, en orden de config.
+
+        Una arista por cada ``lookup_value_source: "field.<NAME>"``. Referirse
+        a un campo que no existe es un error de config y explota acá, al
+        cargar el YAML — nunca en runtime, donde ya sería tarde.
+        """
+        graph: dict[str, list[str]] = {}
+        for field_name, field_config in self.field_sources.items():
+            deps: list[str] = []
+            for item in field_config.sources:
+                dep = split_field_reference(item.lookup_value_source)
+                if dep is None:
+                    continue
+                if dep not in self.field_sources:
+                    raise ValueError(
+                        f"field_sources[{field_name}]: lookup_value_source "
+                        f"{item.lookup_value_source!r} references field {dep!r}, "
+                        "which is not a key of metadata.field_sources"
+                    )
+                if dep not in deps:
+                    deps.append(dep)
+            graph[field_name] = deps
+        return graph
+
+    @model_validator(mode="after")
+    def _field_dependencies_are_acyclic(self) -> MetadataConfigModel:
+        """147 REQ-001: el grafo de ``field.<NAME>`` no puede tener ciclos.
+
+        Un ciclo se reporta COMPLETO y en orden (``A -> B -> C -> A``): un
+        "cycle detected" pelado obliga al operador a reconstruir el grafo a
+        mano sobre un YAML de cientos de líneas.
+        """
+        cycle = _find_dependency_cycle(self.field_dependency_graph())
+        if cycle is not None:
+            raise ValueError(
+                "metadata.field_sources has a dependency cycle through "
+                f"lookup_value_source 'field.<NAME>': {' -> '.join(cycle)}"
+            )
+        return self
+
+
+class IdentitySlotModel(BaseModel):
+    """147 REQ-002: un slot del bloque ``identity:``.
+
+    ``field`` es el nombre canónico de ``metadata.field_sources`` que resuelve
+    ese pedazo de identidad — el mismo motor de cadenas, así que puede llegar
+    después de tres saltos. ``on_missing`` decide qué pasa cuando la cadena no
+    dio nada: ``fail`` (default) rompe el documento con un error que nombra la
+    cadena entera, ``warn`` deja el valor vacío y sigue, ``default`` usa
+    ``default_value``.
+
+    ``max_digits`` sólo tiene lectura sobre el CIF (lo valida
+    :class:`IdentityConfigModel`): es la precisión REAL de ``CTENUM``, y un
+    valor más largo rompe con ``22003`` del lado del banco.
+    """
+
+    model_config = _STRICT
+    field: str
+    on_missing: Literal["fail", "warn", "default"] = "fail"
+    max_digits: int | None = Field(default=None, gt=0)
+    default_value: str | None = None
+
+    @model_validator(mode="after")
+    def _default_requires_a_default_value(self) -> IdentitySlotModel:
+        if self.on_missing == "default" and self.default_value is None:
+            raise ValueError(
+                "on_missing: 'default' requires a non-null default_value "
+                "(there is nothing to fall back to otherwise)"
+            )
+        return self
+
+
+class IdentityConfigModel(BaseModel):
+    """147 REQ-002: bloque top-level ``identity:``.
+
+    Reemplaza el hardcode de ``"BAC_CIF"`` que vivía en el resolver de
+    metadata. Los tres slots son OPCIONALES: un slot ausente deja el
+    comportamiento pre-147 (el valor se lee del trigger, sin cadena).
+    """
+
+    model_config = _STRICT
+    shortname: IdentitySlotModel | None = None
+    cif: IdentitySlotModel | None = None
+    system_id: IdentitySlotModel | None = None
+
+    def slots(self) -> tuple[tuple[str, IdentitySlotModel | None], ...]:
+        """Los tres slots con su nombre, en orden fijo. Única fuente de verdad
+        del recorrido para validadores y wiring."""
+        return (
+            ("shortname", self.shortname),
+            ("cif", self.cif),
+            ("system_id", self.system_id),
+        )
+
+    @model_validator(mode="after")
+    def _max_digits_only_on_cif(self) -> IdentityConfigModel:
+        for name, slot in self.slots():
+            if name != "cif" and slot is not None and slot.max_digits is not None:
+                raise ValueError(
+                    f"identity.{name}: max_digits is only valid on `cif` "
+                    "(it models the real precision of the CTENUM column)"
+                )
         return self
 
 
@@ -1138,6 +1303,9 @@ class PipelineConfig(BaseModel):
     indexing: IndexingConfig
     mapping: MappingConfig
     metadata: MetadataConfigModel
+    # 147 REQ-002: bloque opcional. Ausente ⇒ comportamiento pre-147 (la
+    # identidad se lee del trigger, sin cadena).
+    identity: IdentityConfigModel = Field(default_factory=IdentityConfigModel)
     assembly: AssemblyConfig
     cmis: CmisConfigModel
     tracking: TrackingConfig
@@ -1163,6 +1331,20 @@ class PipelineConfig(BaseModel):
                     "(lowercase letter, then lowercase letters / digits / _, 32 chars max)"
                 )
         return value
+
+    @model_validator(mode="after")
+    def _identity_fields_exist(self) -> PipelineConfig:
+        """147 REQ-002: cada ``identity.<slot>.field`` tiene que ser una clave
+        de ``metadata.field_sources``. El root model ve los dos bloques, así
+        que el typo del operador muere al cargar el YAML."""
+        known = self.metadata.field_sources
+        for name, slot in self.identity.slots():
+            if slot is not None and slot.field not in known:
+                raise ValueError(
+                    f"identity.{name}.field {slot.field!r} is not a key of "
+                    f"metadata.field_sources (declared: {sorted(known) or 'none'})"
+                )
+        return self
 
     @model_validator(mode="after")
     def _check_connection_references(self) -> PipelineConfig:

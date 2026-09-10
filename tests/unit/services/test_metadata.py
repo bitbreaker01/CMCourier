@@ -172,6 +172,13 @@ def _basic_config() -> MetadataConfig:
                         source_type="csv:clients",
                         lookup_value_column="Nombre_Cliente",
                         lookup_key_column="CIF",
+                        # 147 REQ-001: pre-147 esto decía `trigger.cif` (el
+                        # default) y funcionaba SÓLO porque el resolver tenía
+                        # un self-healing hardcodeado de `BAC_CIF` que
+                        # inyectaba el valor curado por atrás. Ahora la
+                        # dependencia se declara, que es el punto de la spec:
+                        # el nombre del cliente se busca por el CIF RESUELTO.
+                        lookup_value_source="field.BAC_CIF",
                     ),
                 ),
             ),
@@ -373,6 +380,12 @@ class TestFallbackChain:
 
 # ---------------------------------------------------------------------------
 # CIF self-healing
+#
+# 147 REQ-001 borró el bloque hardcodeado que curaba `BAC_CIF` y lo hilvanaba
+# por `cif_override`. El COMPORTAMIENTO observable de esta clase no cambia:
+# ahora sale del mecanismo general (orden topológico + `field.BAC_CIF`), que
+# es lo que estos tests verifican. Los campos `healed_trigger` / `healed_cif`
+# quedan deprecados un ciclo (REQ-004) y siguen cubiertos acá.
 # ---------------------------------------------------------------------------
 
 
@@ -414,13 +427,25 @@ class TestCifSelfHealing:
     def test_self_healed_cif_used_for_subsequent_csv_lookups(
         self, service: MetadataService
     ) -> None:
-        # trigger.cif=None, document has CIF=123456. After self-heal, csv:clients
-        # lookup by CIF=123456 returns "JUAN PEREZ TEST".
+        # trigger.cif=None, document has CIF=123456. El CIF resuelto es la
+        # clave del lookup a csv:clients (147: vía `field.BAC_CIF`; pre-147,
+        # vía el `cif_override` hardcodeado). Mismo resultado observable.
         trigger = TriggerRecord(shortname="X", cif=None, system_id="1")
         document = _make_document(index2="123456")
         mapping = _make_mapping("CIF", "Nombre_Cliente")
         result = service.resolve(trigger, document, mapping)
         assert result.metadata["BAC_Nombre_Cliente"] == "JUAN PEREZ TEST"
+
+    def test_el_cif_curado_llega_aunque_no_lo_pidan(self, service: MetadataService) -> None:
+        # 147: `BAC_CIF` entra como DEPENDENCIA de BAC_Nombre_Cliente sin
+        # estar en el mapping. Se resuelve igual (y alimenta `healed_cif`),
+        # pero NO viaja en la metadata: sólo se devuelve lo pedido.
+        trigger = TriggerRecord(shortname="X", cif=None, system_id="1")
+        document = _make_document(index2="123456")
+        result = service.resolve(trigger, document, _make_mapping("Nombre_Cliente"))
+        assert result.metadata["BAC_Nombre_Cliente"] == "JUAN PEREZ TEST"
+        assert "BAC_CIF" not in result.metadata.properties
+        assert result.healed_cif == "123456"
 
 
 # ---------------------------------------------------------------------------

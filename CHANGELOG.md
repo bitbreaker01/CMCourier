@@ -12,6 +12,30 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- **Cadenas configurables de identidad — motor y bloque `identity:`
+  (147, parte 1).** `lookup_value_source` acepta un tercer scope,
+  `field.<NOMBRE_CANONICO>`: la clave de búsqueda pasa a ser el valor YA
+  RESUELTO de otro campo, que es lo que permite encadenar los saltos que
+  el operador necesita (hijo → padre → shortname → CIF). El resolver de
+  metadata arma el grafo de dependencias, lo ordena topológicamente y
+  resuelve en ese orden, sólo los campos pedidos más sus dependencias
+  transitivas; una dependencia que no resolvió saltea SÓLO esa fuente y
+  la cadena sigue con la próxima, sin abortar el documento. Los ciclos y
+  las referencias a campos inexistentes fallan AL CARGAR el YAML, con el
+  ciclo completo en el mensaje (`A -> B -> C -> A`), nunca en runtime.
+  Esto reemplaza al self-healing de CIF hardcodeado (`"BAC_CIF"` a mano,
+  un solo salto, `cif_override` hilvanado por parámetro), que se borró.
+  Bloque top-level `identity:` nuevo con tres slots opcionales
+  (`shortname` / `cif` / `system_id`): cada uno declara qué campo lo
+  resuelve y qué hacer si no resolvió (`on_missing: fail | warn |
+  default`), y un slot ausente deja el comportamiento pre-147. El `fail`
+  levanta un error que nombra el slot Y la cadena completa que se
+  intentó, fuente por fuente. `identity.cif.max_digits` valida la
+  MAGNITUD contra la precisión real de `CTENUM`: un CIF no numérico deja
+  de convertirse en un `0` silencioso. Memo en memoria por corrida sobre
+  los saltos de la cadena, con contador de hits, ortogonal al `prefetch`
+  de tablas y al cache de metadata (037).
+
 - **Formato declarativo del valor de un metadato (146).** Bloque
   `format:` nuevo en `metadata.field_sources`, en dos ubicaciones y dos
   momentos: **por fuente** corre entre buscar el valor y validarlo, y

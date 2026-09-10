@@ -100,6 +100,10 @@ def _build_metadata_config() -> MetadataConfig:
                         source_type="csv:clients",
                         lookup_value_column="Nombre_Cliente",
                         lookup_key_column="CIF",
+                        # 147 REQ-001: la dependencia se DECLARA. Pre-147 esto
+                        # decía `trigger.cif` (el default) y andaba sólo por el
+                        # self-healing hardcodeado de `BAC_CIF`, que ya no está.
+                        lookup_value_source="field.BAC_CIF",
                     ),
                 ),
             ),

@@ -39,6 +39,42 @@ class TestAcceptedScopes:
         assert item.lookup_value_source == spec
 
 
+class TestScopeField:
+    """147 REQ-001: tercer scope ``field.<CANONICAL_NAME>`` — la clave de
+    búsqueda es el valor YA RESUELTO de otro campo."""
+
+    @pytest.mark.parametrize(
+        "spec",
+        ["field.BAC_CIF", "field.BAC_Shortname", "field.BAC_Afiliado_Padre"],
+    )
+    def test_field_scope_accepted(self, spec: str) -> None:
+        item = FieldSourceItem(
+            source_type="as400:clientes",
+            lookup_value_column="CUSSHN",
+            lookup_key_column="CUSAFI",
+            lookup_value_source=spec,
+        )
+        assert item.lookup_value_source == spec
+
+    def test_field_scope_still_requires_the_dotted_shape(self) -> None:
+        with pytest.raises(ValidationError) as exc:
+            FieldSourceItem(
+                source_type="as400:clientes",
+                lookup_value_column="CUSSHN",
+                lookup_value_source="field",
+            )
+        assert "<scope>.<attr>" in str(exc.value)
+
+    def test_error_text_lists_field_as_a_valid_scope(self) -> None:
+        with pytest.raises(ValidationError) as exc:
+            FieldSourceItem(
+                source_type="csv:clients",
+                lookup_value_column="Nombre",
+                lookup_value_source="campo.BAC_CIF",
+            )
+        assert "field" in str(exc.value)
+
+
 class TestRejected:
     def test_missing_dot_rejected(self) -> None:
         with pytest.raises(ValidationError) as exc:
