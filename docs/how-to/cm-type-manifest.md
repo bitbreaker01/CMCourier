@@ -197,9 +197,62 @@ manifest y la que aparece en `MapeoRVI_CM.IDCM`:
 3. Si ninguno matchea, el tipo va a `without_code` del manifest — no
    entra al mapeo, y el operador decide si le importa.
 
-Dos tipos con el mismo ID corto son un error de configuración del
-servidor: `types discover` levanta `ConfigurationError` listando ambos
-`type_id`.
+## ID corto compartido
+
+En PRD hay dos clases documentales distintas que declaran el MISMO ID
+corto (`DC35`: `BAC_01_01_01_03_07_01` y `..._02`). Es dato real del
+servidor, así que **el discover no aborta**: elige un ganador
+determinístico y guarda a los demás como candidatos.
+
+El ganador se elige así, y siempre igual entre corridas:
+
+1. Gana el tipo cuyo `displayName` empieza con `"<ID corto> - "` — la
+   convención con la que CM nombra la clase "buena".
+2. Si ninguno la cumple, o la cumplen varios, gana el primero en el
+   orden en que el servidor los publicó.
+
+Los que pierden van **enteros** (con sus propiedades y decisiones) a
+`duplicates` en el manifest, y el ganador queda `reviewed: false` con
+una línea en `changes` por cada candidato.
+
+**`types discover` avisa** con un WARNING por candidato (la pestaña
+`M·MODELO` escribe la misma línea en su log después de Descubrir o
+Actualizar):
+
+```text
+WARNING: ID corto compartido DC35: ganador $t!-2_BAC_..._01v-1 (DC35 - Contrato);
+candidato $t!-2_BAC_..._02v-1 (Contrato viejo)
+```
+
+**`types show DC35`** lista los candidatos al final del encabezado:
+
+```text
+Candidatos con el mismo ID corto:
+  $t!-2_BAC_..._02v-1 (Contrato viejo)
+  elegí uno con: cmcourier types review DC35 --type-id TYPE_ID
+```
+
+**`types review DC35 --type-id ...`** promueve el candidato que elijas:
+entra con SUS propiedades y SUS decisiones (ya estaban completas en
+`duplicates`, no hace falta volver a hablar con el servidor), el ganador
+anterior pasa a ser candidato, y el tipo queda `reviewed: false` con
+`changes: ["elegido a mano sobre <type_id anterior>"]`. Se aplica ANTES
+que `--use` / `--omit` / `--folder`, así que podés hacer todo de una:
+
+```bash
+cmcourier types review DC35 \
+  --type-id '$t!-2_BAC_..._02v-1' --use BAC_CIF --done
+```
+
+`diff` y `update` respetan tu elección: si el `type_id` que elegiste
+sigue siendo uno de los candidatos vivos, ese es el ganador con el que
+comparan. Sin eso, cada `diff` reportaría un cambio de `type_id`
+fantasma y cada `update` te pisaría la elección.
+
+**`types check`** lo reporta por candidato: WARNING si el `MapeoRVI_CM`
+no usa ese ID corto (ruido del servidor, no rompe nada), CRITICAL si SÍ
+lo usa — porque ahí los uploads podrían estar yendo a la clase
+equivocada y lo tenés que resolver vos.
 
 ## Cómo se deriva la carpeta
 
@@ -224,6 +277,7 @@ cambió. Ejemplo real (un tipo con dos propiedades, una `usar` y una
 ```json
 {
   "discovered_at": "2026-08-30T12:00:00+00:00",
+  "duplicates": [],
   "repository_id": "repo1",
   "service_url": "https://cm.bank.example/cmis/browser",
   "types": {
@@ -280,6 +334,12 @@ Sólo se guardan las propiedades **escribibles** (`updatability` en
 `readwrite` / `oncreate`); las readonly no le sirven a nadie aguas abajo.
 `cmis:name` y `cmis:objectTypeId` se excluyen porque las pone el código
 en cada upload, no el operador.
+
+`duplicates` es la lista de los candidatos que perdieron un ID corto
+compartido: cada elemento tiene la MISMA forma que un value de `types`
+más su `id_corto` (que en el dict es la clave y en una lista no tendría
+dónde vivir). Un manifest viejo sin la clave se lee igual: se asume
+vacía.
 
 ## YAML: activar el modo manifest
 

@@ -86,12 +86,13 @@ def _entry(
     )
 
 
-def _manifest(*entries: CmTypeEntry) -> CmTypeManifest:
+def _manifest(*entries: CmTypeEntry, duplicates: tuple[CmTypeEntry, ...] = ()) -> CmTypeManifest:
     return CmTypeManifest(
         service_url="http://cm.test/browser",
         repository_id="repo",
         discovered_at="2026-01-01T00:00:00Z",
         types={e.id_corto: e for e in entries},
+        duplicates=duplicates,
     )
 
 
@@ -269,6 +270,59 @@ class TestWarningFixedValueParsing:
         manifest = _manifest(_entry("DC01", props=(prop,)))
         field_sources = {"BAC_Fecha": FieldSourceConfig(sources=(_source(),), default_value="ayer")}
         report = run_manifest_check(_mapping(manifest, "DC01"), manifest, field_sources)
+        assert report.findings == ()
+
+
+class TestIdCortoCompartido:
+    """145 REQ-002: dos tipos CM con el mismo ID corto (visto en PRD: ``DC35``)."""
+
+    def _dup(self, id_corto: str = "DC35") -> CmTypeEntry:
+        return CmTypeEntry(
+            id_corto=id_corto,
+            type_id=f"$t!-2_BAC_{id_corto}_02v-1",
+            local_name=f"BAC_{id_corto}_02",
+            display_name=f"{id_corto} - El otro",
+            folder=f"/$type/BAC_{id_corto}_02",
+        )
+
+    def test_duplicate_of_an_unmapped_code_warns(self) -> None:
+        manifest = _manifest(_entry("DC01"), _entry("DC35"), duplicates=(self._dup(),))
+        report = run_manifest_check(_mapping(manifest, "DC01"), manifest, {})
+        assert not report.has_critical
+        assert _severities(report, "ID corto compartido") == ["WARNING"]
+
+    def test_duplicate_of_a_mapped_code_is_critical(self) -> None:
+        manifest = _manifest(_entry("DC35"), duplicates=(self._dup(),))
+        report = run_manifest_check(_mapping(manifest, "DC35"), manifest, {})
+        assert report.has_critical
+        assert _severities(report, "ID corto compartido") == ["CRITICAL"]
+
+    def test_the_finding_names_both_types_and_the_way_out(self) -> None:
+        manifest = _manifest(_entry("DC35"), duplicates=(self._dup(),))
+        report = run_manifest_check(_mapping(manifest, "DC35"), manifest, {})
+        finding = next(f for f in report.findings if "ID corto compartido" in f.message)
+        assert finding.id_corto == "DC35"
+        assert finding.prop_id is None
+        assert "$t!-2_BAC_DC35v-1" in finding.message
+        assert "$t!-2_BAC_DC35_02v-1" in finding.message
+        assert "DC35 - El otro" in finding.message
+        assert "--type-id" in finding.message
+
+    def test_one_finding_per_candidate(self) -> None:
+        otro = CmTypeEntry(
+            id_corto="DC35",
+            type_id="$t!-2_BAC_DC35_03v-1",
+            local_name="BAC_DC35_03",
+            display_name="DC35 - El tercero",
+            folder="/$type/BAC_DC35_03",
+        )
+        manifest = _manifest(_entry("DC35"), duplicates=(self._dup(), otro))
+        report = run_manifest_check(_mapping(manifest, "DC35"), manifest, {})
+        assert _severities(report, "ID corto compartido") == ["CRITICAL", "CRITICAL"]
+
+    def test_a_manifest_without_duplicates_says_nothing(self) -> None:
+        manifest = _manifest(_entry("DC35"))
+        report = run_manifest_check(_mapping(manifest, "DC35"), manifest, {})
         assert report.findings == ()
 
 

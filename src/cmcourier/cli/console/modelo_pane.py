@@ -58,6 +58,7 @@ from cmcourier.services.type_manifest import (
     ManifestDiff,
     apply_diff,
     diff_manifest,
+    duplicate_lines,
     mark_reviewed,
     set_decision,
     set_folder,
@@ -366,8 +367,14 @@ class ModeloPane(VerticalScroll):
             f"ok={folders.count(True)} faltan={folders.count(False)} "
             f"sin verificar={folders.count(None)}"
         )
+        self._log_duplicates(manifest)
         self._render_types()
         self._sync_buttons()
+
+    def _log_duplicates(self, manifest: CmTypeManifest) -> None:
+        """Un aviso por ID corto compartido — el mismo texto que el CLI (145)."""
+        for line in duplicate_lines(manifest):
+            self._log(line)
 
     def compare(self) -> None:
         """Compara el manifest local contra lo que hoy publica el servidor."""
@@ -413,6 +420,7 @@ class ModeloPane(VerticalScroll):
             for code in touched[:12]:
                 for line in merged.types[code].changes:
                     self._log(f"  {code}: {line}")
+        self._log_duplicates(merged)
         self._render_types()
         self._sync_buttons()
 

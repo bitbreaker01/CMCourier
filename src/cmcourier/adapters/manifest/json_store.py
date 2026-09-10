@@ -143,6 +143,11 @@ class JsonTypeManifestStore:
             without_code=tuple(
                 (str(pair[0]), str(pair[1])) for pair in data.get("without_code") or ()
             ),
+            # Clave ausente ⇒ manifest escrito antes de 145: sin duplicados.
+            duplicates=tuple(
+                _entry_from_json(str(raw.get("id_corto") or ""), raw)
+                for raw in data.get("duplicates") or ()
+            ),
         )
 
     def save(self, manifest: CmTypeManifest) -> None:
@@ -154,6 +159,11 @@ class JsonTypeManifestStore:
             "discovered_at": manifest.discovered_at,
             "types": {code: _entry_to_json(e) for code, e in manifest.types.items()},
             "without_code": [list(pair) for pair in manifest.without_code],
+            # Misma codificación que un value de ``types``, más el ``id_corto``:
+            # acá es una LISTA, no hay clave de dict donde guardarlo.
+            "duplicates": [
+                {"id_corto": e.id_corto, **_entry_to_json(e)} for e in manifest.duplicates
+            ],
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")

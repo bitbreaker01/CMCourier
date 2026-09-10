@@ -30,10 +30,12 @@ from cmcourier.services.type_manifest import (
     build_entry_from_type,
     build_manifest,
     diff_manifest,
+    duplicate_lines,
     flatten_types,
     mark_reviewed,
     set_decision,
     set_folder,
+    set_type_choice,
 )
 
 pytestmark = pytest.mark.unit
@@ -103,13 +105,16 @@ def _prop(pid: str, **kw: Any) -> CmPropertyDef:
 
 
 def _manifest(
-    *entries: CmTypeEntry, discovered_at: str = "2026-01-01T00:00:00+00:00"
+    *entries: CmTypeEntry,
+    discovered_at: str = "2026-01-01T00:00:00+00:00",
+    duplicates: tuple[CmTypeEntry, ...] = (),
 ) -> CmTypeManifest:
     return CmTypeManifest(
         service_url="http://cm/browser",
         repository_id="repo",
         discovered_at=discovered_at,
         types={e.id_corto: e for e in entries},
+        duplicates=duplicates,
     )
 
 
@@ -307,22 +312,6 @@ class TestBuildManifest145:
         assert manifest.discovered_at == "2026-02-03T04:05:06+00:00"
         assert dict(manifest.types) == {}
 
-    def test_id_corto_duplicado_es_configuration_error(self) -> None:
-        tree = [
-            {"type": _type_def(type_id="$t!-2_Av-1", local_name="A")},
-            {"type": _type_def(type_id="$t!-2_Bv-1", local_name="B")},
-        ]
-        with pytest.raises(ConfigurationError) as exc:
-            build_manifest(
-                tree,
-                service_url="u",
-                repository_id="r",
-                discovered_at="2026-01-01T00:00:00+00:00",
-            )
-        assert "$t!-2_Av-1" in str(exc.value)
-        assert "$t!-2_Bv-1" in str(exc.value)
-        assert "DC01" in str(exc.value)
-
     def test_on_type_reporta_progreso_por_tipo(self) -> None:
         seen: list[tuple[int, int]] = []
         build_manifest(
@@ -333,6 +322,176 @@ class TestBuildManifest145:
             on_type=lambda done, total: seen.append((done, total)),
         )
         assert seen == [(1, 4), (2, 4), (3, 4), (4, 4)]
+
+
+# ---------------------------------------------------------------------------
+# ID corto compartido (145 REQ-002)
+# ---------------------------------------------------------------------------
+
+
+def _shared_tree(
+    *,
+    first_display: str = "DC35 - Ganador",
+    second_display: str = "Otro nombre",
+) -> list[dict[str, Any]]:
+    """Dos tipos distintos que declaran el MISMO ID corto (PRD: ``DC35``)."""
+    return [
+        {
+            "type": _type_def(
+                type_id="$t!-2_BAC_..._01v-1",
+                local_name="BAC_A",
+                display_name=first_display,
+                id_corto="DC35",
+            )
+        },
+        {
+            "type": _type_def(
+                type_id="$t!-2_BAC_..._02v-1",
+                local_name="BAC_B",
+                display_name=second_display,
+                id_corto="DC35",
+            )
+        },
+    ]
+
+
+def _build(tree: list[dict[str, Any]]) -> CmTypeManifest:
+    return build_manifest(
+        tree,
+        service_url="http://cm/browser",
+        repository_id="repo",
+        discovered_at="2026-01-01T00:00:00+00:00",
+    )
+
+
+class TestIdCortoCompartido145:
+    def test_no_aborta_y_deja_un_solo_ganador(self) -> None:
+        manifest = _build(_shared_tree())
+        assert set(manifest.types) == {"DC35"}
+        assert len(manifest.duplicates) == 1
+
+    def test_gana_el_que_lleva_el_prefijo_en_el_display_name(self) -> None:
+        manifest = _build(_shared_tree(first_display="Otro", second_display="DC35 - Ganador"))
+        assert manifest.types["DC35"].type_id == "$t!-2_BAC_..._02v-1"
+        assert manifest.duplicates[0].type_id == "$t!-2_BAC_..._01v-1"
+
+    def test_sin_prefijo_gana_el_primero_del_servidor(self) -> None:
+        manifest = _build(_shared_tree(first_display="Uno", second_display="Dos"))
+        assert manifest.types["DC35"].type_id == "$t!-2_BAC_..._01v-1"
+
+    def test_con_varios_prefijos_gana_el_primero_del_servidor(self) -> None:
+        manifest = _build(_shared_tree(first_display="DC35 - A", second_display="DC35 - B"))
+        assert manifest.types["DC35"].type_id == "$t!-2_BAC_..._01v-1"
+
+    def test_el_perdedor_va_entero_a_duplicates(self) -> None:
+        manifest = _build(_shared_tree())
+        dup = manifest.duplicates[0]
+        assert isinstance(dup, CmTypeEntry)
+        assert dup.id_corto == "DC35"
+        assert dup.local_name == "BAC_B"
+        assert dup.folder == "/$type/BAC_B"
+        assert [p.id for p in dup.properties] == ["clbNonGroup.BAC_ID_Corto"]
+
+    def test_el_ganador_queda_sin_revisar_y_con_el_cambio_anotado(self) -> None:
+        manifest = _build(_shared_tree(second_display="Otro nombre"))
+        winner = manifest.types["DC35"]
+        assert winner.reviewed is False
+        assert winner.changes == ("ID corto compartido con $t!-2_BAC_..._02v-1 (Otro nombre)",)
+
+    def test_un_tipo_sin_colision_no_toca_changes(self) -> None:
+        manifest = _build([{"type": _type_def()}])
+        assert manifest.types["DC01"].changes == ()
+        assert manifest.duplicates == ()
+
+    def test_duplicate_lines_nombra_ganador_y_candidato(self) -> None:
+        lineas = duplicate_lines(_build(_shared_tree()))
+        assert len(lineas) == 1
+        assert "WARNING" in lineas[0]
+        assert "ID corto compartido DC35" in lineas[0]
+        assert "ganador $t!-2_BAC_..._01v-1 (DC35 - Ganador)" in lineas[0]
+        assert "candidato $t!-2_BAC_..._02v-1 (Otro nombre)" in lineas[0]
+
+    def test_duplicate_lines_de_un_manifest_limpio_es_vacio(self) -> None:
+        assert duplicate_lines(_build([{"type": _type_def()}])) == ()
+
+
+class TestSetTypeChoice145:
+    def test_promueve_el_candidato_y_degrada_al_ganador(self) -> None:
+        base = _build(_shared_tree())
+        nuevo = set_type_choice(base, "DC35", "$t!-2_BAC_..._02v-1")
+        assert nuevo.types["DC35"].type_id == "$t!-2_BAC_..._02v-1"
+        assert [d.type_id for d in nuevo.duplicates] == ["$t!-2_BAC_..._01v-1"]
+
+    def test_el_promovido_conserva_sus_propiedades_y_decisiones(self) -> None:
+        base = _manifest(
+            _entry(properties=(_prop("p.A"),), decisions={"p.A": DECISION_USE}, reviewed=True),
+            duplicates=(
+                _entry(
+                    type_id="$t!-2_Bv-1",
+                    local_name="BAC_B",
+                    folder="/$type/BAC_B",
+                    properties=(_prop("p.B"),),
+                    decisions={"p.B": DECISION_USE},
+                ),
+            ),
+        )
+        entry = set_type_choice(base, "DC01", "$t!-2_Bv-1").types["DC01"]
+        assert [p.id for p in entry.properties] == ["p.B"]
+        assert entry.decisions["p.B"] == DECISION_USE
+        assert entry.folder == "/$type/BAC_B"
+
+    def test_el_promovido_queda_sin_revisar_con_el_motivo(self) -> None:
+        base = _build(_shared_tree())
+        entry = set_type_choice(base, "DC35", "$t!-2_BAC_..._02v-1").types["DC35"]
+        assert entry.reviewed is False
+        assert entry.changes == ("elegido a mano sobre $t!-2_BAC_..._01v-1",)
+
+    def test_no_muta_el_manifest_original(self) -> None:
+        base = _build(_shared_tree())
+        set_type_choice(base, "DC35", "$t!-2_BAC_..._02v-1")
+        assert base.types["DC35"].type_id == "$t!-2_BAC_..._01v-1"
+        assert len(base.duplicates) == 1
+
+    def test_id_corto_desconocido_falla(self) -> None:
+        with pytest.raises(ConfigurationError):
+            set_type_choice(_build(_shared_tree()), "ZZ99", "$t!-2_BAC_..._02v-1")
+
+    def test_type_id_que_no_es_candidato_falla(self) -> None:
+        with pytest.raises(ConfigurationError) as exc:
+            set_type_choice(_build(_shared_tree()), "DC35", "$t!-2_NADAv-1")
+        assert "$t!-2_NADAv-1" in str(exc.value)
+
+
+class TestAlineacionConLaEleccionLocal145:
+    def _local(self) -> CmTypeManifest:
+        """El operador ya eligió el candidato ``_02`` como ganador de DC35."""
+        return set_type_choice(_build(_shared_tree()), "DC35", "$t!-2_BAC_..._02v-1")
+
+    def test_diff_alinea_el_live_antes_de_comparar(self) -> None:
+        diff = diff_manifest(self._local(), _build(_shared_tree()))
+        assert diff.is_empty
+
+    def test_sin_alinear_el_diff_marcaria_un_cambio_de_type_id(self) -> None:
+        """Prueba de contraste: el live crudo SÍ difiere del local."""
+        live = _build(_shared_tree())
+        assert live.types["DC35"].type_id != self._local().types["DC35"].type_id
+
+    def test_apply_diff_respeta_la_eleccion_local(self) -> None:
+        merged = apply_diff(self._local(), _build(_shared_tree()))
+        assert merged.types["DC35"].type_id == "$t!-2_BAC_..._02v-1"
+
+    def test_apply_diff_arrastra_los_duplicates_del_live_alineados(self) -> None:
+        merged = apply_diff(self._local(), _build(_shared_tree()))
+        assert [d.type_id for d in merged.duplicates] == ["$t!-2_BAC_..._01v-1"]
+
+    def test_apply_diff_sin_eleccion_local_copia_los_duplicates_del_live(self) -> None:
+        merged = apply_diff(_manifest(), _build(_shared_tree()))
+        assert [d.type_id for d in merged.duplicates] == ["$t!-2_BAC_..._02v-1"]
+
+    def test_no_alinea_si_el_type_id_local_no_esta_entre_los_candidatos_vivos(self) -> None:
+        local = _manifest(_entry(id_corto="DC35", type_id="$t!-2_VIEJOv-1"))
+        diff = diff_manifest(local, _build(_shared_tree()))
+        assert "~ type_id: $t!-2_VIEJOv-1 → $t!-2_BAC_..._01v-1" in diff.changed["DC35"]
 
 
 # ---------------------------------------------------------------------------

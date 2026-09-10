@@ -253,6 +253,31 @@ def _used_canonical_names(entry: CmTypeEntry) -> set[str]:
     return {canonical_name(p.id) for p in entry.usable_properties()}
 
 
+def _check_duplicates(manifest: CmTypeManifest, mapped: set[str]) -> list[CheckFinding]:
+    """Un hallazgo por candidato que perdió su ID corto (145 REQ-002).
+
+    Que dos clases compartan el ID corto no rompe nada si el mapeo no
+    usa ese código: es ruido del servidor, WARNING. Si el banco SÍ lo
+    usa, el upload podría estar yendo a la clase equivocada — eso es
+    CRITICAL y lo tiene que resolver el operador a mano.
+    """
+    out: list[CheckFinding] = []
+    for dup in manifest.duplicates:
+        winner = manifest.types.get(dup.id_corto)
+        severity: Severity = "CRITICAL" if dup.id_corto in mapped else "WARNING"
+        out.append(
+            CheckFinding(
+                severity,
+                dup.id_corto,
+                None,
+                f"ID corto compartido: {winner.type_id if winner else '(ninguno)'} vs "
+                f"{dup.type_id} ({dup.display_name}) — elegí con "
+                f"`types review {dup.id_corto} --type-id ...`",
+            )
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Entrada pública
 # ---------------------------------------------------------------------------
@@ -286,6 +311,7 @@ def run_manifest_check(
             continue
         used |= _used_canonical_names(entry)
         findings.extend(_check_entry(entry, field_sources))
+    findings.extend(_check_duplicates(manifest, set(mapped)))
     findings.extend(
         CheckFinding(
             "INFO", None, None, f"metadata.field_sources.{name} no lo usa ningún tipo mapeado"

@@ -18,10 +18,12 @@ __all__ = [
     "build_entry_from_type",
     "build_manifest",
     "diff_manifest",
+    "duplicate_lines",
     "flatten_types",
     "mark_reviewed",
     "set_decision",
     "set_folder",
+    "set_type_choice",
 ]
 
 import re
@@ -203,6 +205,46 @@ def build_entry_from_type(type_def: Mapping[str, Any]) -> CmTypeEntry | None:
     )
 
 
+def _pick_winner(id_corto: str, group: list[CmTypeEntry]) -> CmTypeEntry:
+    """El ganador de un ID corto compartido, de forma determinística.
+
+    Gana el tipo cuyo ``displayName`` empieza con ``"<id corto> - "`` —
+    la convención con la que CM nombra la clase "buena". Si ninguno la
+    cumple, o la cumplen varios, gana el primero en el orden en que el
+    servidor los publicó: dos discovers seguidos tienen que dar lo mismo.
+    """
+    prefix = f"{id_corto} - "
+    marked = [e for e in group if e.display_name.startswith(prefix)]
+    return marked[0] if len(marked) == 1 else group[0]
+
+
+def _resolve_duplicates(
+    candidates: Mapping[str, list[CmTypeEntry]],
+) -> tuple[dict[str, CmTypeEntry], tuple[CmTypeEntry, ...]]:
+    """Parte los candidatos en ganadores (por ID corto) y perdedores.
+
+    Un ID corto compartido es dato real del servidor (en PRD, ``DC35``):
+    no aborta nada. El ganador queda sin revisar y con una línea de
+    ``changes`` por cada candidato que perdió, para que el operador se
+    entere y elija con ``types review IDCM --type-id`` si no le gusta.
+    """
+    types: dict[str, CmTypeEntry] = {}
+    losers: list[CmTypeEntry] = []
+    for code, group in candidates.items():
+        if len(group) == 1:
+            types[code] = group[0]
+            continue
+        winner = _pick_winner(code, group)
+        rest = [e for e in group if e is not winner]
+        types[code] = replace(
+            winner,
+            reviewed=False,
+            changes=tuple(f"ID corto compartido con {e.type_id} ({e.display_name})" for e in rest),
+        )
+        losers.extend(rest)
+    return types, tuple(losers)
+
+
 def build_manifest(
     types: Iterable[Mapping[str, Any]],
     *,
@@ -215,12 +257,13 @@ def build_manifest(
 
     ``on_type(done, total)`` se llama después de procesar cada tipo — lo
     usa :mod:`cmcourier.services.type_discovery` para el progreso.
-    Dos tipos con el mismo ID corto son un error de configuración del
-    servidor: no hay forma de decidir cuál gana.
+    Dos tipos con el mismo ID corto NO abortan el descubrimiento: se
+    elige un ganador determinístico y los demás quedan enteros en
+    ``duplicates`` (:func:`_resolve_duplicates`).
     """
     flat = flatten_types(types)
     total = len(flat)
-    entries: dict[str, CmTypeEntry] = {}
+    candidates: dict[str, list[CmTypeEntry]] = {}
     without_code: list[tuple[str, str]] = []
     for done, type_def in enumerate(flat, start=1):
         entry = build_entry_from_type(type_def)
@@ -229,23 +272,37 @@ def build_manifest(
                 without_code.append(
                     (str(type_def.get("id") or ""), str(type_def.get("displayName") or ""))
                 )
-        elif entry.id_corto in entries:
-            raise ConfigurationError(
-                "dos tipos CM comparten el mismo ID corto",
-                id_corto=entry.id_corto,
-                type_ids=(entries[entry.id_corto].type_id, entry.type_id),
-            )
         else:
-            entries[entry.id_corto] = entry
+            candidates.setdefault(entry.id_corto, []).append(entry)
         if on_type is not None:
             on_type(done, total)
+    entries, duplicates = _resolve_duplicates(candidates)
     return CmTypeManifest(
         service_url=service_url,
         repository_id=repository_id,
         discovered_at=discovered_at,
         types=entries,
         without_code=tuple(without_code),
+        duplicates=duplicates,
     )
+
+
+def duplicate_lines(manifest: CmTypeManifest) -> tuple[str, ...]:
+    """Un aviso por candidato que perdió su ID corto — texto para el operador.
+
+    Lo imprime ``types discover`` y lo escribe en el log la pestaña
+    ``M·MODELO``: la MISMA línea en los dos lados, así el operador
+    reconoce el problema venga de donde venga.
+    """
+    lines: list[str] = []
+    for dup in manifest.duplicates:
+        winner = manifest.types.get(dup.id_corto)
+        ganador = f"{winner.type_id} ({winner.display_name})" if winner else "(ninguno)"
+        lines.append(
+            f"WARNING: ID corto compartido {dup.id_corto}: ganador {ganador}; "
+            f"candidato {dup.type_id} ({dup.display_name})"
+        )
+    return tuple(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -327,8 +384,27 @@ def _type_changes(local: CmTypeEntry, live: CmTypeEntry) -> tuple[str, ...]:
     return tuple(lines)
 
 
+def _align_live(local: CmTypeManifest, live: CmTypeManifest) -> CmTypeManifest:
+    """Alinea el ganador vivo de cada ID corto con la elección del operador.
+
+    Si el operador ya eligió a mano el tipo de un ID corto compartido y
+    ese ``type_id`` sigue siendo uno de los candidatos que el servidor
+    publica, entonces ÉSE es el ganador vivo. Sin esto, cada ``diff``
+    reportaría un cambio de ``type_id`` fantasma y cada ``update``
+    pisaría la elección con el ganador automático.
+    """
+    for code, entry in local.types.items():
+        live_entry = live.types.get(code)
+        if live_entry is None or live_entry.type_id == entry.type_id:
+            continue
+        if any(d.id_corto == code and d.type_id == entry.type_id for d in live.duplicates):
+            live = _promote(live, code, entry.type_id, annotate=False)
+    return live
+
+
 def diff_manifest(local: CmTypeManifest, live: CmTypeManifest) -> ManifestDiff:
     """Compara el manifest local contra la foto fresca del servidor."""
+    live = _align_live(local, live)
     changed = {
         code: lines
         for code, entry in local.types.items()
@@ -381,7 +457,9 @@ def apply_diff(
 
     ``only`` acota qué IDs cortos se tocan; el resto queda igual, byte
     por byte. Los tipos que el servidor ya no publica NO se borran: se
-    marcan ``missing_on_server``."""
+    marcan ``missing_on_server``. La elección manual del ganador de un
+    ID corto compartido se respeta (:func:`_align_live`)."""
+    live = _align_live(local, live)
     merged: dict[str, CmTypeEntry] = {}
     for code, entry in local.types.items():
         if only is not None and code not in only:
@@ -403,6 +481,7 @@ def apply_diff(
         discovered_at=live.discovered_at,
         types=merged,
         without_code=live.without_code,
+        duplicates=live.duplicates,
     )
 
 
@@ -420,6 +499,51 @@ def _entry_or_fail(manifest: CmTypeManifest, id_corto: str) -> CmTypeEntry:
 
 def _replace_entry(manifest: CmTypeManifest, entry: CmTypeEntry) -> CmTypeManifest:
     return replace(manifest, types={**dict(manifest.types), entry.id_corto: entry})
+
+
+def _promote(
+    manifest: CmTypeManifest, id_corto: str, type_id: str, *, annotate: bool
+) -> CmTypeManifest:
+    """Cambia el ganador de un ID corto por uno de sus candidatos.
+
+    ``annotate`` distingue las dos puntas: la elección del operador
+    (``True``) deja el tipo sin revisar y con el motivo en ``changes``;
+    la alineación del manifest vivo antes de un diff (``False``) no
+    escribe nada — ese manifest es una foto del servidor, no algo que
+    el operador tenga que revisar.
+    """
+    current = _entry_or_fail(manifest, id_corto)
+    chosen = next(
+        (e for e in manifest.duplicates if e.id_corto == id_corto and e.type_id == type_id), None
+    )
+    if chosen is None:
+        raise ConfigurationError(
+            "ese type_id no es un candidato de ese ID corto",
+            id_corto=id_corto,
+            type_id=type_id,
+            candidatos=tuple(e.type_id for e in manifest.duplicates if e.id_corto == id_corto),
+        )
+    winner = (
+        replace(chosen, reviewed=False, changes=(f"elegido a mano sobre {current.type_id}",))
+        if annotate
+        else chosen
+    )
+    return replace(
+        manifest,
+        types={**dict(manifest.types), id_corto: winner},
+        duplicates=(*(e for e in manifest.duplicates if e is not chosen), current),
+    )
+
+
+def set_type_choice(manifest: CmTypeManifest, id_corto: str, type_id: str) -> CmTypeManifest:
+    """El operador elige a mano el ganador de un ID corto compartido.
+
+    El candidato promovido entra con SUS propiedades y SUS decisiones
+    —ya venía completo en ``duplicates``, no hace falta red— y el
+    ganador anterior pasa a ser candidato. Queda sin revisar: cambiar de
+    clase documental es exactamente lo que hay que mirar dos veces.
+    """
+    return _promote(manifest, id_corto, type_id, annotate=True)
 
 
 def set_decision(

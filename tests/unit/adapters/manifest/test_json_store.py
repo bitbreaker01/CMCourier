@@ -69,12 +69,22 @@ def _manifest() -> CmTypeManifest:
         display_name="DC01 - Otro",
         folder="/$type/BAC_02",
     )
+    candidato = CmTypeEntry(
+        id_corto="DC01",
+        type_id="$t!-2_BAC_03v-1",
+        local_name="BAC_03",
+        display_name="Otro que comparte DC01",
+        folder="/$type/BAC_03",
+        properties=(_prop("clbNonGroup.BAC_Otra", required=True),),
+        decisions={"clbNonGroup.BAC_Otra": DECISION_USE},
+    )
     return CmTypeManifest(
         service_url="http://cm/browser",
         repository_id="repo",
         discovered_at="2026-01-01T00:00:00+00:00",
         types={"PT55.2": entry, "DC01": otro},
         without_code=(("$t!-2_CmisDocumentv-1", "Default Document Type"),),
+        duplicates=(candidato,),
     )
 
 
@@ -113,6 +123,36 @@ class TestJsonTypeManifestStore145:
         assert isinstance(entry["properties"], list)
         assert isinstance(entry["decisions"], dict)
         assert "id_corto" not in entry  # es la clave del dict, no se duplica
+
+    def test_round_trip_de_los_duplicates(self, tmp_path: Path) -> None:
+        """145 REQ-002: los candidatos que perdieron el ID corto sobreviven enteros."""
+        store = JsonTypeManifestStore(tmp_path / "types.json")
+        store.save(_manifest())
+        dup = store.load().duplicates
+        assert [d.type_id for d in dup] == ["$t!-2_BAC_03v-1"]
+        assert dup[0].id_corto == "DC01"
+        assert [p.id for p in dup[0].properties] == ["clbNonGroup.BAC_Otra"]
+        assert dup[0].decisions["clbNonGroup.BAC_Otra"] == DECISION_USE
+
+    def test_duplicates_es_una_lista_con_la_misma_forma_que_los_types(self, tmp_path: Path) -> None:
+        path = tmp_path / "types.json"
+        JsonTypeManifestStore(path).save(_manifest())
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert isinstance(data["duplicates"], list)
+        dup = data["duplicates"][0]
+        entry_keys = set(data["types"]["DC01"])
+        # Misma codificación que un value de ``types`` + el ID corto, que en
+        # el dict es la clave y en una lista no tendría dónde vivir.
+        assert set(dup) == entry_keys | {"id_corto"}
+        assert dup["id_corto"] == "DC01"
+
+    def test_load_sin_la_clave_duplicates_es_compatible_hacia_atras(self, tmp_path: Path) -> None:
+        path = tmp_path / "types.json"
+        JsonTypeManifestStore(path).save(_manifest())
+        data = json.loads(path.read_text(encoding="utf-8"))
+        del data["duplicates"]
+        path.write_text(json.dumps(data), encoding="utf-8")
+        assert JsonTypeManifestStore(path).load().duplicates == ()
 
     def test_exists(self, tmp_path: Path) -> None:
         store = JsonTypeManifestStore(tmp_path / "types.json")

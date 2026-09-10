@@ -53,9 +53,11 @@ from cmcourier.services.type_discovery import TypeDiscoveryService
 from cmcourier.services.type_manifest import (
     apply_diff,
     diff_manifest,
+    duplicate_lines,
     mark_reviewed,
     set_decision,
     set_folder,
+    set_type_choice,
 )
 
 _SHOW_HEADERS = [
@@ -214,6 +216,10 @@ def _echo_discover_summary(manifest: CmTypeManifest, store: JsonTypeManifestStor
         f"sin verificar={folders.count(None)}"
     )
     click.echo(f"manifest guardado en {store.path}")
+    # Un ID corto compartido no aborta el descubrimiento, pero el operador
+    # tiene que enterarse: el ganador lo eligió una heurística, no él.
+    for line in duplicate_lines(manifest):
+        click.echo(line)
 
 
 @types_group.command(name="discover")
@@ -241,6 +247,11 @@ def discover_command(
     Ojo: pisa las decisiones que ya hayas tomado. Si el manifest tiene
     tipos revisados, el comando se planta salvo que le pases ``--force``;
     lo que querés casi siempre es ``types update``.
+
+    Si dos clases declaran el MISMO ID corto no aborta: elige un ganador
+    determinístico, guarda los demás como candidatos y avisa con un
+    WARNING por cada uno. Elegí a mano con ``types review IDCM
+    --type-id TYPE_ID``.
     """
     config, secrets = _load(config_path)
     store = _store(config, manifest_path)
@@ -287,7 +298,19 @@ def _property_rows(entry: CmTypeEntry) -> list[list[str]]:
     ]
 
 
-def _echo_entry(entry: CmTypeEntry) -> None:
+def _echo_candidates(manifest: CmTypeManifest, id_corto: str) -> None:
+    """Los otros tipos que declaran el mismo ID corto, si los hay."""
+    candidatos = [d for d in manifest.duplicates if d.id_corto == id_corto]
+    if not candidatos:
+        return
+    click.echo("")
+    click.echo("Candidatos con el mismo ID corto:")
+    for dup in candidatos:
+        click.echo(f"  {dup.type_id} ({dup.display_name})")
+    click.echo(f"  elegí uno con: cmcourier types review {id_corto} --type-id TYPE_ID")
+
+
+def _echo_entry(manifest: CmTypeManifest, entry: CmTypeEntry) -> None:
     """Ficha completa de un tipo: encabezado + tabla de propiedades."""
     click.echo(f"ID corto: {entry.id_corto}")
     click.echo(f"type_id: {entry.type_id}")
@@ -299,6 +322,7 @@ def _echo_entry(entry: CmTypeEntry) -> None:
     click.echo(f"changes: {len(entry.changes)}")
     for line in entry.changes:
         click.echo(f"  {line}")
+    _echo_candidates(manifest, entry.id_corto)
     click.echo("")
     click.echo(render_table(_SHOW_HEADERS, _property_rows(entry)))
 
@@ -317,7 +341,11 @@ def _echo_entry(entry: CmTypeEntry) -> None:
 def show_command(
     id_corto: str, config_path: Path | None, manifest_path: Path | None, live: bool
 ) -> None:
-    """Muestra la ficha de un tipo: propiedades, límites y decisiones."""
+    """Muestra la ficha de un tipo: propiedades, límites y decisiones.
+
+    Si otro tipo comparte el ID corto, lista los candidatos al final del
+    encabezado: se elige con ``types review IDCM --type-id TYPE_ID``.
+    """
     if live:
         if config_path is None:
             raise click.ClickException("--live necesita --config para hablar con el servidor")
@@ -325,7 +353,7 @@ def show_command(
         manifest = _fetch_live(config, secrets)
     else:
         manifest = _read(_store(_config_or_none(config_path), manifest_path))
-    _echo_entry(_entry_or_fail(manifest, id_corto))
+    _echo_entry(manifest, _entry_or_fail(manifest, id_corto))
 
 
 # ---------------------------------------------------------------------------
@@ -432,10 +460,29 @@ def _apply_decisions(
     return manifest
 
 
+def _choose_type(manifest: CmTypeManifest, id_corto: str, type_id: str) -> CmTypeManifest:
+    """``--type-id``: promueve un candidato del ID corto compartido a ganador."""
+    try:
+        return set_type_choice(manifest, id_corto, type_id)
+    except ConfigurationError as exc:
+        click.echo(f"ConfigurationError: {exc}", err=True)
+        sys.exit(1)
+
+
 @types_group.command(name="review")
 @click.argument("id_corto", metavar="IDCM", type=str)
 @_OPTIONAL_CONFIG_OPTION
 @_MANIFEST_OPTION
+@click.option(
+    "--type-id",
+    "type_id",
+    default=None,
+    metavar="TYPE_ID",
+    help=(
+        "Elegí a mano cuál de los tipos que comparten este ID corto gana "
+        "(los candidatos salen de `types show IDCM`). Se aplica ANTES que el resto."
+    ),
+)
 @click.option(
     "--use",
     "use",
@@ -468,14 +515,23 @@ def review_command(
     id_corto: str,
     config_path: Path | None,
     manifest_path: Path | None,
+    type_id: str | None,
     use: tuple[str, ...],
     omit: tuple[str, ...],
     folder: str | None,
     done: bool,
 ) -> None:
-    """Edita las decisiones de un tipo y lo firma. Corre offline."""
+    """Edita las decisiones de un tipo y lo firma. Corre offline.
+
+    ``--type-id`` se aplica primero: si el ID corto lo comparten dos
+    clases, elegí cuál gana y recién después decidí sus propiedades
+    —``--use``/``--omit`` se resuelven contra el tipo YA promovido.
+    """
     store = _store(_config_or_none(config_path), manifest_path)
     manifest = _read(store)
+    _entry_or_fail(manifest, id_corto)
+    if type_id is not None:
+        manifest = _choose_type(manifest, id_corto, type_id)
     entry = _entry_or_fail(manifest, id_corto)
     manifest = _apply_decisions(manifest, entry, use, omit)
     if folder is not None:

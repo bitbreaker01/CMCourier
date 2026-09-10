@@ -139,5 +139,29 @@ class TestCmTypeManifest145:
         )
         assert manifest.types["DC01"] is entry
         assert manifest.without_code == ()
+        assert manifest.duplicates == ()
         with pytest.raises(TypeError):
             manifest.types["DC02"] = entry  # type: ignore[index]
+
+    def test_duplicates_guarda_entradas_enteras(self) -> None:
+        """145 REQ-002: el candidato que perdió el ID corto va COMPLETO."""
+        winner = CmTypeEntry(
+            id_corto="DC35", type_id="t1", local_name="a", display_name="DC35 - A", folder="/a"
+        )
+        loser = CmTypeEntry(
+            id_corto="DC35",
+            type_id="t2",
+            local_name="b",
+            display_name="Otro",
+            folder="/b",
+            properties=(_prop("p.A"),),
+        )
+        manifest = CmTypeManifest(
+            service_url="u",
+            repository_id="r",
+            discovered_at="d",
+            types={"DC35": winner},
+            duplicates=(loser,),
+        )
+        assert manifest.duplicates == (loser,)
+        assert manifest.duplicates[0].properties[0].id == "p.A"

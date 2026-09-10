@@ -131,6 +131,14 @@ class CmTypeManifest:
     pero que no tienen ID corto (ni por ``BAC_ID_Corto`` ni por el
     prefijo del ``displayName``): pares ``(type_id, display_name)`` para
     que el operador los vea y decida si le importan.
+
+    ``duplicates`` guarda los candidatos que PERDIERON un ID corto
+    compartido — en PRD hay dos clases que declaran ``DC35``. Van
+    enteros, como :class:`CmTypeEntry`, no como un par: así
+    ``types review IDCM --type-id`` puede promover cualquiera de ellos a
+    ganador sin volver a hablar con el servidor. El ganador vive en
+    ``types``; cada duplicado conserva su propio ``id_corto``, que es
+    justamente el que comparte con él.
     """
 
     service_url: str
@@ -138,6 +146,7 @@ class CmTypeManifest:
     discovered_at: str
     types: Mapping[str, CmTypeEntry] = field(default=_EMPTY_TYPES)
     without_code: tuple[tuple[str, str], ...] = ()
+    duplicates: tuple[CmTypeEntry, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "types", MappingProxyType(dict(self.types)))

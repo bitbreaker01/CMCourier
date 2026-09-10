@@ -38,7 +38,7 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
   publica en `typeDescendants` — tipo, carpeta y propiedades escribibles
   por clase — reemplaza el catálogo `MetadatosCM.csv` mantenido a mano.
   Grupo `cmcourier types` nuevo (`discover`, `show`, `diff`, `update`,
-  `review`; `check` en camino) para descubrir el manifest, revisar qué
+  `review`, `check`) para descubrir el manifest, revisar qué
   propiedades van al wire (`usar`/`omitir`) y mantenerlo sincronizado sin
   perder decisiones ya tomadas. Pestaña `M·MODELO` en la consola
   (`Descubrir`/`Comparar`/`Actualizar`/`Verificar YAML`) y check
@@ -90,6 +90,10 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Fixed
 
+- **`types discover` ya no aborta cuando dos tipos comparten el mismo
+  ID corto (visto en PRD: `DC35`):** elige un ganador determinístico,
+  guarda los demás en `duplicates`, y `types review IDCM --type-id`
+  permite elegir a mano; `types check` lo reporta.
 - **`mock generate --rvabrep-as400` exigía `CMIS_USERNAME` /
   `CMIS_PASSWORD`.** El comando sólo lee el AS400 para materializar el
   árbol; ahora carga las credenciales con `require_cmis=False` (el

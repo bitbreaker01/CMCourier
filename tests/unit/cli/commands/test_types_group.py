@@ -57,22 +57,38 @@ def _prop(
     }
 
 
-def _type_node(id_corto: str, props: list[dict[str, Any]]) -> dict[str, Any]:
+def _type_node(
+    id_corto: str,
+    props: list[dict[str, Any]],
+    *,
+    suffix: str = "",
+    display_name: str | None = None,
+) -> dict[str, Any]:
     defs = {p["id"]: p for p in props}
     defs["clbNonGroup.BAC_ID_Corto"] = _prop(
         "clbNonGroup.BAC_ID_Corto", required=True, default=id_corto
     )
     return {
         "type": {
-            "id": f"clbNonGroup.{id_corto}",
-            "localName": id_corto,
-            "displayName": f"{id_corto} - Clase de prueba",
+            "id": f"clbNonGroup.{id_corto}{suffix}",
+            "localName": f"{id_corto}{suffix}",
+            "displayName": (
+                display_name if display_name is not None else f"{id_corto} - Clase de prueba"
+            ),
             "creatable": True,
             "baseId": "cmis:document",
             "propertyDefinitions": defs,
         },
         "children": [],
     }
+
+
+def _shared_nodes() -> list[dict[str, Any]]:
+    """145 REQ-002: dos tipos que declaran el MISMO ID corto (PRD: ``DC35``)."""
+    return [
+        _type_node("DC01", [_prop("clbNonGroup.BAC_CIF", required=True, max_length=9)]),
+        _type_node("DC01", [_prop("clbNonGroup.BAC_Otra")], suffix="_02", display_name="El otro"),
+    ]
 
 
 def _nodes(extra: bool = False) -> list[dict[str, Any]]:
@@ -241,6 +257,33 @@ class TestTypesDiscover145:
         assert result.exit_code != 0
         assert "no hay manifest configurado" in result.stderr
 
+    def test_shared_short_id_warns_instead_of_aborting(self, tmp_path: Path) -> None:
+        """145 REQ-002: el bug de PRD — dos tipos con el mismo ID corto."""
+        manifest = tmp_path / "types.json"
+        result = _run(
+            ["discover", "--config", str(_cfg_file(tmp_path)), "--manifest", str(manifest)],
+            nodes=_shared_nodes(),
+        )
+
+        assert result.exit_code == 0, result.output
+        out = result.stdout
+        assert "WARNING" in out
+        assert "ID corto compartido DC01" in out
+        assert "ganador clbNonGroup.DC01 (DC01 - Clase de prueba)" in out
+        assert "candidato clbNonGroup.DC01_02 (El otro)" in out
+        stored = JsonTypeManifestStore(manifest).load()
+        assert sorted(stored.types) == ["DC01"]
+        assert [d.type_id for d in stored.duplicates] == ["clbNonGroup.DC01_02"]
+
+    def test_without_duplicates_there_is_no_warning(self, tmp_path: Path) -> None:
+        manifest = tmp_path / "types.json"
+        result = _run(
+            ["discover", "--config", str(_cfg_file(tmp_path)), "--manifest", str(manifest)]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "ID corto compartido" not in result.stdout
+
 
 # ---------------------------------------------------------------------------
 # show
@@ -270,6 +313,28 @@ class TestTypesShow145:
 
         assert result.exit_code == 1
         assert "ZZ99" in result.stderr
+
+    def test_lists_the_candidates_that_share_the_short_id(self, tmp_path: Path) -> None:
+        manifest = tmp_path / "types.json"
+        _seed(manifest, _shared_nodes())
+
+        result = _run(["show", "DC01", "--manifest", str(manifest)])
+
+        assert result.exit_code == 0, result.output
+        out = result.stdout
+        assert "Candidatos con el mismo ID corto:" in out
+        assert "clbNonGroup.DC01_02" in out
+        assert "El otro" in out
+        assert "--type-id" in out
+
+    def test_without_candidates_there_is_no_block(self, tmp_path: Path) -> None:
+        manifest = tmp_path / "types.json"
+        _seed(manifest)
+
+        result = _run(["show", "DC01", "--manifest", str(manifest)])
+
+        assert result.exit_code == 0, result.output
+        assert "Candidatos con el mismo ID corto" not in result.stdout
 
     def test_live_reads_the_server(self, tmp_path: Path) -> None:
         manifest = tmp_path / "types.json"
@@ -427,6 +492,55 @@ class TestTypesReview145:
 
         assert result.exit_code == 1
         assert "ZZ99" in result.stderr
+
+    def test_type_id_promotes_the_candidate(self, tmp_path: Path) -> None:
+        """145 REQ-002: elegir a mano el ganador de un ID corto compartido."""
+        manifest = tmp_path / "types.json"
+        _seed(manifest, _shared_nodes())
+
+        result = _run(
+            ["review", "DC01", "--manifest", str(manifest), "--type-id", "clbNonGroup.DC01_02"]
+        )
+
+        assert result.exit_code == 0, result.output
+        stored = JsonTypeManifestStore(manifest).load()
+        assert stored.types["DC01"].type_id == "clbNonGroup.DC01_02"
+        assert [d.type_id for d in stored.duplicates] == ["clbNonGroup.DC01"]
+
+    def test_type_id_applies_before_the_other_flags(self, tmp_path: Path) -> None:
+        """El ``--use`` se resuelve contra las propiedades del tipo PROMOVIDO."""
+        manifest = tmp_path / "types.json"
+        _seed(manifest, _shared_nodes())
+
+        result = _run(
+            [
+                "review",
+                "DC01",
+                "--manifest",
+                str(manifest),
+                "--type-id",
+                "clbNonGroup.DC01_02",
+                "--use",
+                "BAC_Otra",
+                "--done",
+            ]
+        )
+
+        assert result.exit_code == 0, result.output
+        entry = JsonTypeManifestStore(manifest).load().types["DC01"]
+        assert entry.decisions["clbNonGroup.BAC_Otra"] == DECISION_USE
+        assert entry.reviewed is True
+
+    def test_unknown_type_id_exits_1_without_touching_the_manifest(self, tmp_path: Path) -> None:
+        manifest = tmp_path / "types.json"
+        _seed(manifest, _shared_nodes())
+        before = manifest.read_text(encoding="utf-8")
+
+        result = _run(["review", "DC01", "--manifest", str(manifest), "--type-id", "clb.NOPE"])
+
+        assert result.exit_code == 1
+        assert "clb.NOPE" in result.stderr
+        assert manifest.read_text(encoding="utf-8") == before
 
 
 # ---------------------------------------------------------------------------

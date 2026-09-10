@@ -64,22 +64,38 @@ def _prop(
     }
 
 
-def _type_node(id_corto: str, props: list[dict[str, Any]]) -> dict[str, Any]:
+def _type_node(
+    id_corto: str,
+    props: list[dict[str, Any]],
+    *,
+    suffix: str = "",
+    display_name: str | None = None,
+) -> dict[str, Any]:
     defs = {p["id"]: p for p in props}
     defs["clbNonGroup.BAC_ID_Corto"] = _prop(
         "clbNonGroup.BAC_ID_Corto", required=True, default=id_corto
     )
     return {
         "type": {
-            "id": f"clbNonGroup.{id_corto}",
-            "localName": id_corto,
-            "displayName": f"{id_corto} - Clase de prueba",
+            "id": f"clbNonGroup.{id_corto}{suffix}",
+            "localName": f"{id_corto}{suffix}",
+            "displayName": (
+                display_name if display_name is not None else f"{id_corto} - Clase de prueba"
+            ),
             "creatable": True,
             "baseId": "cmis:document",
             "propertyDefinitions": defs,
         },
         "children": [],
     }
+
+
+def _shared_nodes() -> list[dict[str, Any]]:
+    """145 REQ-002: dos tipos que declaran el MISMO ID corto (PRD: ``DC35``)."""
+    return [
+        _type_node("DC01", [_prop("clbNonGroup.BAC_CIF", required=True, max_length=9)]),
+        _type_node("DC01", [_prop("clbNonGroup.BAC_Otra")], suffix="_02", display_name="El otro"),
+    ]
 
 
 def _nodes(extra: bool = False) -> list[dict[str, Any]]:
@@ -406,6 +422,54 @@ class TestServerOps:
                     pilot,
                     lambda: "clbNonGroup.BAC_Nueva" in _stored(manifest)["DC01"]["decisions"],
                 )
+
+        asyncio.run(_run())
+
+    def test_discover_logs_a_warning_per_shared_short_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """145 REQ-002: el bug de PRD no aborta, avisa en el log."""
+
+        async def _run() -> None:
+            manifest = tmp_path / "types.json"
+            _seed(manifest)
+            config, path = _config(tmp_path, manifest=manifest)
+            manifest.unlink()
+            monkeypatch.setattr(
+                modelo_module, "build_uploader", lambda c, s: _FakeUploader(_shared_nodes())
+            )
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                _with_creds(app)
+                await goto(pilot, app, "m")
+                pane = _pane(app)
+                pane.query_one("#md-discover", Button).press()
+                assert await wait_for(pilot, lambda: "ID corto compartido DC01" in pane.log_text())
+                texto = pane.log_text()
+                assert "WARNING" in texto
+                assert "ganador clbNonGroup.DC01 (DC01 - Clase de prueba)" in texto
+                assert "candidato clbNonGroup.DC01_02 (El otro)" in texto
+
+        asyncio.run(_run())
+
+    def test_update_logs_the_shared_short_id_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _run() -> None:
+            manifest = tmp_path / "types.json"
+            _seed(manifest)
+            config, path = _config(tmp_path, manifest=manifest)
+            monkeypatch.setattr(
+                modelo_module, "build_uploader", lambda c, s: _FakeUploader(_shared_nodes())
+            )
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                _with_creds(app)
+                await goto(pilot, app, "m")
+                pane = _pane(app)
+                pane.query_one("#md-update", Button).press()
+                assert await wait_for(pilot, lambda: "ID corto compartido DC01" in pane.log_text())
+                assert _stored(manifest)["DC01"]
 
         asyncio.run(_run())
 

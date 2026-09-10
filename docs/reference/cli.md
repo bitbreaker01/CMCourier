@@ -312,6 +312,10 @@ Usage: cmcourier types discover [OPTIONS]
   revisados, el comando se planta salvo que le pases ``--force``; lo que
   querés casi siempre es ``types update``.
 
+  Si dos clases declaran el MISMO ID corto no aborta: elige un ganador
+  determinístico, guarda los demás como candidatos y avisa con un WARNING por
+  cada uno. Elegí a mano con ``types review IDCM --type-id TYPE_ID``.
+
 Options:
   -c, --config FILE    YAML del pipeline (sección `cmis` +
                        `mapping.type_manifest_path`).  [required]
@@ -324,12 +328,22 @@ Options:
   --help               Show this message and exit.
 ```
 
+El WARNING de ID corto compartido se ve así (una línea por candidato):
+
+```text
+WARNING: ID corto compartido DC35: ganador $t!-2_BAC_..._01v-1 (DC35 - Contrato);
+candidato $t!-2_BAC_..._02v-1 (Contrato viejo)
+```
+
 ### `types show <IDCM>`
 
 ```
 Usage: cmcourier types show [OPTIONS] IDCM
 
   Muestra la ficha de un tipo: propiedades, límites y decisiones.
+
+  Si otro tipo comparte el ID corto, lista los candidatos al final del
+  encabezado: se elige con ``types review IDCM --type-id TYPE_ID``.
 
 Options:
   -c, --config FILE  YAML del pipeline. Opcional si pasás --manifest: se
@@ -387,11 +401,18 @@ Usage: cmcourier types review [OPTIONS] IDCM
 
   Edita las decisiones de un tipo y lo firma. Corre offline.
 
+  ``--type-id`` se aplica primero: si el ID corto lo comparten dos clases,
+  elegí cuál gana y recién después decidí sus propiedades
+  —``--use``/``--omit`` se resuelven contra el tipo YA promovido.
+
 Options:
   -c, --config FILE  YAML del pipeline. Opcional si pasás --manifest: se
                      trabaja offline.
   --manifest FILE    Manifest JSON a usar. Default:
                      `mapping.type_manifest_path` del YAML.
+  --type-id TYPE_ID  Elegí a mano cuál de los tipos que comparten este ID
+                     corto gana (los candidatos salen de `types show IDCM`).
+                     Se aplica ANTES que el resto.
   --use PROP         Manda esta propiedad al wire. Acepta id completo o nombre
                      canónico. Repetible.
   --omit PROP        No manda esta propiedad (gana el default del servidor).

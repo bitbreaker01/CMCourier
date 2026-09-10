@@ -89,8 +89,23 @@ Reglas:
 
 - **ID corto** = `defaultValue` de la propiedad cuyo id (sin prefijo) es
   `BAC_ID_Corto`; fallback: prefijo `^(\S+) - ` del `displayName`. Sin
-  ninguno → va a `without_code`. Dos tipos con el mismo ID corto →
-  `ConfigurationError` en discover (se listan ambos `type_id`).
+  ninguno → va a `without_code`.
+- **ID corto compartido** (visto en PRD: `BAC_01_01_01_03_07_01` y
+  `..._02` con default `DC35`, 759 tipos): NO aborta. Se elige un
+  ganador determinístico — primero el tipo cuyo `displayName` empieza
+  con `"<id_corto> - "`; si ninguno o varios, el primero en el orden del
+  servidor — y los demás van ENTEROS (como `CmTypeEntry`) a
+  `CmTypeManifest.duplicates: tuple[CmTypeEntry, ...]`. El ganador queda
+  `reviewed=False` con `changes=("ID corto compartido con <type_id>
+  (<display_name>)", ...)`. `types discover` imprime un WARNING por cada
+  duplicado; `types show IDCM` lista los candidatos; `types review IDCM
+  --type-id TYPE_ID` promueve un duplicado a ganador (el ganador anterior
+  pasa a `duplicates`, sin red: los duplicados ya están completos).
+  `diff`/`update` alinean el manifest vivo con la elección local antes de
+  comparar (si el `type_id` elegido localmente está entre los candidatos
+  vivos, ese es el ganador vivo). `types check`: WARNING "ID corto
+  compartido" por cada duplicado; CRITICAL si ese ID corto lo usa el
+  mapeo. JSON: `"duplicates": [entry, ...]` (misma forma que `types`).
 - Solo entran tipos `creatable` con `baseId == "cmis:document"`.
 - **Carpeta derivada** = `/$type/<localName>` (mismo fallback histórico de
   `compute_cm_folder`). `folder_ok` se llena verificando con
