@@ -37,6 +37,7 @@ from cmcourier.cli.commands.diagnose import diagnose_command
 from cmcourier.cli.commands.inspect import inspect_group
 from cmcourier.cli.commands.mock import mock_group
 from cmcourier.cli.commands.sync import sync_group
+from cmcourier.cli.commands.types import types_group
 from cmcourier.cli.doctor import CHECK_NAMES, DoctorReport, run_doctor
 from cmcourier.cli.logging_setup import configure as configure_logging
 from cmcourier.config.loader import load_config, load_secrets
@@ -79,6 +80,7 @@ main.add_command(sync_group)
 main.add_command(mock_group)
 main.add_command(cache_group)
 main.add_command(diagnose_command)
+main.add_command(types_group)
 
 
 # ---------------------------------------------------------------------------
