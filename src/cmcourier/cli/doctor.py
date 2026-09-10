@@ -741,11 +741,17 @@ def _check_cm_manifest(config: PipelineConfig) -> CheckResult:
         mapping = build_mapping_service(config.mapping)
         manifest = JsonTypeManifestStore(manifest_path).load()
         metadata = build_metadata_config(config.metadata)
+        # scope="mapped" a proposito: el doctor es un preflight del
+        # pipeline. Un tipo que `MapeoRVI_CM.csv` no referencia no lo
+        # puede tocar ningun upload, asi que romperlo no puede frenar
+        # una corrida. `types check` (default `reviewed`) es el que
+        # audita lo que el operador declaro que piensa usar.
         report = run_manifest_check(
             mapping,
             manifest,
             metadata.field_sources,
             field_aliases=metadata.field_aliases,
+            scope="mapped",
         )
     except Exception as exc:  # noqa: BLE001
         return _fail("cm_manifest", exc, {"manifest_path": str(manifest_path)})

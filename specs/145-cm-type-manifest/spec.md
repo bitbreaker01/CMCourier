@@ -174,19 +174,52 @@ default `mapping.type_manifest_path` del YAML, override `--manifest PATH`.
 
 ### REQ-005 — `types check`: manifest ↔ YAML ↔ CSV
 
-Para cada `IDCM` referenciado por `MapeoRVI_CM.csv`:
+El alcance de la auditoría lo elige el parámetro `scope` de
+`run_manifest_check` (CLI: `--scope`, con `--all` como atajo de
+`--scope all`; si se dan los dos y no coinciden, gana `--all`):
+
+- `"mapped"` — sólo los ID cortos que referencia `MapeoRVI_CM.csv`. Es
+  el preflight del pipeline: nada fuera de ese conjunto puede romper una
+  corrida de hoy. Es lo que usa el check `cm_manifest` del `doctor`.
+- `"reviewed"` — **default**. Los mapeados MÁS todo tipo del manifest con
+  `reviewed=True`. Marcar un tipo revisado es declarar "lo pienso usar":
+  una propiedad `usar` sin `metadata.field_sources` es un
+  `ConfigurationError` garantizado el día que se mapee, y el operador lo
+  tiene que ver mientras revisa. Es el default de `types check` y el del
+  botón "Verificar YAML" de la pestaña `M·MODELO`.
+- `"all"` — todo `manifest.types`, revisado o no.
+
+Para cada tipo auditado:
 
 - CRITICAL: código ausente en el manifest (`missing_cm_codes`); propiedad
   `usar` sin entrada en `metadata.field_sources`; tipo `missing_on_server`.
-- WARNING: tipo con `reviewed=False`; `folder_ok is False`; propiedad
-  requerida sin default marcada `omitir`; `field_sources` con
-  `validation.max_length`/patrón que exceda `max_length` del CM (cuando la
-  validación declare largo); propiedad `usar` cuyo `property_type` es
-  `datetime`/`integer`/`boolean` y la fuente es un valor fijo no parseable.
-- INFO: entradas de `field_sources` que ningún tipo mapeado usa.
+- WARNING: tipo con `reviewed=False` — **sólo si además está mapeado**;
+  `folder_ok is False`; propiedad requerida sin default marcada `omitir`;
+  `field_sources` con `validation.max_length`/patrón que exceda
+  `max_length` del CM (cuando la validación declare largo); propiedad
+  `usar` cuyo `property_type` es `datetime`/`integer`/`boolean` y la
+  fuente es un valor fijo no parseable.
+- WARNING (por alias, independiente del tipo): cada entrada de
+  `metadata.field_aliases` cuyo valor no sea llave de `field_sources`
+  —`metadata.field_aliases.{alias} apunta a field_sources.{target}, que
+  no existe`— la consulte alguien o no. Si además la consulta una
+  propiedad `usar` de un tipo auditado, sale TAMBIÉN el CRITICAL
+  por-propiedad: el par es intencional (el CRITICAL dice qué upload se
+  rompe, el WARNING qué línea del YAML hay que borrar o arreglar).
+- INFO: entradas de `field_sources` que no usa ningún tipo **auditado**
+  (el conjunto depende del `scope`, no sólo de lo mapeado).
+
+El WARNING de "todavía no fue revisado" queda acotado a los tipos
+mapeados a propósito: bajo `"all"` serían cientos de líneas de ruido y
+bajo `"reviewed"` es una tautología (el tipo entró justamente por estar
+revisado). El orden de los hallazgos es estable: códigos faltantes,
+tipos mapeados (ordenados), tipos extra que suma el `scope` (ordenados),
+ID cortos compartidos, alias colgados (ordenados por alias) y al final
+el bloque INFO.
 
 Salida agrupada por severidad, `--json` opcional. `doctor` gana un check
-`cm_manifest` que reutiliza el mismo servicio y reporta sólo CRITICAL.
+`cm_manifest` que reutiliza el mismo servicio con `scope="mapped"` y
+reporta sólo CRITICAL.
 
 ### REQ-006 — Pestaña `M·MODELO` en la consola
 

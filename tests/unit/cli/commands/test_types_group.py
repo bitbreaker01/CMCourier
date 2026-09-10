@@ -21,7 +21,7 @@ import cmcourier.cli.commands.types as types_cmd
 from cmcourier.adapters.manifest.json_store import JsonTypeManifestStore
 from cmcourier.cli.commands.types import types_group
 from cmcourier.domain.cm_types import DECISION_OMIT, DECISION_USE
-from cmcourier.services.type_manifest import build_manifest
+from cmcourier.services.type_manifest import build_manifest, mark_reviewed
 
 pytestmark = pytest.mark.unit
 
@@ -744,6 +744,111 @@ class TestTypesCheck145:
 
         assert result.exit_code != 0
         assert "manifest" in result.stderr
+
+
+class TestTypesCheckScope145:
+    """``--scope`` / ``--all``: qué tipos entran en la auditoría (145 REQ-005)."""
+
+    def _yaml(self, tmp_path: Path, *, reviewed: bool) -> Path:
+        """``DC01`` mapeado y sano; ``AF01`` sin mapear y sin ``field_sources``."""
+        manifest = tmp_path / "types.json"
+        store = _seed(
+            manifest,
+            [
+                _type_node("DC01", [_prop("clbNonGroup.BAC_CIF", required=True)]),
+                _type_node("AF01", [_prop("clbNonGroup.BAC_Sucursal", required=True)]),
+            ],
+        )
+        if reviewed:
+            store.save(mark_reviewed(store.load(), "AF01"))
+        return _check_yaml(
+            tmp_path,
+            rvi_cm_csv=_rvi_cm_csv(tmp_path / "MapeoRVI_CM.csv", [("", "FB01", "DC01")]),
+            manifest_json=manifest,
+        )
+
+    def test_the_default_scope_audits_a_reviewed_but_unmapped_type(self, tmp_path: Path) -> None:
+        result = _check(["check", "--config", str(self._yaml(tmp_path, reviewed=True))])
+
+        assert result.exit_code == 1
+        assert "AF01" in result.stdout
+        assert "field_sources.BAC_Sucursal" in result.stdout
+
+    def test_scope_mapped_ignores_it(self, tmp_path: Path) -> None:
+        yaml_path = self._yaml(tmp_path, reviewed=True)
+
+        result = _check(["check", "--config", str(yaml_path), "--scope", "mapped"])
+
+        assert result.exit_code == 0, result.output
+        assert "AF01" not in result.stdout
+
+    def test_scope_reviewed_is_the_explicit_default(self, tmp_path: Path) -> None:
+        yaml_path = self._yaml(tmp_path, reviewed=True)
+
+        result = _check(["check", "--config", str(yaml_path), "--scope", "reviewed"])
+
+        assert result.exit_code == 1
+        assert "AF01" in result.stdout
+
+    def test_scope_all_reaches_an_unreviewed_unmapped_type(self, tmp_path: Path) -> None:
+        yaml_path = self._yaml(tmp_path, reviewed=False)
+
+        assert _check(["check", "--config", str(yaml_path)]).exit_code == 0
+        result = _check(["check", "--config", str(yaml_path), "--scope", "all"])
+
+        assert result.exit_code == 1
+        assert "AF01" in result.stdout
+
+    def test_the_all_flag_is_a_shorthand_for_scope_all(self, tmp_path: Path) -> None:
+        yaml_path = self._yaml(tmp_path, reviewed=False)
+
+        result = _check(["check", "--config", str(yaml_path), "--all"])
+
+        assert result.exit_code == 1
+        assert "AF01" in result.stdout
+
+    def test_the_all_flag_wins_over_a_contradicting_scope(self, tmp_path: Path) -> None:
+        yaml_path = self._yaml(tmp_path, reviewed=False)
+
+        result = _check(["check", "--config", str(yaml_path), "--scope", "mapped", "--all"])
+
+        assert result.exit_code == 1
+        assert "AF01" in result.stdout
+
+    def test_an_unknown_scope_is_rejected(self, tmp_path: Path) -> None:
+        yaml_path = self._yaml(tmp_path, reviewed=False)
+
+        result = _check(["check", "--config", str(yaml_path), "--scope", "todos"])
+
+        assert result.exit_code == 2
+
+    def test_the_help_documents_the_three_scopes(self) -> None:
+        result = _check(["check", "--help"])
+
+        assert result.exit_code == 0, result.output
+        for token in ("mapped", "reviewed", "all", "--scope", "--all"):
+            assert token in result.stdout
+
+
+class TestTypesCheckAliasColgado145:
+    def test_a_dangling_alias_warns_even_if_nobody_consults_it(self, tmp_path: Path) -> None:
+        """El operador renombró la entrada y el alias quedó apuntando al vacío."""
+        manifest = tmp_path / "types.json"
+        _seed(manifest)
+        yaml_path = _check_yaml(
+            tmp_path,
+            rvi_cm_csv=_rvi_cm_csv(tmp_path / "MapeoRVI_CM.csv", [("", "FB01", "DC01")]),
+            manifest_json=manifest,
+            field_aliases="  field_aliases:\n    Shortname: BAC_Short_Name\n",
+        )
+
+        result = _check(["check", "--config", str(yaml_path)])
+
+        assert result.exit_code == 0, result.output
+        assert (
+            "metadata.field_aliases.Shortname apunta a field_sources.BAC_Short_Name, que no existe"
+            in result.stdout
+        )
 
 
 # ---------------------------------------------------------------------------

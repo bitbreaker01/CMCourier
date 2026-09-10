@@ -18,7 +18,7 @@ check ``cm_manifest`` del ``doctor`` (que reporta sólo los CRITICAL).
 
 from __future__ import annotations
 
-__all__ = ["CheckFinding", "CheckReport", "run_manifest_check"]
+__all__ = ["CheckFinding", "CheckReport", "Scope", "run_manifest_check"]
 
 import re
 from collections.abc import Mapping
@@ -31,6 +31,11 @@ from cmcourier.services.mapping import MappingService
 from cmcourier.services.metadata import FieldSourceConfig
 
 Severity = Literal["CRITICAL", "WARNING", "INFO"]
+
+#: Qué tipos del manifest entran en la auditoría. ``"mapped"`` es lo que
+#: el CSV referencia; ``"reviewed"`` suma los que el operador marcó
+#: ``revisado ✓`` (declaró que los piensa usar); ``"all"``, todos.
+Scope = Literal["mapped", "reviewed", "all"]
 
 #: El orden en que ``render`` y ``to_json_dict`` agrupan.
 _SEVERITIES: tuple[Severity, ...] = ("CRITICAL", "WARNING", "INFO")
@@ -268,14 +273,23 @@ def _check_entry(
     entry: CmTypeEntry,
     field_sources: Mapping[str, FieldSourceConfig],
     aliases_lower: Mapping[str, str],
+    *,
+    mapped: bool,
 ) -> list[CheckFinding]:
-    """Todas las reglas de UN tipo mapeado."""
+    """Todas las reglas de UN tipo auditado.
+
+    *mapped* dice si el tipo lo referencia ``MapeoRVI_CM.csv``. Sólo
+    cambia UNA regla: el WARNING de "todavía no fue revisado". Contra un
+    tipo sin mapear no tiene sentido — bajo ``scope="all"`` serían
+    cientos de líneas de ruido y bajo ``scope="reviewed"`` es una
+    tautología (el tipo entró JUSTAMENTE por estar revisado).
+    """
     out: list[CheckFinding] = []
     if entry.missing_on_server:
         out.append(
             CheckFinding("CRITICAL", entry.id_corto, None, "el servidor ya no publica este tipo")
         )
-    if not entry.reviewed:
+    if mapped and not entry.reviewed:
         out.append(CheckFinding("WARNING", entry.id_corto, None, "el tipo todavía no fue revisado"))
     if entry.folder_ok is False:
         out.append(
@@ -342,6 +356,42 @@ def _check_duplicates(manifest: CmTypeManifest, mapped: set[str]) -> list[CheckF
     return out
 
 
+def _extra_codes(manifest: CmTypeManifest, mapped: set[str], scope: Scope) -> list[str]:
+    """Los IDs cortos que el *scope* suma a los que el CSV referencia.
+
+    Van ordenados y DESPUÉS de los mapeados, para que ampliar el alcance
+    no reordene la salida que el operador ya conoce.
+    """
+    if scope == "mapped":
+        return []
+    return sorted(
+        code
+        for code, entry in manifest.types.items()
+        if code not in mapped and (scope == "all" or entry.reviewed)
+    )
+
+
+def _dangling_alias_findings(
+    field_sources: Mapping[str, FieldSourceConfig], field_aliases: Mapping[str, str]
+) -> list[CheckFinding]:
+    """Un WARNING por alias cuyo destino no es llave de ``field_sources``.
+
+    Independiente de que alguien lo consulte: el caso real es un alias
+    que quedó colgado después de renombrar la entrada de
+    ``field_sources``, y nadie lo consulta justamente por eso.
+    """
+    return [
+        CheckFinding(
+            "WARNING",
+            None,
+            None,
+            f"metadata.field_aliases.{alias} apunta a field_sources.{target}, que no existe",
+        )
+        for alias, target in sorted(field_aliases.items())
+        if target not in field_sources
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Entrada pública
 # ---------------------------------------------------------------------------
@@ -353,28 +403,49 @@ def run_manifest_check(
     field_sources: Mapping[str, FieldSourceConfig],
     *,
     field_aliases: Mapping[str, str] | None = None,
+    scope: Scope = "reviewed",
 ) -> CheckReport:
     """Cruza manifest, YAML y CSV y devuelve el reporte (145 REQ-005).
 
-    Los tipos que se miran son los que ``MapeoRVI_CM.csv`` referencia —
-    el manifest puede tener 362 clases y el banco usar 40, y las otras
-    322 no son problema de nadie. El orden de los hallazgos es estable:
-    primero los códigos que faltan, después los tipos por ID corto, y al
-    final las entradas de ``field_sources`` que sobran.
+    *scope* elige qué tipos se auditan:
+
+    * ``"mapped"`` — sólo los que ``MapeoRVI_CM.csv`` referencia. Es el
+      preflight del pipeline (lo que usa ``doctor``): nada más puede
+      romper una corrida de hoy.
+    * ``"reviewed"`` (default) — los mapeados MÁS todo tipo con
+      ``reviewed=True``. Marcar un tipo revisado es declarar "lo pienso
+      usar", y una propiedad ``usar`` sin ``field_sources`` es un
+      ``ConfigurationError`` garantizado el día que se mapee: el
+      operador lo tiene que ver mientras revisa, no seis meses después.
+    * ``"all"`` — todo ``manifest.types``, revisado o no.
+
+    El WARNING de "todavía no fue revisado" sigue saliendo SÓLO contra
+    tipos mapeados; ampliar el alcance no lo multiplica. El orden es
+    estable: los códigos que faltan, los tipos mapeados (ordenados), los
+    tipos extra que suma el scope (ordenados), los ID cortos
+    compartidos, los alias colgados y al final las entradas de
+    ``field_sources`` que no usa ningún tipo AUDITADO.
 
     *field_aliases* es ``metadata.field_aliases`` tal cual: una propiedad
     del manifest puede llegar a su ``field_sources`` a través de un alias
     (comparado sin distinguir mayúsculas, igual que el runtime), y sin
-    esto el chequeo le grita CRITICAL a una config que sube perfecto.
+    esto el chequeo le grita CRITICAL a una config que sube perfecto. Un
+    alias cuyo destino no existe da un WARNING por-alias, lo consulte
+    alguien o no; si además lo consulta una propiedad ``usar``, sale
+    TAMBIÉN el CRITICAL por-propiedad. El par es intencional: el
+    CRITICAL dice qué upload se rompe, el WARNING dice qué línea del
+    YAML hay que borrar o arreglar.
     """
-    aliases_lower = {k.lower(): v for k, v in (field_aliases or {}).items()}
+    aliases = dict(field_aliases or {})
+    aliases_lower = {k.lower(): v for k, v in aliases.items()}
     findings: list[CheckFinding] = [
         CheckFinding("CRITICAL", code, None, "el IDCM del mapeo no existe en el manifest")
         for code in mapping.missing_cm_codes
     ]
     mapped = sorted({m.id_corto for m in mapping.get_all() if m.id_corto})
+    mapped_set = set(mapped)
     used: set[str] = set()
-    for code in mapped:
+    for code in [*mapped, *_extra_codes(manifest, mapped_set, scope)]:
         entry = manifest.types.get(code)
         if entry is None:  # pragma: no cover — ya lo cubre missing_cm_codes
             findings.append(
@@ -382,11 +453,14 @@ def run_manifest_check(
             )
             continue
         used |= _used_field_keys(entry, field_sources, aliases_lower)
-        findings.extend(_check_entry(entry, field_sources, aliases_lower))
-    findings.extend(_check_duplicates(manifest, set(mapped)))
+        findings.extend(
+            _check_entry(entry, field_sources, aliases_lower, mapped=code in mapped_set)
+        )
+    findings.extend(_check_duplicates(manifest, mapped_set))
+    findings.extend(_dangling_alias_findings(field_sources, aliases))
     findings.extend(
         CheckFinding(
-            "INFO", None, None, f"metadata.field_sources.{name} no lo usa ningún tipo mapeado"
+            "INFO", None, None, f"metadata.field_sources.{name} no lo usa ningún tipo auditado"
         )
         for name in sorted(set(field_sources) - used)
     )

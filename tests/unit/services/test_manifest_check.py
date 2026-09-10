@@ -23,7 +23,7 @@ from cmcourier.domain.cm_types import (
     CmTypeEntry,
     CmTypeManifest,
 )
-from cmcourier.services.manifest_check import CheckReport, run_manifest_check
+from cmcourier.services.manifest_check import CheckReport, Scope, run_manifest_check
 from cmcourier.services.mapping import MappingService
 from cmcourier.services.metadata import FieldSourceConfig, SourceConfig, ValidationConfig
 
@@ -165,6 +165,167 @@ class TestCritical:
         manifest = _manifest(_entry("DC01", props=(prop,), decisions={prop.id: DECISION_OMIT}))
         report = run_manifest_check(_mapping(manifest, "DC01"), manifest, {})
         assert report.findings == ()
+
+
+class TestAlcanceDeAuditoria145:
+    """``scope`` decide QUÉ tipos se auditan (145 REQ-005).
+
+    El operador revisa el manifest ENTERO en la pestaña ``M·MODELO`` y
+    marca ``revisado ✓`` a medida que avanza. Un tipo revisado con una
+    propiedad ``usar`` sin ``field_sources`` es un ``ConfigurationError``
+    garantizado el día que lo mapee: auditar sólo lo que el CSV
+    referencia lo deja pasar en silencio.
+    """
+
+    _FIELD_SOURCES: Mapping[str, FieldSourceConfig] = {
+        "BAC_CIF": FieldSourceConfig(sources=(_source(),))
+    }
+
+    def _manifest(self, *, reviewed: bool) -> CmTypeManifest:
+        """``DC01`` mapeado y sano; ``AF01`` sin mapear y roto."""
+        return _manifest(
+            _entry("DC01", props=(_prop("clbNonGroup.BAC_CIF"),)),
+            _entry("AF01", props=(_prop("clbNonGroup.BAC_Sucursal"),), reviewed=reviewed),
+        )
+
+    def _report(self, *, reviewed: bool = True, scope: Scope = "reviewed") -> CheckReport:
+        manifest = self._manifest(reviewed=reviewed)
+        return run_manifest_check(
+            _mapping(manifest, "DC01"), manifest, self._FIELD_SOURCES, scope=scope
+        )
+
+    def _codes(self, report: CheckReport) -> list[str | None]:
+        return [f.id_corto for f in report.findings]
+
+    def test_the_default_scope_audits_a_reviewed_but_unmapped_type(self) -> None:
+        """El caso del operador: ``AF01`` revisado, todavía sin mapear."""
+        report = self._report()
+        assert report.has_critical
+        assert report.criticals[0].id_corto == "AF01"
+        assert "field_sources.BAC_Sucursal" in report.criticals[0].message
+
+    def test_the_mapped_scope_keeps_the_old_behaviour(self) -> None:
+        report = self._report(scope="mapped")
+        assert not report.has_critical
+        assert "AF01" not in self._codes(report)
+
+    def test_the_all_scope_audits_an_unreviewed_unmapped_type(self) -> None:
+        report = self._report(reviewed=False, scope="all")
+        assert report.has_critical
+        assert report.criticals[0].id_corto == "AF01"
+
+    def test_the_default_scope_ignores_an_unreviewed_unmapped_type(self) -> None:
+        """Sin ``revisado ✓`` el operador no declaró que lo piensa usar."""
+        report = self._report(reviewed=False)
+        assert "AF01" not in self._codes(report)
+
+    @pytest.mark.parametrize("scope", ["mapped", "reviewed", "all"])
+    def test_the_unreviewed_warning_never_fires_for_an_unmapped_type(self, scope: Scope) -> None:
+        """Bajo ``all`` serían cientos de WARNING inútiles; bajo ``reviewed``, tautología."""
+        report = self._report(reviewed=False, scope=scope)
+        assert not [
+            f for f in report.warnings if f.id_corto == "AF01" and "no fue revisado" in f.message
+        ]
+
+    def test_the_unreviewed_warning_still_fires_for_a_mapped_type(self) -> None:
+        manifest = _manifest(_entry("DC01", reviewed=False))
+        report = run_manifest_check(_mapping(manifest, "DC01"), manifest, {}, scope="all")
+        assert _severities(report, "todavía no fue revisado") == ["WARNING"]
+
+    def test_mapped_codes_come_first_and_both_halves_are_sorted(self) -> None:
+        """El orden viejo no se reordena: mapeados (ordenados), después los extra."""
+        prop = _prop("clbNonGroup.BAC_Falta")
+        manifest = _manifest(
+            _entry("DC02", props=(prop,)),
+            _entry("DC01", props=(prop,)),
+            _entry("AB01", props=(prop,)),
+            _entry("AA01", props=(prop,)),
+        )
+        report = run_manifest_check(_mapping(manifest, "DC02", "DC01"), manifest, {})
+        assert [f.id_corto for f in report.criticals] == ["DC01", "DC02", "AA01", "AB01"]
+
+    def test_the_info_set_difference_uses_the_audited_set(self) -> None:
+        """Una entrada que sólo usa un tipo revisado-sin-mapear ya no sobra."""
+        manifest = _manifest(
+            _entry("DC01", props=(_prop("clbNonGroup.BAC_CIF"),)),
+            _entry("AF01", props=(_prop("clbNonGroup.BAC_Sucursal"),)),
+        )
+        field_sources = {
+            "BAC_CIF": FieldSourceConfig(sources=(_source(),)),
+            "BAC_Sucursal": FieldSourceConfig(sources=(_source(),)),
+        }
+        assert run_manifest_check(_mapping(manifest, "DC01"), manifest, field_sources).infos == ()
+
+    def test_the_info_message_says_auditado(self) -> None:
+        """Ya no es "ningún tipo mapeado": el conjunto es más grande."""
+        manifest = _manifest(_entry("DC01"))
+        field_sources = {"BAC_Huerfano": FieldSourceConfig(sources=(_source(),))}
+        report = run_manifest_check(_mapping(manifest, "DC01"), manifest, field_sources)
+        assert "no lo usa ningún tipo auditado" in report.infos[0].message
+
+
+class TestAliasColgado145:
+    """Un alias cuyo destino no existe se denuncia SIEMPRE (145 REQ-005).
+
+    El CRITICAL viejo es por-propiedad: sólo sale si un tipo auditado
+    consulta el alias. El operador que renombró la entrada de
+    ``field_sources`` y se olvidó del alias no consulta nada, y el YAML
+    se queda con basura que revienta el día que alguien la use.
+    """
+
+    def _report(
+        self,
+        aliases: Mapping[str, str],
+        *,
+        props: tuple[CmPropertyDef, ...] = (),
+    ) -> CheckReport:
+        manifest = _manifest(_entry("DC01", props=props))
+        field_sources = {"BAC_Shortname": FieldSourceConfig(sources=(_source(),))}
+        return run_manifest_check(
+            _mapping(manifest, "DC01"), manifest, field_sources, field_aliases=aliases
+        )
+
+    def test_a_dangling_alias_warns_with_nobody_consulting_it(self) -> None:
+        """El caso real: ``Shortname: BAC_Short_Name`` quedó apuntando al vacío."""
+        report = self._report({"Shortname": "BAC_Short_Name"})
+        assert not report.has_critical
+        assert len(report.warnings) == 1
+        warning = report.warnings[0]
+        assert warning.id_corto is None
+        assert warning.prop_id is None
+        assert (
+            warning.message
+            == "metadata.field_aliases.Shortname apunta a field_sources.BAC_Short_Name, "
+            "que no existe"
+        )
+
+    def test_a_resolvable_alias_does_not_warn(self) -> None:
+        assert self._report({"Shortname": "BAC_Shortname"}).warnings == ()
+
+    def test_the_warnings_are_sorted_by_alias(self) -> None:
+        report = self._report(
+            {"Num_Cuenta_Tarjeta": "BAC_CuentaTarjeta", "Shortname": "BAC_Short_Name"}
+        )
+        assert [f.message.split(".")[2].split(" ")[0] for f in report.warnings] == [
+            "Num_Cuenta_Tarjeta",
+            "Shortname",
+        ]
+
+    def test_the_warnings_land_before_the_info_block(self) -> None:
+        report = self._report({"Shortname": "BAC_Short_Name"})
+        severities = [f.severity for f in report.findings]
+        assert severities == ["WARNING", "INFO"]
+
+    def test_a_consulted_dangling_alias_gets_both_findings(self) -> None:
+        """CRITICAL por-propiedad + WARNING por-alias: distinto foco, ambos válidos."""
+        report = self._report(
+            {"BAC_Falta": "BAC_No_Existe"}, props=(_prop("clbNonGroup.BAC_Falta"),)
+        )
+        assert len(report.criticals) == 1
+        assert report.criticals[0].prop_id == "clbNonGroup.BAC_Falta"
+        assert [f.message for f in report.warnings] == [
+            "metadata.field_aliases.BAC_Falta apunta a field_sources.BAC_No_Existe, que no existe"
+        ]
 
 
 class TestAliasDeCampos145:
@@ -460,15 +621,17 @@ class TestInfo:
         assert len(report.infos) == 1
         assert "BAC_Huerfano" in report.infos[0].message
 
-    def test_field_source_used_by_an_unmapped_type_is_still_info(self) -> None:
+    def test_field_source_used_by_an_unaudited_type_is_still_info(self) -> None:
         used = _prop("clbNonGroup.BAC_CIF")
         other = _prop("clbNonGroup.BAC_Otro")
-        manifest = _manifest(_entry("DC01", props=(used,)), _entry("DC02", props=(other,)))
+        manifest = _manifest(
+            _entry("DC01", props=(used,)), _entry("DC02", props=(other,), reviewed=False)
+        )
         field_sources = {
             "BAC_CIF": FieldSourceConfig(sources=(_source(),)),
             "BAC_Otro": FieldSourceConfig(sources=(_source(),)),
         }
-        # Sólo DC01 está mapeado: BAC_Otro no lo usa NINGÚN tipo mapeado.
+        # DC02 no está mapeado NI revisado: fuera del alcance auditado.
         report = run_manifest_check(_mapping(manifest, "DC01"), manifest, field_sources)
         assert len(report.infos) == 1
         assert "BAC_Otro" in report.infos[0].message

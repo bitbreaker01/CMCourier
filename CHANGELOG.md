@@ -46,8 +46,39 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
   manifest) completan el flujo. Ver
   [`docs/how-to/cm-type-manifest.md`](docs/how-to/cm-type-manifest.md).
 
+- **`types check --scope` y denuncia de alias colgados (145).** El
+  chequeo acepta `--scope mapped|reviewed|all` (con `--all` como atajo
+  de `--scope all`; si se contradicen, gana `--all`) para elegir qué
+  tipos audita: sólo los que referencia `MapeoRVI_CM.csv`, ésos más los
+  marcados `revisado ✓`, o el manifest entero. Además, toda entrada de
+  `metadata.field_aliases` cuyo destino no sea llave de `field_sources`
+  sale como WARNING propio —`metadata.field_aliases.X apunta a
+  field_sources.Y, que no existe`— la consulte alguien o no: el alias
+  que quedó colgado al renombrar la entrada no lo consulta NADIE, y por
+  eso el CRITICAL por-propiedad nunca lo veía. Si además lo consulta una
+  propiedad `usar`, salen los dos hallazgos: el CRITICAL dice qué upload
+  se rompe, el WARNING qué línea del YAML hay que borrar.
+
 ### Changed
 
+- **`types check` ahora audita también los tipos revisados-pero-sin-mapear
+  (145).** El alcance por defecto pasó de "sólo lo que referencia
+  `MapeoRVI_CM.csv`" a `reviewed`: los mapeados MÁS todo tipo con
+  `revisado ✓`. El caso que lo motivó: el operador revisó `AF01`, dejó
+  `BAC_Sucursal` y `BAC_Num_Afiliado` en `usar` y ninguna de las dos
+  tenía entrada en `metadata.field_sources` — pero como `AF01` todavía
+  no estaba en el CSV, el check se quedaba CALLADO y el error aparecía
+  recién el día del primer upload, con `no field_sources config for
+  field`. Marcar un tipo revisado es declarar "lo pienso usar", así que
+  el CRITICAL sale HOY. `--scope mapped` recupera el comportamiento
+  anterior. El WARNING de "el tipo todavía no fue revisado" sigue
+  saliendo sólo contra tipos mapeados en cualquier alcance (bajo `all`
+  serían cientos de líneas inútiles; bajo `reviewed`, una
+  contradicción), y el INFO de `field_sources` sin uso pasó a decir
+  "ningún tipo auditado" porque el conjunto ahora depende del alcance.
+  El check `cm_manifest` del `doctor` NO cambia: fija `scope="mapped"` a
+  propósito porque es un preflight del pipeline y un tipo que el CSV no
+  referencia no lo puede tocar ningún upload.
 - **`sync recover` y la pasada final del reconciliador dejan de ser un
   N+1 (144).** Las filas RVABREP de los faltantes se leen en UNA
   consulta `IN` (chunks de 1000) en vez de un `SELECT` por doc (~120 ms

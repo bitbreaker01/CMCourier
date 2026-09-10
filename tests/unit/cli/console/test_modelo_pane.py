@@ -492,6 +492,37 @@ class TestServerOps:
 
         asyncio.run(_run())
 
+    def test_verify_audits_a_reviewed_but_unmapped_type(self, tmp_path: Path) -> None:
+        """El botón usa el alcance ``reviewed``: existe para ESTE flujo (145 REQ-005).
+
+        El operador recorre el manifest entero marcando ``revisado ✓``.
+        ``AF01`` todavía no está en ``MapeoRVI_CM.csv``, pero ya declaró
+        que lo piensa usar: el CRITICAL tiene que salir HOY, no el día
+        que lo mapee.
+        """
+
+        async def _run() -> None:
+            manifest = tmp_path / "types.json"
+            store = _seed(
+                manifest,
+                [
+                    _type_node("DC01", [_prop("clbNonGroup.BAC_CIF", required=True)]),
+                    _type_node("AF01", [_prop("clbNonGroup.BAC_Sucursal", required=True)]),
+                ],
+            )
+            store.save(mark_reviewed(store.load(), "AF01"))
+            config, path = _config(tmp_path, manifest=manifest)
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "m")
+                pane = _pane(app)
+                pane.query_one("#md-check", Button).press()
+                assert await wait_for(pilot, lambda: "CRITICAL" in pane.log_text())
+                assert "AF01" in pane.log_text()
+                assert "field_sources.BAC_Sucursal" in pane.log_text()
+
+        asyncio.run(_run())
+
     def test_verify_honours_field_aliases(self, tmp_path: Path) -> None:
         """El alias resuelve la propiedad: no hay CRITICAL que reportar."""
 

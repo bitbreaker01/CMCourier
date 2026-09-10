@@ -28,6 +28,7 @@ __all__ = ["types_group"]
 import json
 import sys
 from pathlib import Path
+from typing import cast
 
 import click
 
@@ -47,7 +48,7 @@ from cmcourier.domain.cm_types import (
     canonical_name,
 )
 from cmcourier.domain.exceptions import ConfigurationError
-from cmcourier.services.manifest_check import CheckReport, run_manifest_check
+from cmcourier.services.manifest_check import CheckReport, Scope, run_manifest_check
 from cmcourier.services.sync_progress import SyncProgress
 from cmcourier.services.type_discovery import TypeDiscoveryService
 from cmcourier.services.type_manifest import (
@@ -578,7 +579,9 @@ def _manifest_mapping(config: PipelineConfig, override: Path | None) -> MappingC
     return mapping
 
 
-def _check_report(config: PipelineConfig, mapping_cfg: MappingConfigModel) -> CheckReport:
+def _check_report(
+    config: PipelineConfig, mapping_cfg: MappingConfigModel, *, scope: Scope
+) -> CheckReport:
     """Cruza manifest ↔ YAML ↔ CSV. Un archivo ilegible sale con 2."""
     try:
         mapping = build_mapping_service(mapping_cfg)
@@ -593,6 +596,7 @@ def _check_report(config: PipelineConfig, mapping_cfg: MappingConfigModel) -> Ch
         manifest,
         metadata.field_sources,
         field_aliases=metadata.field_aliases,
+        scope=scope,
     )
 
 
@@ -600,21 +604,63 @@ def _check_report(config: PipelineConfig, mapping_cfg: MappingConfigModel) -> Ch
 @_CONFIG_OPTION
 @_MANIFEST_OPTION
 @click.option(
+    "--scope",
+    "scope",
+    type=click.Choice(["mapped", "reviewed", "all"]),
+    default="reviewed",
+    show_default=True,
+    help=(
+        "Qué tipos auditar: mapped = sólo los que referencia MapeoRVI_CM.csv; "
+        "reviewed = ésos más todo tipo marcado 'revisado'; all = el manifest entero."
+    ),
+)
+@click.option(
+    "--all",
+    "audit_all",
+    is_flag=True,
+    default=False,
+    help="Atajo de --scope all. Si contradice a --scope, gana --all.",
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
     default=False,
     help="Emite el reporte como JSON en vez de texto agrupado por severidad.",
 )
-def check_command(config_path: Path, manifest_path: Path | None, as_json: bool) -> None:
+def check_command(
+    config_path: Path,
+    manifest_path: Path | None,
+    scope: str,
+    audit_all: bool,
+    as_json: bool,
+) -> None:
     """Cruza el manifest con el YAML y con ``MapeoRVI_CM.csv`` (145 REQ-005).
 
     Corre offline: no hace falta ni red ni credenciales `cmis`. Exit 1 si
     hay algún CRITICAL — lo que rompería el upload en producción; los
     WARNING e INFO se listan igual pero no cambian el exit code.
+
+    ``--scope`` decide QUÉ tipos entran:
+
+    \b
+    * mapped   — sólo los ID cortos que referencia MapeoRVI_CM.csv.
+                 Es lo que audita `doctor`: nada más puede romper una
+                 corrida de HOY.
+    * reviewed — (default) ésos más todo tipo con 'revisado ✓'. Marcar
+                 un tipo revisado es declarar "lo pienso usar": una
+                 propiedad 'usar' sin metadata.field_sources va a
+                 explotar el día que lo mapees, y conviene verlo ahora.
+    * all      — el manifest entero, revisado o no.
+
+    ``--all`` es el atajo de ``--scope all``; si se dan los dos y no
+    coinciden, gana ``--all``. El WARNING de "todavía no fue revisado"
+    sale siempre SÓLO contra tipos mapeados, para que ampliar el alcance
+    no llene la salida de ruido.
     """
     config = _require_config(config_path)
-    report = _check_report(config, _manifest_mapping(config, manifest_path))
+    effective: Scope = "all" if audit_all else cast(Scope, scope)
+    report = _check_report(config, _manifest_mapping(config, manifest_path), scope=effective)
     if as_json:
         click.echo(json.dumps(report.to_json_dict(), ensure_ascii=False, indent=2))
     else:

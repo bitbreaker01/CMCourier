@@ -156,8 +156,57 @@ Cruza manifest ↔ YAML (`metadata.field_sources`) ↔ CSV
   default marcada `omitir`; un `field_sources` cuyo largo declarado
   (valor fijo o patrón de validación) excede el `max_length` del CM;
   propiedad `usar` de tipo `datetime`/`integer`/`boolean` cuya fuente es
-  un valor fijo que no parsea.
-- **INFO**: entradas de `field_sources` que ningún tipo mapeado usa.
+  un valor fijo que no parsea; un `field_aliases` colgado (más abajo).
+- **INFO**: entradas de `field_sources` que ningún tipo **auditado** usa.
+
+#### Qué tipos se auditan: `--scope`
+
+El manifest puede tener 362 clases y el banco usar 40. Qué subconjunto
+mira el check lo decide `--scope`:
+
+| `--scope` | Audita | Para qué |
+| --- | --- | --- |
+| `mapped` | sólo los `IDCM` que referencia `MapeoRVI_CM.csv` | preflight del pipeline: lo único que puede romper una corrida de HOY |
+| `reviewed` (**default**) | ésos **más** todo tipo con `revisado ✓` | el flujo de revisión: lo que declaraste que pensás usar |
+| `all` | el manifest entero, revisado o no | barrido completo, típicamente ruidoso |
+
+`--all` es el atajo de `--scope all`; si se dan los dos y no coinciden,
+gana `--all`.
+
+**Por qué el default cambió a `reviewed`.** Caso real: revisás `AF01` en
+la pestaña `M·MODELO`, dejás `BAC_Sucursal` y `BAC_Num_Afiliado` en
+`usar`, marcás `revisado ✓` — pero todavía no agregaste `AF01` al
+`MapeoRVI_CM.csv` porque el banco no habilitó ese trámite. Ninguna de
+las dos propiedades tiene entrada en `metadata.field_sources`. Con el
+alcance viejo (`mapped`) el check se quedaba **callado**: `AF01` no
+estaba en el CSV, así que no existía para nadie. El día que lo mapeás,
+el primer upload revienta con `no field_sources config for field`.
+Marcar un tipo revisado es declarar "lo pienso usar", así que ahora el
+CRITICAL sale hoy:
+
+```console
+$ cmcourier types check --config config.yaml
+CRITICAL (2):
+  [AF01/clbNonGroup.BAC_Sucursal] propiedad 'usar' sin entrada metadata.field_sources.BAC_Sucursal
+  [AF01/clbNonGroup.BAC_Num_Afiliado] propiedad 'usar' sin entrada metadata.field_sources.BAC_Num_Afiliado
+
+$ cmcourier types check --config config.yaml --scope mapped   # el alcance viejo
+Sin hallazgos: manifest, YAML y CSV están alineados.
+```
+
+El WARNING de "el tipo todavía no fue revisado" sigue saliendo **sólo**
+contra tipos mapeados en cualquier `scope`: bajo `all` serían cientos de
+líneas inútiles, y bajo `reviewed` sería una contradicción. El orden es
+estable — primero los mapeados (ordenados), después los que suma el
+`scope` (ordenados) — así que ampliar el alcance agrega líneas al final,
+no reordena lo que ya conocés.
+
+El `doctor` es la excepción deliberada: su check `cm_manifest` usa
+siempre `scope="mapped"` porque es un preflight del pipeline, y un tipo
+que el CSV no referencia no lo puede tocar ningún upload. Un `AF01`
+revisado y roto **no** frena una corrida.
+
+#### Alias
 
 El chequeo honra `metadata.field_aliases` igual que el runtime: una
 propiedad del manifest puede llegar a su entrada de `field_sources` a
@@ -167,6 +216,21 @@ alias existe pero apunta a una entrada que **no** está declarada, eso sí
 es CRITICAL: el upload revienta con `no field_sources config for field`.
 Los WARNING nombran siempre la llave resuelta de `field_sources` (la que
 hay que editar), no el nombre de la propiedad.
+
+Además, **todo** alias cuyo destino no exista da un WARNING propio, lo
+consulte alguien o no:
+
+```console
+WARNING (1):
+  metadata.field_aliases.Shortname apunta a field_sources.BAC_Short_Name, que no existe
+```
+
+Es el alias que quedó colgado después de renombrar la entrada de
+`field_sources` — nadie lo consulta justamente por eso, y por eso el
+CRITICAL por-propiedad nunca lo denunciaba. Si además lo consulta una
+propiedad `usar` de un tipo auditado, salen los **dos** hallazgos: el
+CRITICAL dice qué upload se rompe, el WARNING qué línea del YAML hay que
+borrar o arreglar.
 
 `--json` para consumo por script. El check offline equivalente en
 `doctor` es `cm_manifest` — corre lo mismo pero sólo reporta los

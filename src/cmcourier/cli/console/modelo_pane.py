@@ -447,7 +447,13 @@ class ModeloPane(VerticalScroll):
         )
 
     def _verify_now(self, manifest: CmTypeManifest) -> CheckReport:
-        """El cruce en sí — corre en el worker, no en el hilo de la UI."""
+        """El cruce en sí — corre en el worker, no en el hilo de la UI.
+
+        Alcance ``reviewed`` (el default del servicio): este botón existe
+        para el operador que recorre el manifest marcando ``revisado ✓``.
+        Un tipo que ya declaró que piensa usar tiene que gritar HOY si le
+        falta ``field_sources``, aunque todavía no esté en el CSV.
+        """
         config = self.console.config
         metadata = build_metadata_config(config.metadata)
         return run_manifest_check(

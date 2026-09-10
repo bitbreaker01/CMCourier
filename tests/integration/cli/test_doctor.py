@@ -1036,6 +1036,33 @@ class TestCmManifestCheck:
         )
         assert result.status == CheckStatus.PASS, f"{result.message} / {result.details}"
 
+    def test_a_reviewed_but_unmapped_broken_type_does_not_fail_the_doctor(
+        self, tmp_path: Path
+    ) -> None:
+        """145 REQ-005: el doctor audita SOLO lo mapeado (`scope="mapped"`).
+
+        Es un preflight del pipeline: un tipo que el `MapeoRVI_CM.csv` no
+        referencia no lo puede tocar ningun upload, asi que romperlo no
+        puede frenar una corrida. `types check` (default `reviewed`) es
+        el que grita por eso.
+        """
+        rvi_cm = tmp_path / "MapeoRVI_CM.csv"
+        manifest = tmp_path / "cm-types.json"
+        _write_rvi_cm_3col(rvi_cm, [("", "FB01", "CN01")])
+        _write_manifest_json(manifest)
+        payload = json.loads(manifest.read_text())
+        broken = json.loads(json.dumps(payload["types"]["CN01"]))
+        broken["properties"][0]["id"] = "cmcourier:BAC_Sin_Fuente"
+        broken["decisions"] = {"cmcourier:BAC_Sin_Fuente": "usar"}
+        broken["reviewed"] = True
+        payload["types"]["AF01"] = broken
+        manifest.write_text(json.dumps(payload, indent=2) + "\n")
+        result = self._run(
+            tmp_path, _write_manifest_yaml(tmp_path, rvi_cm_csv=rvi_cm, manifest_json=manifest)
+        )
+        assert result.status == CheckStatus.PASS, f"{result.message} / {result.details}"
+        assert "BAC_Sin_Fuente" not in result.message
+
     def test_warnings_do_not_fail_the_check(self, tmp_path: Path) -> None:
         rvi_cm = tmp_path / "MapeoRVI_CM.csv"
         manifest = tmp_path / "cm-types.json"

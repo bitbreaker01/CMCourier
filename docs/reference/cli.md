@@ -435,13 +435,36 @@ Usage: cmcourier types check [OPTIONS]
   algún CRITICAL — lo que rompería el upload en producción; los WARNING e INFO
   se listan igual pero no cambian el exit code.
 
+  ``--scope`` decide QUÉ tipos entran:
+
+  * mapped   — sólo los ID cortos que referencia MapeoRVI_CM.csv.
+               Es lo que audita `doctor`: nada más puede romper una
+               corrida de HOY.
+  * reviewed — (default) ésos más todo tipo con 'revisado ✓'. Marcar
+               un tipo revisado es declarar "lo pienso usar": una
+               propiedad 'usar' sin metadata.field_sources va a
+               explotar el día que lo mapees, y conviene verlo ahora.
+  * all      — el manifest entero, revisado o no.
+
+  ``--all`` es el atajo de ``--scope all``; si se dan los dos y no coinciden,
+  gana ``--all``. El WARNING de "todavía no fue revisado" sale siempre SÓLO
+  contra tipos mapeados, para que ampliar el alcance no llene la salida de
+  ruido.
+
 Options:
-  -c, --config FILE  YAML del pipeline (sección `cmis` +
-                     `mapping.type_manifest_path`).  [required]
-  --manifest FILE    Manifest JSON a usar. Default:
-                     `mapping.type_manifest_path` del YAML.
-  --json             Emite el reporte como JSON en vez de texto agrupado por
-                     severidad.
+  -c, --config FILE              YAML del pipeline (sección `cmis` +
+                                 `mapping.type_manifest_path`).  [required]
+  --manifest FILE                Manifest JSON a usar. Default:
+                                 `mapping.type_manifest_path` del YAML.
+  --scope [mapped|reviewed|all]  Qué tipos auditar: mapped = sólo los que
+                                 referencia MapeoRVI_CM.csv; reviewed = ésos
+                                 más todo tipo marcado 'revisado'; all = el
+                                 manifest entero.  [default: reviewed]
+  --all                          Atajo de --scope all. Si contradice a
+                                 --scope, gana --all.
+  --json                         Emite el reporte como JSON en vez de texto
+                                 agrupado por severidad.
+  --help                         Show this message and exit.
 ```
 
 Se niega (exit 1) si `mapping` no está en modo manifest; exit 2 si el YAML
@@ -449,7 +472,9 @@ o el manifest no se pueden leer. `--manifest` gobierna los DOS extremos del
 cruce (el `MappingService` que produce `missing_cm_codes` y el manifest
 contra el que se verifica), así que nunca mezcla dos manifests. El motor
 (`services/manifest_check.py:run_manifest_check`) es el mismo que corre el
-check `cm_manifest` de `doctor` — ver
+check `cm_manifest` de `doctor`, con una diferencia deliberada: el `doctor`
+fija `scope="mapped"` porque es un preflight del pipeline y un tipo fuera del
+`MapeoRVI_CM.csv` no lo puede tocar ningún upload — ver
 [`how-to/cm-type-manifest.md`](../how-to/cm-type-manifest.md#3-verificar-la-alineación-types-check)
 para las reglas exactas de cada severidad.
 
