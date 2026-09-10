@@ -186,8 +186,11 @@ class As400Recovery:
         if document is None:
             return RecoveryItem(rec.txn_num, "rvabrep_row_not_found")
         # Re-derivar IDNBAC / TIPIDN desde el mapping.
+        # 145 REQ-001: el sistema viaja en la proyección de audit que el
+        # tracking guardó cuando corrió el batch original — no hay trigger
+        # vivo del cual sacarlo acá.
         try:
-            mapping = self._mapping.get_mapping(document.index7)
+            mapping = self._mapping.get_mapping(document.index7, rec.system_id or None)
         except IDRViNotMappedError:
             return RecoveryItem(rec.txn_num, f"id_rvi_not_mapped:{document.index7}")
         return _InsertPlan(rec, document, mapping.id_corto, mapping.cmis_type)

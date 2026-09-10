@@ -1,9 +1,16 @@
 """Servicio de mapping: cache in-memory + lookup sobre el Modelo Documental.
 
 Al construirse carga cada fila desde cualquier :class:`IDataSource`
-y arma un dict ``id_rvi -> CMMapping`` para lookup O(1). Las llamadas
-posteriores a ``get_mapping`` pegan en la cache. El servicio no hace
-I/O después de la construcción.
+y arma un dict ``(sistema, id_rvi) -> CMMapping`` para lookup O(1). Las
+llamadas posteriores a ``get_mapping`` pegan en la cache. El servicio no
+hace I/O después de la construcción.
+
+145 REQ-001: hay TRES modos de carga. El consolidado (un CSV con todo
+inline) y el split (``MapeoRVI_CM`` + ``MetadatosCM``, deprecado)
+escriben siempre bajo el sistema comodín ``""``; el modo manifest
+(``MapeoRVI_CM`` reducido a ``IDSistema,IDRVI,IDCM`` + el
+:class:`CmTypeManifest` que bajó ``types discover``) es el único que
+usa la clave completa.
 
 El stage S2 (Document Class Mapping) de cada `pipeline` depende de
 este servicio, igual que el chequeo de completitud de mapping del
@@ -23,6 +30,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from cmcourier.domain.cm_types import CmTypeEntry, CmTypeManifest, canonical_name
 from cmcourier.domain.exceptions import ConfigurationError, IDRViNotMappedError
 from cmcourier.domain.models import CMMapping
 from cmcourier.domain.ports import IDataSource
@@ -50,6 +58,9 @@ class MappingColumnsConfig:
     col_cmis_type: str = "CMISType"
     col_rvi_cm_id_rvi: str = "IDRVI"
     col_rvi_cm_id_cm: str = "IDCM"
+    # 145 REQ-001: el sistema de origen del código RVI. Opcional en modo
+    # manifest — columna ausente ≡ todas las filas al comodín.
+    col_rvi_cm_id_sistema: str = "IDSistema"
     col_rvi_cm_clase_id: str = "IDClaseDocumental"
     col_rvi_cm_cmis_type: str = "CMISType"
     col_rvi_cm_cmis_folder: str = "CMISFolder"
@@ -84,6 +95,17 @@ class MappingColumnsConfig:
             self.col_rvi_cm_clase_id,
         )
 
+    def required_columns_manifest(self) -> tuple[str, ...]:
+        """145 REQ-001: lo único que el modo manifest exige de ``MapeoRVI_CM``.
+
+        ``IDSistema`` NO entra: la columna ausente equivale a todas las
+        filas vacías, o sea todas al comodín.
+        """
+        return (
+            self.col_rvi_cm_id_rvi,
+            self.col_rvi_cm_id_cm,
+        )
+
     def required_columns_metadatos(self) -> tuple[str, ...]:
         """Columnas que el `loader` en modo split tiene que encontrar
         en ``MetadatosCM``."""
@@ -94,10 +116,47 @@ class MappingColumnsConfig:
         )
 
 
+#: 145 REQ-001: el sistema "cualquiera". Una fila sin ``IDSistema`` cae acá.
+_WILDCARD_SYSTEM = ""
+
+
 def _is_blank(value: object) -> bool:
     """Devuelve ``True`` si *value* es ``None``, vacío o solo
     whitespace."""
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _norm_system(value: object) -> str:
+    """145 REQ-001: normaliza un sistema a la forma que usa la clave.
+
+    ``strip()`` + ``lower()``: la comparación es case-insensitive y no
+    le importan los espacios del CSV. Vacío / ``None`` ⇒ comodín.
+    """
+    if value is None:
+        return _WILDCARD_SYSTEM
+    return str(value).strip().lower()
+
+
+def _mapping_from_entry(entry: CmTypeEntry, id_rvi: str) -> CMMapping:
+    """145 REQ-001: proyecta una entrada del manifest a un :class:`CMMapping`.
+
+    Todo lo que antes salía de ``MetadatosCM.csv`` sale ahora del
+    servidor: el tipo, la carpeta, y las propiedades que el operador
+    marcó ``usar`` — con su nombre canónico como clave (la misma que usa
+    ``metadata.field_sources``) y su id de wire como valor.
+    """
+    props = entry.usable_properties()
+    wire_ids = {canonical_name(p.id): p.id for p in props}
+    return CMMapping(
+        clase_id=entry.local_name,
+        id_rvi=id_rvi,
+        id_corto=entry.id_corto,
+        clase_name=entry.display_name,
+        required_metadata_fields=tuple(canonical_name(p.id) for p in props),
+        cmis_type=entry.type_id,
+        cmis_folder=entry.folder or None,
+        cmis_property_ids=MappingProxyType(wire_ids) if wire_ids else None,
+    )
 
 
 def _parse_metadata_list(raw: object) -> tuple[str, ...]:
@@ -136,8 +195,9 @@ class MappingService:
     """Cache in-memory + lookup sobre el Modelo Documental.
 
     La construcción itera toda la fuente una vez, valida las
-    columnas requeridas y arma un dict indexado por ``id_rvi``. La
-    primera ocurrencia de un ``id_rvi`` duplicado gana; las
+    columnas requeridas y arma un dict indexado por ``(sistema,
+    id_rvi)`` (145 REQ-001; el sistema es ``""`` fuera del modo
+    manifest). La primera ocurrencia de una clave duplicada gana; las
     posteriores se descartan con una entrada de log en ``WARNING``.
     Las filas con ``id_rvi`` vacío se saltean silenciosamente, con
     una entrada de log en ``INFO`` que resume la cuenta.
@@ -151,17 +211,99 @@ class MappingService:
         source: IDataSource,
         columns: MappingColumnsConfig | None = None,
         metadata_source: IDataSource | None = None,
+        type_manifest: CmTypeManifest | None = None,
     ) -> None:
+        if metadata_source is not None and type_manifest is not None:
+            raise ConfigurationError(
+                "MappingService: `metadata_source` (split) y `type_manifest` "
+                "son modos mutuamente excluyentes"
+            )
         self._columns = columns or MappingColumnsConfig()
-        self._cache: dict[str, CMMapping] = {}
+        # 145 REQ-001: la clave es ``(sistema normalizado, id_rvi)``. Los
+        # modos consolidado y split escriben todo bajo el comodín.
+        self._cache: dict[tuple[str, str], CMMapping] = {}
+        # Los ``IDRVI`` conocidos, para que ``__contains__`` siga siendo O(1)
+        # ahora que la clave del cache es compuesta.
+        self._id_rvis: set[str] = set()
         # 141 REQ-001: índice secundario ``IDCM -> [CMMapping, ...]``, poblado
-        # en la MISMA pasada que el de ``IDRVI`` (una fila descartada por
-        # ``IDRVI`` duplicado o vacío tampoco entra acá).
+        # en la MISMA pasada que el primario (una fila descartada por clave
+        # duplicada o ``IDRVI`` vacío tampoco entra acá).
         self._by_cm_code: dict[str, list[CMMapping]] = {}
-        if metadata_source is None:
+        # 145 REQ-001: los ``IDCM`` del CSV que el manifest no conoce.
+        self._missing_cm_codes: set[str] = set()
+        if type_manifest is not None:
+            self._load_manifest(source, type_manifest)
+        elif metadata_source is None:
             self._load(source)
         else:
             self._load_split(source, metadata_source)
+
+    def _load_manifest(self, rvi_cm: IDataSource, manifest: CmTypeManifest) -> None:
+        """`Loader` en modo manifest (145 REQ-001): ``MapeoRVI_CM`` ↔ manifest.
+
+        El CSV aporta lo único que el servidor no sabe — qué código RVI
+        (por sistema) va a qué clase; todo lo demás sale del manifest. Un
+        ``IDCM`` que el manifest no tiene descarta la fila con WARNING y
+        queda en :attr:`missing_cm_codes` para que ``types check`` y
+        ``doctor`` lo muestren.
+        """
+        skipped = 0
+        validated = False
+        for row in rvi_cm.get_all():
+            if not validated:
+                self._validate_manifest_columns(row)
+                validated = True
+
+            id_rvi_raw = row.get(self._columns.col_rvi_cm_id_rvi)
+            if _is_blank(id_rvi_raw):
+                skipped += 1
+                continue
+            id_rvi = str(id_rvi_raw).strip()
+
+            id_corto_raw = row.get(self._columns.col_rvi_cm_id_cm)
+            id_corto = "" if id_corto_raw is None else str(id_corto_raw).strip()
+            entry = manifest.types.get(id_corto)
+            if entry is None:
+                _logger.warning(
+                    "IDCM %r (IDRVI %r) is not in the CM type manifest; row dropped",
+                    id_corto,
+                    id_rvi,
+                )
+                self._missing_cm_codes.add(id_corto)
+                continue
+
+            system = _norm_system(row.get(self._columns.col_rvi_cm_id_sistema))
+            mapping = _mapping_from_entry(entry, id_rvi)
+            if (system, id_rvi) in self._cache:
+                _logger.warning(
+                    "duplicate mapping key (system=%r, ID RVI=%r) dropped (first occurrence wins)",
+                    system,
+                    id_rvi,
+                )
+                self._remember_cm_code(mapping)
+                continue
+
+            self._remember(mapping, system)
+
+        if skipped:
+            _logger.info("skipped %d row(s) from MapeoRVI_CM with empty IDRVI", skipped)
+
+    def _validate_manifest_columns(self, row: dict[str, object]) -> None:
+        for col in self._columns.required_columns_manifest():
+            if col not in row:
+                raise ConfigurationError(
+                    "MapeoRVI_CM missing required column",
+                    missing_column=col,
+                )
+
+    @property
+    def missing_cm_codes(self) -> tuple[str, ...]:
+        """145 REQ-001: los ``IDCM`` del CSV que el manifest no conoce.
+
+        Ordenados y sin repetir. Siempre vacío en los modos consolidado y
+        split: ahí no hay manifest contra el cual fallar.
+        """
+        return tuple(sorted(self._missing_cm_codes))
 
     def _load_split(self, rvi_cm: IDataSource, metadatos: IDataSource) -> None:
         """`Loader` en modo split (035): join entre ``MapeoRVI_CM`` y
@@ -183,7 +325,7 @@ class MappingService:
             mapping = self._row_to_mapping_split(
                 row, id_rvi, required_index, cmis_property_id_index
             )
-            if id_rvi in self._cache:
+            if (_WILDCARD_SYSTEM, id_rvi) in self._cache:
                 _logger.warning(
                     "duplicate ID RVI %r dropped from mapping (first occurrence wins)",
                     id_rvi,
@@ -311,7 +453,7 @@ class MappingService:
             id_rvi = str(id_rvi_raw).strip()
 
             mapping = self._row_to_mapping(row, id_rvi)
-            if id_rvi in self._cache:
+            if (_WILDCARD_SYSTEM, id_rvi) in self._cache:
                 _logger.warning(
                     "duplicate ID RVI %r dropped from mapping (first occurrence wins)",
                     id_rvi,
@@ -349,13 +491,16 @@ class MappingService:
             cmis_type=cmis_type,
         )
 
-    def _remember(self, mapping: CMMapping) -> None:
+    def _remember(self, mapping: CMMapping, system: str = _WILDCARD_SYSTEM) -> None:
         """141 REQ-001: cachea la fila en los DOS índices a la vez.
 
-        El índice por ``IDRVI`` es el de siempre (gana la primera
-        ocurrencia); el de ``IDCM`` se delega a :meth:`_remember_cm_code`.
+        145 REQ-001: el índice primario pasó a estar tecleado por
+        ``(sistema, IDRVI)`` — los modos consolidado y split no pasan
+        sistema y caen al comodín, o sea se comportan igual que siempre.
+        El índice por ``IDCM`` se delega a :meth:`_remember_cm_code`.
         """
-        self._cache[mapping.id_rvi] = mapping
+        self._cache[(system, mapping.id_rvi)] = mapping
+        self._id_rvis.add(mapping.id_rvi)
         self._remember_cm_code(mapping)
 
     def _remember_cm_code(self, mapping: CMMapping) -> None:
@@ -387,12 +532,22 @@ class MappingService:
         """141 REQ-001: los códigos CM conocidos, ordenados y sin repetir."""
         return tuple(sorted(self._by_cm_code))
 
-    def get_mapping(self, id_rvi: str) -> CMMapping:
-        """Devuelve el :class:`CMMapping` para *id_rvi*; lanza si no hay match."""
-        try:
-            return self._cache[id_rvi]
-        except KeyError:
-            raise IDRViNotMappedError(id_rvi=id_rvi) from None
+    def get_mapping(self, id_rvi: str, system_id: str | None = None) -> CMMapping:
+        """Devuelve el :class:`CMMapping` para *id_rvi*; lanza si no hay match.
+
+        145 REQ-001: primero busca la fila específica del sistema
+        (comparación con ``strip()`` y case-insensitive), después el
+        comodín. Los modos consolidado y split guardan todo bajo el
+        comodín, así que ahí *system_id* es simplemente ignorado.
+        """
+        if system_id:
+            specific = self._cache.get((_norm_system(system_id), id_rvi))
+            if specific is not None:
+                return specific
+        wildcard = self._cache.get((_WILDCARD_SYSTEM, id_rvi))
+        if wildcard is None:
+            raise IDRViNotMappedError(id_rvi=id_rvi)
+        return wildcard
 
     def get_all(self) -> Iterator[CMMapping]:
         """Yieldea cada mapping cacheado en el orden en que las filas
@@ -400,8 +555,10 @@ class MappingService:
         return iter(self._cache.values())
 
     def count(self) -> int:
-        """Devuelve la cantidad de mappings cacheados."""
+        """Devuelve la cantidad de mappings cacheados (filas, no ``IDRVI``)."""
         return len(self._cache)
 
     def __contains__(self, id_rvi: object) -> bool:
-        return isinstance(id_rvi, str) and id_rvi in self._cache
+        """``True`` sii hay AL MENOS una fila con ese ``IDRVI``, sea de
+        qué sistema sea (145 REQ-001)."""
+        return isinstance(id_rvi, str) and id_rvi in self._id_rvis

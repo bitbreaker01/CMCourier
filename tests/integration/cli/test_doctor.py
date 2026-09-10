@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from textwrap import dedent
 from unittest.mock import MagicMock
@@ -13,7 +14,7 @@ from click.testing import CliRunner
 
 from cmcourier.cli import doctor as doctor_module
 from cmcourier.cli.app import main
-from cmcourier.cli.doctor import CheckStatus, run_doctor
+from cmcourier.cli.doctor import CheckResult, CheckStatus, run_doctor
 from cmcourier.config.loader import Credential, Secrets, load_config
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -281,6 +282,7 @@ class TestRunDoctorHappyPath:
             "tracking_openable",
             "as400_sync",
             "mapping_completeness",
+            "cm_manifest",  # 145
             "metadata_sources",
             "cm_type_alignment",
             "cmis_folders_exist",
@@ -625,12 +627,13 @@ class TestDoctorCheckFilter:
         assert "cmis_connectivity" not in result.output
 
     @respx.mock
-    def test_mapping_runs_only_mapping_check(self, tmp_path: Path) -> None:
+    def test_mapping_runs_the_mapping_group(self, tmp_path: Path) -> None:
+        """145: `cm_manifest` se sumo al grupo (offline, SKIP fuera de modo manifest)."""
         _stub_warmup_ok()
         config = load_config(_write_yaml(tmp_path))
         report = run_doctor(config, _secrets(), selected="mapping")
         names = [r.name for r in report.results]
-        assert names == ["mapping_completeness"]
+        assert names == ["mapping_completeness", "cm_manifest"]
 
     @respx.mock
     def test_metadata_runs_metadata_sources_and_dry_run(self, tmp_path: Path) -> None:
@@ -666,6 +669,7 @@ class TestDoctorCheckFilter:
                 "tracking_openable",
                 "as400_sync",
                 "mapping_completeness",
+                "cm_manifest",  # 145
                 "metadata_sources",
                 "cm_type_alignment",
                 "cmis_folders_exist",
@@ -896,3 +900,133 @@ class TestCmisPropertiesAlignment:
         props = next(r for r in report.results if r.name == "cmis_properties_alignment")
         assert props.status == CheckStatus.FAIL
         assert "cmcourier:DoesNotExist" in props.details["missing"]
+
+
+# ---------------------------------------------------------------------------
+# 145 REQ-005 — cm_manifest (grupo mapping, OFFLINE)
+# ---------------------------------------------------------------------------
+
+
+def _write_manifest_json(
+    path: Path,
+    *,
+    decisions: dict[str, str] | None = None,
+    reviewed: bool = True,
+) -> None:
+    """Manifest minimo con UN tipo (CN01) y una propiedad escribible."""
+    prop = {
+        "id": "cmcourier:BAC_CIF",
+        "display_name": "CIF",
+        "property_type": "string",
+        "cardinality": "single",
+        "updatability": "readwrite",
+        "required": True,
+        "max_length": None,
+        "default_value": None,
+        "inherited": False,
+        "choices": [],
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "service_url": _CMIS_BASE_URL,
+                "repository_id": _CMIS_REPO_ID,
+                "discovered_at": "2026-01-01T00:00:00Z",
+                "types": {
+                    "CN01": {
+                        "type_id": "$t!-2_BAC_CN01v-1",
+                        "local_name": "BAC_CN01",
+                        "display_name": "CN01 - Clase",
+                        "folder": "/$type/BAC_CN01",
+                        "folder_source": "derivada",
+                        "folder_ok": True,
+                        "properties": [prop],
+                        "decisions": decisions or {"cmcourier:BAC_CIF": "usar"},
+                        "reviewed": reviewed,
+                        "changes": [],
+                        "missing_on_server": False,
+                    }
+                },
+                "without_code": [],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
+def _write_rvi_cm_3col(path: Path, rows: list[tuple[str, str, str]]) -> None:
+    """145 REQ-001: `MapeoRVI_CM.csv` reducido a `IDSistema,IDRVI,IDCM`."""
+    lines = ["IDSistema,IDRVI,IDCM"]
+    lines.extend(f"{sistema},{id_rvi},{id_cm}" for sistema, id_rvi, id_cm in rows)
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _write_manifest_yaml(tmp_path: Path, *, rvi_cm_csv: Path, manifest_json: Path) -> Path:
+    """El YAML del modo manifest: MapeoRVI_CM de 3 columnas + JSON de tipos."""
+    yaml_path = _write_split_yaml(tmp_path, rvi_cm_csv=rvi_cm_csv, metadatos_csv=rvi_cm_csv)
+    yaml_path.write_text(
+        yaml_path.read_text().replace(
+            f"metadatos_csv_path: {rvi_cm_csv}",
+            f"type_manifest_path: {manifest_json}",
+        )
+    )
+    return yaml_path
+
+
+class TestCmManifestCheck:
+    def _run(self, tmp_path: Path, yaml_path: Path) -> CheckResult:
+        report = run_doctor(load_config(yaml_path), _secrets(), selected="cm_manifest")
+        return next(r for r in report.results if r.name == "cm_manifest")
+
+    def test_skip_outside_manifest_mode(self, tmp_path: Path) -> None:
+        result = self._run(tmp_path, _write_yaml(tmp_path))
+        assert result.status == CheckStatus.SKIP
+
+    def test_pass_when_aligned(self, tmp_path: Path) -> None:
+        """El YAML de `_write_split_yaml` declara BAC_CIF; el manifest lo usa."""
+        rvi_cm = tmp_path / "MapeoRVI_CM.csv"
+        manifest = tmp_path / "cm-types.json"
+        _write_rvi_cm_3col(rvi_cm, [("", "FB01", "CN01")])
+        _write_manifest_json(manifest)
+        result = self._run(
+            tmp_path, _write_manifest_yaml(tmp_path, rvi_cm_csv=rvi_cm, manifest_json=manifest)
+        )
+        assert result.status == CheckStatus.PASS, f"{result.message} / {result.details}"
+        assert result.details["types_count"] == "1"
+
+    def test_fail_when_an_id_cm_is_not_in_the_manifest(self, tmp_path: Path) -> None:
+        rvi_cm = tmp_path / "MapeoRVI_CM.csv"
+        manifest = tmp_path / "cm-types.json"
+        _write_rvi_cm_3col(rvi_cm, [("", "FB01", "CN01"), ("", "FB23", "ZZ99")])
+        _write_manifest_json(manifest)
+        result = self._run(
+            tmp_path, _write_manifest_yaml(tmp_path, rvi_cm_csv=rvi_cm, manifest_json=manifest)
+        )
+        assert result.status == CheckStatus.FAIL
+        assert "ZZ99" in result.message
+
+    def test_fail_when_a_used_property_has_no_field_source(self, tmp_path: Path) -> None:
+        rvi_cm = tmp_path / "MapeoRVI_CM.csv"
+        manifest = tmp_path / "cm-types.json"
+        _write_rvi_cm_3col(rvi_cm, [("", "FB01", "CN01")])
+        _write_manifest_json(manifest)
+        # Renombra la propiedad a una que el YAML NO declara.
+        manifest.write_text(manifest.read_text().replace("BAC_CIF", "BAC_Sin_Fuente"))
+        result = self._run(
+            tmp_path, _write_manifest_yaml(tmp_path, rvi_cm_csv=rvi_cm, manifest_json=manifest)
+        )
+        assert result.status == CheckStatus.FAIL
+        assert "BAC_Sin_Fuente" in result.message
+
+    def test_warnings_do_not_fail_the_check(self, tmp_path: Path) -> None:
+        rvi_cm = tmp_path / "MapeoRVI_CM.csv"
+        manifest = tmp_path / "cm-types.json"
+        _write_rvi_cm_3col(rvi_cm, [("", "FB01", "CN01")])
+        _write_manifest_json(manifest, reviewed=False)
+        result = self._run(
+            tmp_path, _write_manifest_yaml(tmp_path, rvi_cm_csv=rvi_cm, manifest_json=manifest)
+        )
+        assert result.status == CheckStatus.PASS
+        assert result.details["warning_count"] == "1"

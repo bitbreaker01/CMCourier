@@ -34,6 +34,7 @@ __all__ = [
     "compute_cm_object_type",
     "is_pdf_filename",
     "parse_cymmdd",
+    "trigger_system_id",
 ]
 
 import json
@@ -295,6 +296,23 @@ class LocalScanTrigger(Trigger):
 # ``ClientTrigger`` para reflejar su forma semántica, pero idéntico en
 # tipo para chequeos ``isinstance``.
 TriggerRecord = ClientTrigger
+
+
+def trigger_system_id(trigger: Trigger) -> str | None:
+    """145 REQ-001: el sistema de origen del trigger, o ``None``.
+
+    Es el primer elemento de la clave del mapping ``(sistema, id_rvi)``:
+    el mismo código RVI puede apuntar a clases CM distintas según de qué
+    sistema del banco venga el documento. Mismo patrón que
+    ``services.metadata._trigger_cif``: ``ClientTrigger`` lo lleva como
+    atributo, los subtipos basados en fila lo llevan adentro de la fila
+    y la proyección ``audit_row()`` ya sabe sacarlo. Vacío ⇒ ``None``,
+    que ``get_mapping`` interpreta como "usá el comodín".
+    """
+    if isinstance(trigger, ClientTrigger):
+        return trigger.system_id or None
+    system = trigger.audit_row().get("system_id")
+    return system if isinstance(system, str) and system else None
 
 
 @dataclass(frozen=True, slots=True)

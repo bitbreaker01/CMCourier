@@ -72,6 +72,7 @@ from cmcourier.domain.models import (
     StagedFile,
     StageStatus,
     Trigger,
+    trigger_system_id,
 )
 from cmcourier.domain.ports import ITrackingStore, S0Strategy
 from cmcourier.observability.error_classification import classify_failure
@@ -1021,7 +1022,11 @@ class StagedPipeline:
             txn_num=txn,
         ) as timer:
             try:
-                mapping = self._mapping_service.get_mapping(item.document.index7)
+                # 145 REQ-001: la clave del mapping es ``(sistema, IDRVI)``;
+                # el sistema sale del trigger que arrastró este doc hasta acá.
+                mapping = self._mapping_service.get_mapping(
+                    item.document.index7, trigger_system_id(item.trigger)
+                )
             except IDRViNotMappedError as exc:
                 timer.mark_failed()
                 if not self._tracking_store.is_stage_done(txn, batch_id, StageStatus.S2_DONE):

@@ -1165,6 +1165,51 @@ class TestMappingConfigModes:
         assert cfg.metadatos_cmis_property_id_column == "CMISPropertyId"
         assert cfg.required_marker == "Yes"
 
+    @pytest.fixture
+    def manifest_path(self, tmp_path: Path) -> Path:
+        path = tmp_path / "cm-types.json"
+        path.write_text('{"version": 1, "types": {}}\n')
+        return path
+
+    def test_manifest_mode(self, split_paths: dict[str, Path], manifest_path: Path) -> None:
+        """145 REQ-001: `MapeoRVI_CM` + manifest JSON, sin `MetadatosCM`."""
+        cfg = MappingConfig(
+            rvi_cm_csv_path=split_paths["rvi_cm"],
+            type_manifest_path=manifest_path,
+        )
+        assert cfg.csv_path is None
+        assert cfg.metadatos_csv_path is None
+        assert cfg.type_manifest_path == manifest_path
+        assert cfg.rvi_cm_id_sistema_column == "IDSistema"
+
+    def test_rejects_manifest_plus_metadatos(
+        self, split_paths: dict[str, Path], manifest_path: Path
+    ) -> None:
+        with pytest.raises(ValidationError) as ei:
+            MappingConfig(
+                rvi_cm_csv_path=split_paths["rvi_cm"],
+                metadatos_csv_path=split_paths["metadatos"],
+                type_manifest_path=manifest_path,
+            )
+        msg = str(ei.value).lower()
+        assert "exactly one" in msg or "type_manifest_path" in msg
+
+    def test_rejects_manifest_without_rvi_cm(self, manifest_path: Path) -> None:
+        with pytest.raises(ValidationError) as ei:
+            MappingConfig(type_manifest_path=manifest_path)
+        assert "rvi_cm_csv_path" in str(ei.value).lower()
+
+    def test_rejects_consolidated_plus_manifest(
+        self, fixture_paths: dict[str, Path], manifest_path: Path
+    ) -> None:
+        with pytest.raises(ValidationError) as ei:
+            MappingConfig(
+                csv_path=fixture_paths["modelo"],
+                rvi_cm_csv_path=None,
+                type_manifest_path=manifest_path,
+            )
+        assert "either" in str(ei.value).lower()
+
     def test_rejects_both_modes(
         self, fixture_paths: dict[str, Path], split_paths: dict[str, Path]
     ) -> None:

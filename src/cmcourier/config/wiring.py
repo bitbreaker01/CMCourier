@@ -8,7 +8,7 @@ Constitución (separación de capas).
 
 from __future__ import annotations
 
-__all__ = ["build_niarvilog_store", "build_pipeline"]
+__all__ = ["build_metadata_config", "build_niarvilog_store", "build_pipeline"]
 
 import atexit
 from concurrent.futures import ProcessPoolExecutor
@@ -18,6 +18,7 @@ from cmcourier.adapters.assembly import (
     PdfAssembler,
     build_s4_process_pool,
 )
+from cmcourier.adapters.manifest.json_store import JsonTypeManifestStore
 from cmcourier.adapters.sources import As400DataSource, MssqlDataSource, TabularDataSource
 from cmcourier.adapters.tracking import SqliteDocumentCache, SQLiteTrackingStore
 from cmcourier.adapters.tracking.as400_niarvilog import (
@@ -588,6 +589,7 @@ def _mapping_columns_from_schema(model: MappingConfigModel) -> MappingColumnsCon
         col_cmis_type=model.cmis_type_column,
         col_rvi_cm_id_rvi=model.rvi_cm_id_rvi_column,
         col_rvi_cm_id_cm=model.rvi_cm_id_cm_column,
+        col_rvi_cm_id_sistema=model.rvi_cm_id_sistema_column,
         col_rvi_cm_clase_id=model.rvi_cm_clase_id_column,
         col_rvi_cm_cmis_type=model.rvi_cm_cmis_type_column,
         col_rvi_cm_cmis_folder=model.rvi_cm_cmis_folder_column,
@@ -602,10 +604,10 @@ def _mapping_columns_from_schema(model: MappingConfigModel) -> MappingColumnsCon
 def build_mapping_service(model: MappingConfigModel) -> MappingService:
     """Construye un :class:`MappingService` totalmente cargado desde un ``MappingConfig``.
 
-    Elige modo consolidado o `split` según qué paths estén seteados
-    (035). Abre el/los ``TabularDataSource`` subyacente(s), carga el
-    cache, y luego cierra el/los `source` — ``MappingService`` lee
-    todo en construcción.
+    Elige modo consolidado, `split` (035) o manifest (145 REQ-001) según
+    qué paths estén seteados. Abre el/los ``TabularDataSource``
+    subyacente(s), carga el cache, y luego cierra el/los `source` —
+    ``MappingService`` lee todo en construcción.
     """
     columns = _mapping_columns_from_schema(model)
     if model.csv_path is not None:
@@ -615,6 +617,15 @@ def build_mapping_service(model: MappingConfigModel) -> MappingService:
         finally:
             source.close()
     assert model.rvi_cm_csv_path is not None  # noqa: S101 - el validador lo garantiza
+    if model.type_manifest_path is not None:
+        # 145 REQ-001: el manifest lo lee el `adapter` de JSON — el wiring
+        # es justamente la capa a la que le está permitido conocerlo.
+        manifest = JsonTypeManifestStore(model.type_manifest_path).load()
+        rvi_only = TabularDataSource(model.rvi_cm_csv_path)
+        try:
+            return MappingService(rvi_only, columns, type_manifest=manifest)
+        finally:
+            rvi_only.close()
     assert model.metadatos_csv_path is not None  # noqa: S101 - el validador lo garantiza
     rvi_src = TabularDataSource(model.rvi_cm_csv_path)
     metadatos_src = TabularDataSource(model.metadatos_csv_path)
@@ -650,3 +661,14 @@ def _metadata_config_from_schema(model: MetadataConfigModel) -> MetadataConfig:
         field_sources=field_sources,
         prefetch_enabled=model.prefetch_enabled,
     )
+
+
+def build_metadata_config(model: MetadataConfigModel) -> MetadataConfig:
+    """145 REQ-005: la :class:`MetadataConfig` resuelta, sin abrir sources.
+
+    ``types check`` y el check ``cm_manifest`` del doctor sólo necesitan
+    LEER ``field_sources`` (offline, cero red); construir el
+    ``MetadataService`` completo abriría cada CSV / AS400 del registro
+    para nada.
+    """
+    return _metadata_config_from_schema(model)

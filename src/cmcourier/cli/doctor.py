@@ -11,7 +11,9 @@ Grupos (:data:`_CHECK_GROUPS` / :func:`group_of`):
     (129/130: una fila por conexion del registro que la config USA),
     ``tracking_openable`` (SQLite en WAL) y ``as400_sync`` (SKIP si
     ``tracking.as400_sync.enabled`` es false).
-  * ``mapping``: ``mapping_completeness`` (>=1 fila del Modelo Documental).
+  * ``mapping``: ``mapping_completeness`` (>=1 fila del Modelo Documental)
+    y ``cm_manifest`` (145: cruce offline manifest / YAML / MapeoRVI_CM,
+    SKIP si el mapping no esta en modo manifest).
   * ``metadata``: ``metadata_sources`` (cada source con alias tiene >=1
     fila) y ``sample_dry_run`` (S1..S4 sobre el primer doc, sin upload;
     SKIP con cero triggers o cero docs).
@@ -49,6 +51,7 @@ from types import MappingProxyType
 from typing import NamedTuple, TypeVar
 
 from cmcourier.adapters.assembly import PdfAssembler
+from cmcourier.adapters.manifest.json_store import JsonTypeManifestStore
 from cmcourier.adapters.sources import (
     As400DataSource,
     MssqlDataSource,
@@ -71,9 +74,11 @@ from cmcourier.config.schema import (
     PipelineConfig,
     SingleDocTriggerConfig,
 )
-from cmcourier.config.wiring import build_mapping_service, build_pipeline
+from cmcourier.config.wiring import build_mapping_service, build_metadata_config, build_pipeline
+from cmcourier.domain.models import trigger_system_id
 from cmcourier.domain.ports import S0Strategy
 from cmcourier.services.indexing import IndexingService
+from cmcourier.services.manifest_check import run_manifest_check
 from cmcourier.services.mapping import MappingService
 from cmcourier.services.metadata import MetadataService
 
@@ -152,7 +157,9 @@ _CHECK_GROUPS: dict[str, frozenset[str]] = {
             "as400_sync",
         }
     ),
-    "mapping": frozenset({"mapping_completeness"}),
+    # 145 REQ-005: `cm_manifest` es OFFLINE (manifest + YAML + CSV), por eso
+    # vive con el resto del mapping y no bajo `cm-targets`, que necesita CMIS.
+    "mapping": frozenset({"mapping_completeness", "cm_manifest"}),
     "metadata": frozenset({"metadata_sources", "sample_dry_run"}),
     "cm-types": frozenset({"cm_type_alignment"}),
     # 038: `cm-targets` es el paraguas nuevo; `cm-types` queda por back-compat.
@@ -177,6 +184,7 @@ CHECK_NAMES: tuple[str, ...] = (
     "tracking_openable",
     "as400_sync",
     "mapping_completeness",
+    "cm_manifest",  # 145
     "metadata_sources",
     "cm_type_alignment",
     "cmis_folders_exist",
@@ -280,6 +288,8 @@ def run_doctor(
         results.append(_check_as400_sync(config, secrets))
     if _selected("mapping_completeness", selected):
         results.append(_check_mapping_completeness(config))
+    if _selected("cm_manifest", selected):
+        results.append(_check_cm_manifest(config))
     if _selected("metadata_sources", selected):
         results.append(_check_metadata_sources(config, secrets))
     if _selected("cm_type_alignment", selected):
@@ -330,10 +340,12 @@ def _fail(name: str, exc: Exception, base: Mapping[str, str] | None = None) -> C
 
 
 def _mapping_path_repr(config: PipelineConfig) -> str:
-    """Muestra el o los paths del `Modelo Documental` sin importar el modo (035)."""
+    """Muestra el o los paths del `Modelo Documental` sin importar el modo (035/145)."""
     mc = config.mapping
     if mc.csv_path is not None:
         return str(mc.csv_path)
+    if mc.type_manifest_path is not None:
+        return f"{mc.rvi_cm_csv_path} + {mc.type_manifest_path}"
     return f"{mc.rvi_cm_csv_path} + {mc.metadatos_csv_path}"
 
 
@@ -714,6 +726,46 @@ def _check_mapping_completeness(config: PipelineConfig) -> CheckResult:
     )
 
 
+def _check_cm_manifest(config: PipelineConfig) -> CheckResult:
+    """145 REQ-005: cruza manifest ↔ YAML ↔ CSV y reporta los CRITICAL.
+
+    Offline por diseno: `types check` es el comando completo (WARNING e
+    INFO incluidos); el doctor sólo grita por lo que rompe el upload.
+    SKIP cuando el mapping no esta en modo manifest — no hay manifest
+    contra el cual cruzar nada.
+    """
+    manifest_path = config.mapping.type_manifest_path
+    if manifest_path is None:
+        return _skip("cm_manifest", "mapping is not in manifest mode; nothing to verify")
+    try:
+        mapping = build_mapping_service(config.mapping)
+        manifest = JsonTypeManifestStore(manifest_path).load()
+        field_sources = build_metadata_config(config.metadata).field_sources
+        report = run_manifest_check(mapping, manifest, field_sources)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("cm_manifest", exc, {"manifest_path": str(manifest_path)})
+    base = {
+        "manifest_path": str(manifest_path),
+        "types_count": str(len(manifest.types)),
+        "warning_count": str(len(report.warnings)),
+    }
+    if report.has_critical:
+        summary = "; ".join(f.render() for f in report.criticals[:10])
+        return CheckResult(
+            name="cm_manifest",
+            status=CheckStatus.FAIL,
+            message=f"{len(report.criticals)} CRITICAL finding(s): {summary}",
+            details=_frozen({**base, "criticals": str(len(report.criticals))}),
+        )
+    return CheckResult(
+        name="cm_manifest",
+        status=CheckStatus.PASS,
+        message=f"CM type manifest aligns with the YAML and MapeoRVI_CM "
+        f"({len(manifest.types)} type(s), 0 CRITICAL)",
+        details=_frozen(base),
+    )
+
+
 def _check_metadata_sources(config: PipelineConfig, secrets: Secrets) -> CheckResult:
     empty_aliases: list[str] = []
     counts: dict[str, str] = {}
@@ -962,7 +1014,10 @@ def _dry_run_first_doc(services: _DryRunServices, *, source_descriptor: str) -> 
             ),
         )
     doc = docs[0]
-    mapping = _try("S2", lambda: services.mapping.get_mapping(doc.index7))
+    # 145 REQ-001: mismo lookup que S2 del pipeline — con el sistema del trigger.
+    mapping = _try(
+        "S2", lambda: services.mapping.get_mapping(doc.index7, trigger_system_id(trigger))
+    )
     if isinstance(mapping, CheckResult):
         return mapping
     resolution = _try("S3", lambda: services.metadata.resolve(trigger, doc, mapping))

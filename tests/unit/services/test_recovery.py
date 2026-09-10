@@ -105,8 +105,9 @@ class TestRecoverHappyPath:
         assert kwargs["idnbac"] == "CN09"  # re-derivado del mapping
         assert kwargs["tipidn"] == "TipoX"
         assert kwargs["objidn"] == "cm-0000001"  # de SQLite
-        # el mapping se busca por el index7 del documento
-        mapping.get_mapping.assert_called_once_with("FF17")
+        # el mapping se busca por el index7 del documento + el sistema
+        # que el tracking guardó (145 REQ-001)
+        mapping.get_mapping.assert_called_once_with("FF17", "1")
 
     def test_dry_run_does_not_write_as400(self) -> None:
         as400 = MagicMock()

@@ -12,6 +12,7 @@ from cmcourier.domain.models import (
     RvabrepRowTrigger,
     Trigger,
     TriggerRecord,
+    trigger_system_id,
 )
 
 pytestmark = pytest.mark.unit
@@ -129,3 +130,30 @@ class TestTriggerBaseIsAbstract:
     def test_cannot_instantiate_abstract_base(self) -> None:
         with pytest.raises(TypeError):
             Trigger()  # type: ignore[abstract]
+
+
+class TestTriggerSystemId:
+    """145 REQ-001: el sistema que S2 le pasa a ``get_mapping``."""
+
+    def test_client_trigger_uses_its_attribute(self) -> None:
+        t = ClientTrigger(shortname="ACME", cif="1", system_id="RVI2")
+        assert trigger_system_id(t) == "RVI2"
+
+    def test_row_trigger_reads_the_audit_projection(self) -> None:
+        t = RvabrepRowTrigger(row={"ABABCD": "X", "ABAACD": "RVI2"})
+        assert trigger_system_id(t) == "RVI2"
+
+    def test_local_scan_trigger_reads_the_audit_projection(self) -> None:
+        t = LocalScanTrigger(
+            file_path=Path("/tmp/scan/foo.001"),
+            row={"ABABCD": "X", "ABAACD": " RVI2 "},
+        )
+        assert trigger_system_id(t) == "RVI2"
+
+    def test_missing_system_is_none(self) -> None:
+        t = RvabrepRowTrigger(row={"ABABCD": "X"})
+        assert trigger_system_id(t) is None
+
+    def test_blank_system_is_none(self) -> None:
+        t = RvabrepRowTrigger(row={"ABABCD": "X", "ABAACD": "   "})
+        assert trigger_system_id(t) is None

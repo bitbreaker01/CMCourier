@@ -144,6 +144,21 @@ class TestInspectMapping:
         assert result.exit_code == 0
         assert "No mapping found" in result.stderr
 
+    def test_help_shows_system_option(self) -> None:
+        """145 REQ-001: el sistema es la primera mitad de la clave del mapeo."""
+        result = CliRunner().invoke(main, ["inspect", "mapping", "--help"])
+        assert result.exit_code == 0
+        assert "--system" in result.stdout
+
+    def test_system_is_ignored_outside_manifest_mode(self, tmp_path: Path) -> None:
+        """El modo consolidado guarda todo bajo el comodín: el sistema no cambia nada."""
+        yaml_path = _write_yaml(tmp_path)
+        result = CliRunner().invoke(
+            main, ["inspect", "mapping", "-c", str(yaml_path), "--system", "RVI2", "CC03"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "ID RVI: CC03" in result.stdout
+
 
 # ---------------------------------------------------------------------------
 # inspect trigger (023)

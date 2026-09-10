@@ -392,17 +392,28 @@ class MappingConfig(BaseModel):
     columnas inline y una celda ``METADATOS`` separada por comas. Setear
     ``csv_path`` y dejar los campos del modo `split` en ``None``.
 
-    Split (producción / formato del banco, 035): dos CSVs unidos por
+    Split (035, DEPRECADO por 145): dos CSVs unidos por
     ``IDCM ↔ IDCorto`` — ``MapeoRVI_CM.csv`` (una fila por IDRVI) más
     ``MetadatosCM.csv`` (varias filas por IDCorto). Setear tanto
     ``rvi_cm_csv_path`` como ``metadatos_csv_path`` y dejar
     ``csv_path`` en ``None``.
+
+    Manifest (145 REQ-001, el modo nuevo): ``MapeoRVI_CM.csv`` reducido a
+    ``IDSistema,IDRVI,IDCM`` más el manifest JSON de tipos CM que bajó
+    ``cmcourier types discover``. Todo lo que el servidor ya sabe (tipo,
+    carpeta, propiedades) sale del manifest; nadie mantiene
+    ``MetadatosCM.csv`` a mano. Setear ``rvi_cm_csv_path`` y
+    ``type_manifest_path``.
+
+    El validador exige ``csv_path`` XOR (``rvi_cm_csv_path`` + EXACTAMENTE
+    uno de ``metadatos_csv_path`` / ``type_manifest_path``).
     """
 
     model_config = _STRICT
     csv_path: FilePath | None = None
     rvi_cm_csv_path: FilePath | None = None
     metadatos_csv_path: FilePath | None = None
+    type_manifest_path: FilePath | None = None
     id_rvi_column: str = "ID RVI"
     clase_id_column: str = "ID CLASE DOCUMENTAL"
     id_corto_column: str = "ID Corto"
@@ -411,6 +422,9 @@ class MappingConfig(BaseModel):
     cmis_type_column: str = "CMISType"
     rvi_cm_id_rvi_column: str = "IDRVI"
     rvi_cm_id_cm_column: str = "IDCM"
+    # 145 REQ-001: en modo manifest es opcional (columna ausente ≡ todas
+    # las filas al comodín).
+    rvi_cm_id_sistema_column: str = "IDSistema"
     rvi_cm_clase_id_column: str = "IDClaseDocumental"
     rvi_cm_cmis_type_column: str = "CMISType"
     rvi_cm_cmis_folder_column: str = "CMISFolder"
@@ -425,19 +439,27 @@ class MappingConfig(BaseModel):
         has_consolidated = self.csv_path is not None
         has_rvi = self.rvi_cm_csv_path is not None
         has_meta = self.metadatos_csv_path is not None
-        if has_consolidated and (has_rvi or has_meta):
+        has_manifest = self.type_manifest_path is not None
+        if has_consolidated and (has_rvi or has_meta or has_manifest):
             raise ValueError(
                 "MappingConfig: pick either consolidated `csv_path` "
-                "OR split (`rvi_cm_csv_path` + `metadatos_csv_path`), not both"
+                "OR `rvi_cm_csv_path` + one of `metadatos_csv_path` / "
+                "`type_manifest_path`, not both"
             )
-        if not has_consolidated and not (has_rvi or has_meta):
+        if not has_consolidated and not (has_rvi or has_meta or has_manifest):
             raise ValueError(
                 "MappingConfig: must provide consolidated `csv_path` "
-                "OR split (`rvi_cm_csv_path` + `metadatos_csv_path`)"
+                "OR `rvi_cm_csv_path` + `type_manifest_path`"
             )
-        if (has_rvi and not has_meta) or (has_meta and not has_rvi):
+        if has_consolidated:
+            return self
+        if not has_rvi:
+            raise ValueError("MappingConfig: split/manifest mode requires `rvi_cm_csv_path`")
+        if has_meta == has_manifest:
             raise ValueError(
-                "MappingConfig: split mode requires BOTH `rvi_cm_csv_path` and `metadatos_csv_path`"
+                "MappingConfig: `rvi_cm_csv_path` needs EXACTLY one of "
+                "`metadatos_csv_path` (split, deprecated) / "
+                "`type_manifest_path` (manifest, 145)"
             )
         return self
 

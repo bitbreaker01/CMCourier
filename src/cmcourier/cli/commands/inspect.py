@@ -107,14 +107,21 @@ def inspect_rvabrep_command(config_path: Path, shortname: str, system_id: str) -
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     required=True,
 )
+@click.option(
+    "--system",
+    "system_id",
+    type=str,
+    default=None,
+    help="145: sistema de origen (IDSistema). Sin él se usa el comodín.",
+)
 @click.argument("id_rvi", type=str)
-def inspect_mapping_command(config_path: Path, id_rvi: str) -> None:
+def inspect_mapping_command(config_path: Path, id_rvi: str, system_id: str | None) -> None:
     """Imprime el mapping de CM (folder, type, fields) para un `ID RVI`."""
     config = _load(config_path)
     configure_observability(config.observability, "INFO")
     mapping_service = build_mapping_service(config.mapping)
     try:
-        mapping = mapping_service.get_mapping(id_rvi)
+        mapping = mapping_service.get_mapping(id_rvi, system_id)
     except IDRViNotMappedError:
         click.echo(f"No mapping found for ID RVI: {id_rvi}", err=True)
         return

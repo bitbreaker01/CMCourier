@@ -317,6 +317,63 @@ class TestBuildMappingService:
         assert m2.cmis_type == "DocCN02"
         assert m2.required_metadata_fields == ("CIF",)
 
+    def test_manifest_mode(self, tmp_path: Path) -> None:
+        """145 REQ-001: MapeoRVI_CM de 3 columnas + manifest JSON de tipos."""
+        from cmcourier.adapters.manifest.json_store import JsonTypeManifestStore
+        from cmcourier.config.schema import MappingConfig
+        from cmcourier.config.wiring import build_mapping_service
+        from cmcourier.domain.cm_types import CmPropertyDef, CmTypeEntry, CmTypeManifest
+
+        rvi_cm = tmp_path / "MapeoRVI_CM.csv"
+        rvi_cm.write_text("IDSistema,IDRVI,IDCM\n,0001,DC01\nRVI2,0001,DC02\n")
+        prop = CmPropertyDef(
+            id="clbNonGroup.BAC_CIF",
+            display_name="CIF",
+            property_type="string",
+            cardinality="single",
+            updatability="readwrite",
+            required=True,
+            max_length=None,
+            default_value=None,
+            inherited=False,
+            choices=(),
+        )
+        entries = [
+            CmTypeEntry(
+                id_corto=code,
+                type_id=f"$t!-2_BAC_{code}v-1",
+                local_name=f"BAC_{code}",
+                display_name=f"{code} - Clase",
+                folder=f"/$type/BAC_{code}",
+                properties=(prop,),
+                decisions={prop.id: "usar"},
+            )
+            for code in ("DC01", "DC02")
+        ]
+        manifest_path = tmp_path / "cm-types.json"
+        JsonTypeManifestStore(manifest_path).save(
+            CmTypeManifest(
+                service_url="http://cm.test/browser",
+                repository_id="repo",
+                discovered_at="2026-01-01T00:00:00Z",
+                types={e.id_corto: e for e in entries},
+            )
+        )
+
+        cfg = MappingConfig(rvi_cm_csv_path=rvi_cm, type_manifest_path=manifest_path)
+        svc = build_mapping_service(cfg)
+        assert svc.count() == 2
+        assert svc.missing_cm_codes == ()
+        # Escenario 2 del spec: el sistema decide, el comodín es el default.
+        assert svc.get_mapping("0001").id_corto == "DC01"
+        assert svc.get_mapping("0001", "rvi2").id_corto == "DC02"
+        m = svc.get_mapping("0001", "rvi2")
+        assert m.cmis_type == "$t!-2_BAC_DC02v-1"
+        assert m.cmis_folder == "/$type/BAC_DC02"
+        assert m.required_metadata_fields == ("BAC_CIF",)
+        assert m.cmis_property_ids is not None
+        assert dict(m.cmis_property_ids) == {"BAC_CIF": "clbNonGroup.BAC_CIF"}
+
 
 # ---------------------------------------------------------------------------
 # 130 — fuente de metadata `kind: mssql` por alias del registro
