@@ -90,6 +90,11 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Fixed
 
+- **`types check` ignoraba `metadata.field_aliases`:** una propiedad del
+  manifest resuelta por alias daba un CRITICAL falso y su entrada de
+  `field_sources` un INFO falso. Ahora sigue el alias (case-insensitive,
+  igual que el runtime) y reporta CRITICAL sólo cuando el alias apunta a
+  una entrada que no existe.
 - **`types discover` ya no aborta cuando dos tipos comparten el mismo
   ID corto (visto en PRD: `DC35`):** elige un ganador determinístico,
   guarda los demás en `duplicates`, y `types review IDCM --type-id`

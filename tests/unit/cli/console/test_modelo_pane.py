@@ -142,7 +142,9 @@ def _seed(path: Path, nodes: list[dict[str, Any]] | None = None) -> JsonTypeMani
     return store
 
 
-def _config(tmp_path: Path, *, manifest: Path | None) -> tuple[PipelineConfig, Path]:
+def _config(
+    tmp_path: Path, *, manifest: Path | None, field_aliases: str = ""
+) -> tuple[PipelineConfig, Path]:
     """La config de la consola en modo manifest (145 REQ-001)."""
     _, path = _make_config(tmp_path)
     if manifest is None:
@@ -155,7 +157,7 @@ def _config(tmp_path: Path, *, manifest: Path | None) -> tuple[PipelineConfig, P
         path.read_text(),
     )
     assert replaced == 1
-    text = text.replace("  field_sources: {}\n", _FIELD_SOURCES)
+    text = text.replace("  field_sources: {}\n", field_aliases + _FIELD_SOURCES)
     path.write_text(text)
     return load_config(path), path
 
@@ -487,5 +489,26 @@ class TestServerOps:
                 pane.query_one("#md-check", Button).press()
                 assert await wait_for(pilot, lambda: "CRITICAL" in pane.log_text())
                 assert "field_sources.BAC_Falta" in pane.log_text()
+
+        asyncio.run(_run())
+
+    def test_verify_honours_field_aliases(self, tmp_path: Path) -> None:
+        """El alias resuelve la propiedad: no hay CRITICAL que reportar."""
+
+        async def _run() -> None:
+            manifest = tmp_path / "types.json"
+            _seed(manifest, [_type_node("DC01", [_prop("clbNonGroup.BAC_Falta", required=True)])])
+            config, path = _config(
+                tmp_path,
+                manifest=manifest,
+                field_aliases="  field_aliases:\n    BAC_Falta: BAC_CIF\n",
+            )
+            app = ConsoleApp(config=config, config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "m")
+                pane = _pane(app)
+                pane.query_one("#md-check", Button).press()
+                assert await wait_for(pilot, lambda: "revis" in pane.log_text())
+                assert "CRITICAL" not in pane.log_text()
 
         asyncio.run(_run())

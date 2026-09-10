@@ -569,6 +569,7 @@ def _check_yaml(
     rvi_cm_csv: Path,
     manifest_json: Path | None,
     field_sources: str = _DEFAULT_FIELD_SOURCES,
+    field_aliases: str = "",
 ) -> Path:
     """YAML REAL en modo manifest — ``check`` corre contra la config posta."""
     triggers = tmp_path / "triggers.csv"
@@ -588,7 +589,7 @@ indexing:
     csv_path: {_PIPE / "rvabrep.csv"}
 mapping:
 {mapping}metadata:
-  field_sources:
+{field_aliases}  field_sources:
 {field_sources}assembly:
   source_root: {_ASM}
   temp_dir: {tmp_path / "stg"}
@@ -693,6 +694,46 @@ class TestTypesCheck145:
 
         assert result.exit_code == 0, result.output
         assert "no existe en el manifest" not in result.stdout
+
+    def test_a_property_resolved_by_a_field_alias_is_not_critical(self, tmp_path: Path) -> None:
+        """El comando le pasa ``metadata.field_aliases`` al chequeo.
+
+        El operador arregla el drift de nombres con un alias: el upload
+        anda, así que ``check`` no puede gritar CRITICAL ni marcar la
+        entrada de ``field_sources`` como huérfana.
+        """
+        manifest = tmp_path / "types.json"
+        _seed(manifest)
+        yaml_path = _check_yaml(
+            tmp_path,
+            rvi_cm_csv=_rvi_cm_csv(tmp_path / "MapeoRVI_CM.csv", [("", "FB01", "DC01")]),
+            manifest_json=manifest,
+            field_sources=_DEFAULT_FIELD_SOURCES.replace("BAC_CIF", "BAC_Short_Name"),
+            field_aliases="  field_aliases:\n    BAC_CIF: BAC_Short_Name\n",
+        )
+
+        result = _check(["check", "--config", str(yaml_path)])
+
+        assert result.exit_code == 0, result.output
+        assert "CRITICAL" not in result.stdout
+        assert "BAC_Short_Name" not in result.stdout
+
+    def test_a_field_alias_pointing_nowhere_is_critical(self, tmp_path: Path) -> None:
+        """El alias existe pero su destino no: el runtime revienta al subir."""
+        manifest = tmp_path / "types.json"
+        _seed(manifest)
+        yaml_path = _check_yaml(
+            tmp_path,
+            rvi_cm_csv=_rvi_cm_csv(tmp_path / "MapeoRVI_CM.csv", [("", "FB01", "DC01")]),
+            manifest_json=manifest,
+            field_sources=_DEFAULT_FIELD_SOURCES.replace("BAC_CIF", "BAC_Otro"),
+            field_aliases="  field_aliases:\n    BAC_CIF: BAC_No_Existe\n",
+        )
+
+        result = _check(["check", "--config", str(yaml_path)])
+
+        assert result.exit_code == 1
+        assert "el alias BAC_CIF apunta a field_sources.BAC_No_Existe" in result.stdout
 
     def test_errors_outside_manifest_mode(self, tmp_path: Path) -> None:
         yaml_path = _check_yaml(

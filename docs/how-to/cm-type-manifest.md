@@ -159,6 +159,15 @@ Cruza manifest ↔ YAML (`metadata.field_sources`) ↔ CSV
   un valor fijo que no parsea.
 - **INFO**: entradas de `field_sources` que ningún tipo mapeado usa.
 
+El chequeo honra `metadata.field_aliases` igual que el runtime: una
+propiedad del manifest puede llegar a su entrada de `field_sources` a
+través de un alias (comparado sin distinguir mayúsculas), y en ese caso
+no hay CRITICAL ni INFO — es exactamente la config que sube bien. Si el
+alias existe pero apunta a una entrada que **no** está declarada, eso sí
+es CRITICAL: el upload revienta con `no field_sources config for field`.
+Los WARNING nombran siempre la llave resuelta de `field_sources` (la que
+hay que editar), no el nombre de la propiedad.
+
 `--json` para consumo por script. El check offline equivalente en
 `doctor` es `cm_manifest` — corre lo mismo pero sólo reporta los
 CRITICAL (ver [`reference/cli.md`](../reference/cli.md#doctor)); SKIP

@@ -167,6 +167,122 @@ class TestCritical:
         assert report.findings == ()
 
 
+class TestAliasDeCampos145:
+    """``metadata.field_aliases`` también resuelve una propiedad del manifest.
+
+    El runtime (``MetadataService._normalize_fields_with_friendly``) acepta
+    un nombre de campo que sea llave de ``field_sources`` O llave de
+    ``field_aliases`` (case-insensitive), y en ese caso el VALOR del alias
+    es la llave real de ``field_sources``. El chequeo tiene que mirar lo
+    mismo, si no le grita CRITICAL a una config que sube perfecto.
+    """
+
+    _ALIASED = {"BAC_Short_Name": FieldSourceConfig(sources=(_source(),))}
+
+    def _report(
+        self,
+        *,
+        prop: CmPropertyDef,
+        field_sources: Mapping[str, FieldSourceConfig] | None = None,
+        aliases: Mapping[str, str],
+    ) -> CheckReport:
+        manifest = _manifest(_entry("DC01", props=(prop,)))
+        return run_manifest_check(
+            _mapping(manifest, "DC01"),
+            manifest,
+            self._ALIASED if field_sources is None else field_sources,
+            field_aliases=aliases,
+        )
+
+    def test_a_property_resolved_through_an_alias_is_clean(self) -> None:
+        """El caso del operador: arregla el drift con un alias y no hay drama."""
+        report = self._report(
+            prop=_prop("clbNonGroup.BAC_Shortname"),
+            aliases={"BAC_Shortname": "BAC_Short_Name"},
+        )
+        assert not report.has_critical
+        assert report.findings == ()
+
+    def test_the_alias_lookup_is_case_insensitive(self) -> None:
+        """Igual que el runtime: ``{k.lower(): v}`` contra ``raw.lower()``."""
+        report = self._report(
+            prop=_prop("clbNonGroup.BAC_SHORTNAME"),
+            aliases={"bac_shortname": "BAC_Short_Name"},
+        )
+        assert report.findings == ()
+
+    def test_a_dangling_alias_is_critical(self) -> None:
+        """El alias apunta a una entrada que no existe: el runtime revienta."""
+        report = self._report(
+            prop=_prop("clbNonGroup.BAC_Shortname"),
+            field_sources={},
+            aliases={"BAC_Shortname": "BAC_No_Existe"},
+        )
+        assert report.has_critical
+        critical = report.criticals[0]
+        assert critical.id_corto == "DC01"
+        assert critical.prop_id == "clbNonGroup.BAC_Shortname"
+        assert "el alias BAC_Shortname apunta a field_sources.BAC_No_Existe" in critical.message
+        assert "que no existe" in critical.message
+
+    def test_a_dangling_alias_is_not_the_plain_missing_entry_message(self) -> None:
+        """Los dos son CRITICAL pero el operador arregla cosas distintas."""
+        prop = _prop("clbNonGroup.BAC_Shortname")
+        colgado = self._report(
+            prop=prop, field_sources={}, aliases={"BAC_Shortname": "BAC_No_Existe"}
+        )
+        sin_entrada = self._report(prop=prop, field_sources={}, aliases={})
+        assert "sin entrada metadata.field_sources" in sin_entrada.criticals[0].message
+        assert "sin entrada metadata.field_sources" not in colgado.criticals[0].message
+
+    def test_the_max_length_warning_names_the_resolved_key(self) -> None:
+        """El operador edita ``field_sources.BAC_Short_Name``, no el alias."""
+        report = self._report(
+            prop=_prop("clbNonGroup.BAC_Shortname", max_length=3),
+            field_sources={"BAC_Short_Name": _fixed("DEMASIADO_LARGO")},
+            aliases={"BAC_Shortname": "BAC_Short_Name"},
+        )
+        assert _severities(report, "max_length") == ["WARNING"]
+        assert "field_sources.BAC_Short_Name declara largo" in report.warnings[0].message
+
+    def test_the_typed_fixed_value_warning_names_the_resolved_key(self) -> None:
+        report = self._report(
+            prop=_prop("clbNonGroup.BAC_Fecha_Alias", property_type="datetime"),
+            field_sources={"BAC_Fecha": _fixed("ayer")},
+            aliases={"BAC_Fecha_Alias": "BAC_Fecha"},
+        )
+        assert [f.severity for f in report.findings] == ["WARNING"]
+        assert "field_sources.BAC_Fecha tiene un valor fijo" in report.warnings[0].message
+
+    def test_a_field_source_reached_through_an_alias_is_not_info(self) -> None:
+        """El INFO cuenta la llave RESUELTA, no el nombre de la propiedad."""
+        report = self._report(
+            prop=_prop("clbNonGroup.BAC_Shortname"),
+            aliases={"BAC_Shortname": "BAC_Short_Name"},
+        )
+        assert report.infos == ()
+
+    def test_an_alias_that_nobody_uses_still_leaves_its_target_as_info(self) -> None:
+        manifest = _manifest(_entry("DC01"))
+        report = run_manifest_check(
+            _mapping(manifest, "DC01"),
+            manifest,
+            self._ALIASED,
+            field_aliases={"BAC_Shortname": "BAC_Short_Name"},
+        )
+        assert len(report.infos) == 1
+        assert "BAC_Short_Name" in report.infos[0].message
+
+    def test_without_aliases_the_behaviour_is_the_one_of_always(self) -> None:
+        """El parámetro es keyword-only con default: los `callers` viejos siguen."""
+        prop = _prop("clbNonGroup.BAC_Shortname")
+        manifest = _manifest(_entry("DC01", props=(prop,)))
+        report = run_manifest_check(_mapping(manifest, "DC01"), manifest, self._ALIASED)
+        assert _severities(report, "sin entrada metadata.field_sources.BAC_Shortname") == [
+            "CRITICAL"
+        ]
+
+
 # ---------------------------------------------------------------------------
 # WARNING
 # ---------------------------------------------------------------------------

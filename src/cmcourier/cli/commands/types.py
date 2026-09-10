@@ -587,8 +587,13 @@ def _check_report(config: PipelineConfig, mapping_cfg: MappingConfigModel) -> Ch
         sys.exit(2)
     assert mapping_cfg.type_manifest_path is not None  # noqa: S101 — lo garantiza _manifest_mapping
     manifest = _read(JsonTypeManifestStore(mapping_cfg.type_manifest_path))
-    field_sources = build_metadata_config(config.metadata).field_sources
-    return run_manifest_check(mapping, manifest, field_sources)
+    metadata = build_metadata_config(config.metadata)
+    return run_manifest_check(
+        mapping,
+        manifest,
+        metadata.field_sources,
+        field_aliases=metadata.field_aliases,
+    )
 
 
 @types_group.command(name="check")

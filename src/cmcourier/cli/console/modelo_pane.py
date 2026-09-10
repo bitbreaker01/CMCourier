@@ -51,7 +51,7 @@ from cmcourier.domain.cm_types import (
     canonical_name,
 )
 from cmcourier.domain.exceptions import ConfigurationError
-from cmcourier.services.manifest_check import run_manifest_check
+from cmcourier.services.manifest_check import CheckReport, run_manifest_check
 from cmcourier.services.sync_progress import SyncProgress
 from cmcourier.services.type_discovery import TypeDiscoveryService
 from cmcourier.services.type_manifest import (
@@ -440,15 +440,21 @@ class ModeloPane(VerticalScroll):
         manifest = self._manifest
         if manifest is None or self._busy:
             return
-        config = self.console.config
         self._run(
             "verificar YAML",
-            lambda: run_manifest_check(
-                build_mapping_service(config.mapping),
-                manifest,
-                build_metadata_config(config.metadata).field_sources,
-            ),
+            lambda: self._verify_now(manifest),
             lambda report: self._log(report.render()),
+        )
+
+    def _verify_now(self, manifest: CmTypeManifest) -> CheckReport:
+        """El cruce en sí — corre en el worker, no en el hilo de la UI."""
+        config = self.console.config
+        metadata = build_metadata_config(config.metadata)
+        return run_manifest_check(
+            build_mapping_service(config.mapping),
+            manifest,
+            metadata.field_sources,
+            field_aliases=metadata.field_aliases,
         )
 
     # ------------------------------------------------------------ edición

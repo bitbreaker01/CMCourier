@@ -740,8 +740,13 @@ def _check_cm_manifest(config: PipelineConfig) -> CheckResult:
     try:
         mapping = build_mapping_service(config.mapping)
         manifest = JsonTypeManifestStore(manifest_path).load()
-        field_sources = build_metadata_config(config.metadata).field_sources
-        report = run_manifest_check(mapping, manifest, field_sources)
+        metadata = build_metadata_config(config.metadata)
+        report = run_manifest_check(
+            mapping,
+            manifest,
+            metadata.field_sources,
+            field_aliases=metadata.field_aliases,
+        )
     except Exception as exc:  # noqa: BLE001
         return _fail("cm_manifest", exc, {"manifest_path": str(manifest_path)})
     base = {

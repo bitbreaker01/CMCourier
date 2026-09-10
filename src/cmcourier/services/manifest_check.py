@@ -6,7 +6,8 @@ en producción:
 * el **manifest** — qué clases publica Content Manager, con qué
   propiedades escribibles y qué decidió el operador sobre cada una;
 * el **YAML** — ``metadata.field_sources``, de dónde sale el VALOR de
-  cada propiedad;
+  cada propiedad (y ``metadata.field_aliases``, por dónde una propiedad
+  con otro nombre llega a su entrada);
 * ``MapeoRVI_CM.csv`` — qué código RVI (por sistema) va a qué clase.
 
 Este módulo los cruza y devuelve un :class:`CheckReport` agrupado por
@@ -173,23 +174,70 @@ def _parses(value: str, property_type: str) -> bool:
     return True
 
 
+def _resolve_field(
+    name: str,
+    field_sources: Mapping[str, FieldSourceConfig],
+    aliases_lower: Mapping[str, str],
+) -> tuple[str, FieldSourceConfig] | None:
+    """La entrada de ``field_sources`` que el RUNTIME usaría para *name*.
+
+    Misma resolución que ``MetadataService._normalize_fields_with_friendly``:
+    primero el nombre canónico como llave directa, si no el alias
+    (comparado en minúsculas) cuyo VALOR es la llave real. ``None`` si el
+    runtime tampoco encontraría nada — sea porque no hay alias, sea
+    porque el alias apunta a una entrada inexistente.
+    """
+    fsc = field_sources.get(name)
+    if fsc is not None:
+        return name, fsc
+    target = aliases_lower.get(name.lower())
+    if target is None:
+        return None
+    aliased = field_sources.get(target)
+    return None if aliased is None else (target, aliased)
+
+
+def _unresolved_finding(
+    entry: CmTypeEntry, prop: CmPropertyDef, name: str, aliases_lower: Mapping[str, str]
+) -> CheckFinding:
+    """El CRITICAL de una propiedad ``usar`` que no llega a ``field_sources``.
+
+    Dos causas distintas y dos arreglos distintos: o falta la entrada, o
+    el alias existe pero apunta a una llave que no está (ahí el runtime
+    revienta con ``no field_sources config for field``).
+    """
+    target = aliases_lower.get(name.lower())
+    if target is not None:
+        return CheckFinding(
+            "CRITICAL",
+            entry.id_corto,
+            prop.id,
+            f"propiedad 'usar': el alias {name} apunta a field_sources.{target}, que no existe",
+        )
+    return CheckFinding(
+        "CRITICAL",
+        entry.id_corto,
+        prop.id,
+        f"propiedad 'usar' sin entrada metadata.field_sources.{name}",
+    )
+
+
 def _check_used_property(
     entry: CmTypeEntry,
     prop: CmPropertyDef,
     field_sources: Mapping[str, FieldSourceConfig],
+    aliases_lower: Mapping[str, str],
 ) -> list[CheckFinding]:
-    """Reglas de una propiedad marcada ``usar``."""
+    """Reglas de una propiedad marcada ``usar``.
+
+    Los mensajes nombran la llave RESUELTA de ``field_sources`` —  la que
+    el operador tiene que editar— y no el nombre de la propiedad.
+    """
     name = canonical_name(prop.id)
-    fsc = field_sources.get(name)
-    if fsc is None:
-        return [
-            CheckFinding(
-                "CRITICAL",
-                entry.id_corto,
-                prop.id,
-                f"propiedad 'usar' sin entrada metadata.field_sources.{name}",
-            )
-        ]
+    resolved = _resolve_field(name, field_sources, aliases_lower)
+    if resolved is None:
+        return [_unresolved_finding(entry, prop, name, aliases_lower)]
+    key, fsc = resolved
     out: list[CheckFinding] = []
     declared = _declared_length(fsc)
     if prop.max_length is not None and declared is not None and declared > prop.max_length:
@@ -198,7 +246,7 @@ def _check_used_property(
                 "WARNING",
                 entry.id_corto,
                 prop.id,
-                f"field_sources.{name} declara largo {declared} y el max_length "
+                f"field_sources.{key} declara largo {declared} y el max_length "
                 f"de CM es {prop.max_length}",
             )
         )
@@ -210,14 +258,16 @@ def _check_used_property(
                 "WARNING",
                 entry.id_corto,
                 prop.id,
-                f"field_sources.{name} tiene un valor fijo que no parsea como {prop.property_type}",
+                f"field_sources.{key} tiene un valor fijo que no parsea como {prop.property_type}",
             )
         )
     return out
 
 
 def _check_entry(
-    entry: CmTypeEntry, field_sources: Mapping[str, FieldSourceConfig]
+    entry: CmTypeEntry,
+    field_sources: Mapping[str, FieldSourceConfig],
+    aliases_lower: Mapping[str, str],
 ) -> list[CheckFinding]:
     """Todas las reglas de UN tipo mapeado."""
     out: list[CheckFinding] = []
@@ -236,7 +286,7 @@ def _check_entry(
     usable = {p.id for p in entry.usable_properties()}
     for prop in entry.properties:
         if prop.id in usable:
-            out.extend(_check_used_property(entry, prop, field_sources))
+            out.extend(_check_used_property(entry, prop, field_sources, aliases_lower))
         elif prop.required and prop.default_value is None:
             out.append(
                 CheckFinding(
@@ -249,8 +299,22 @@ def _check_entry(
     return out
 
 
-def _used_canonical_names(entry: CmTypeEntry) -> set[str]:
-    return {canonical_name(p.id) for p in entry.usable_properties()}
+def _used_field_keys(
+    entry: CmTypeEntry,
+    field_sources: Mapping[str, FieldSourceConfig],
+    aliases_lower: Mapping[str, str],
+) -> set[str]:
+    """Las llaves de ``field_sources`` que el tipo REALMENTE consume.
+
+    Resueltas, no canónicas: una propiedad que llega por alias marca como
+    usada la llave a la que apunta el alias, si no el INFO de "nadie la
+    usa" saldría contra una entrada que sí se usa.
+    """
+    resolved = (
+        _resolve_field(canonical_name(p.id), field_sources, aliases_lower)
+        for p in entry.usable_properties()
+    )
+    return {match[0] for match in resolved if match is not None}
 
 
 def _check_duplicates(manifest: CmTypeManifest, mapped: set[str]) -> list[CheckFinding]:
@@ -287,6 +351,8 @@ def run_manifest_check(
     mapping: MappingService,
     manifest: CmTypeManifest,
     field_sources: Mapping[str, FieldSourceConfig],
+    *,
+    field_aliases: Mapping[str, str] | None = None,
 ) -> CheckReport:
     """Cruza manifest, YAML y CSV y devuelve el reporte (145 REQ-005).
 
@@ -295,7 +361,13 @@ def run_manifest_check(
     322 no son problema de nadie. El orden de los hallazgos es estable:
     primero los códigos que faltan, después los tipos por ID corto, y al
     final las entradas de ``field_sources`` que sobran.
+
+    *field_aliases* es ``metadata.field_aliases`` tal cual: una propiedad
+    del manifest puede llegar a su ``field_sources`` a través de un alias
+    (comparado sin distinguir mayúsculas, igual que el runtime), y sin
+    esto el chequeo le grita CRITICAL a una config que sube perfecto.
     """
+    aliases_lower = {k.lower(): v for k, v in (field_aliases or {}).items()}
     findings: list[CheckFinding] = [
         CheckFinding("CRITICAL", code, None, "el IDCM del mapeo no existe en el manifest")
         for code in mapping.missing_cm_codes
@@ -309,8 +381,8 @@ def run_manifest_check(
                 CheckFinding("CRITICAL", code, None, "el IDCM del mapeo no existe en el manifest")
             )
             continue
-        used |= _used_canonical_names(entry)
-        findings.extend(_check_entry(entry, field_sources))
+        used |= _used_field_keys(entry, field_sources, aliases_lower)
+        findings.extend(_check_entry(entry, field_sources, aliases_lower))
     findings.extend(_check_duplicates(manifest, set(mapped)))
     findings.extend(
         CheckFinding(

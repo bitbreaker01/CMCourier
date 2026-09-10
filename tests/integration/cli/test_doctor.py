@@ -1020,6 +1020,22 @@ class TestCmManifestCheck:
         assert result.status == CheckStatus.FAIL
         assert "BAC_Sin_Fuente" in result.message
 
+    def test_pass_when_the_property_resolves_through_a_field_alias(self, tmp_path: Path) -> None:
+        """El YAML de `_write_split_yaml` declara `field_aliases: {CIF: BAC_CIF}`.
+
+        La propiedad del manifest pasa a llamarse `CIF`: el runtime la
+        resuelve por el alias, asi que el doctor no puede fallar.
+        """
+        rvi_cm = tmp_path / "MapeoRVI_CM.csv"
+        manifest = tmp_path / "cm-types.json"
+        _write_rvi_cm_3col(rvi_cm, [("", "FB01", "CN01")])
+        _write_manifest_json(manifest)
+        manifest.write_text(manifest.read_text().replace("cmcourier:BAC_CIF", "cmcourier:CIF"))
+        result = self._run(
+            tmp_path, _write_manifest_yaml(tmp_path, rvi_cm_csv=rvi_cm, manifest_json=manifest)
+        )
+        assert result.status == CheckStatus.PASS, f"{result.message} / {result.details}"
+
     def test_warnings_do_not_fail_the_check(self, tmp_path: Path) -> None:
         rvi_cm = tmp_path / "MapeoRVI_CM.csv"
         manifest = tmp_path / "cm-types.json"
