@@ -16,8 +16,8 @@ Mapeo de campos (cerrado en el spec 034):
     DOCFRM  ← document.index7              (CHAR(30), = ABAHCD)
     IMGARC  ← document.file_name           (CHAR(12), primera página)
     IMGTIP  ← document.image_type          (CHAR(1))
-    CTECIF  ← trigger.shortname            (VARCHAR(30))
-    CTENUM  ← int(trigger.cif or 0)        (DECIMAL(9,0))
+    CTECIF  ← record.trigger_shortname     (VARCHAR(30))
+    CTENUM  ← record.trigger_cif o NULL    (DECIMAL(9,0))
     STSCOD  ← derivado: N/I/O/F
     IDNBAC  ← mapping.id_corto (== IDCM)   (VARCHAR(10))
     TIPIDN  ← mapping.cmis_type            (VARCHAR(128), '' hasta 035)
@@ -334,6 +334,7 @@ class As400NiarvilogStore:
     def insert_terminal(
         self,
         *,
+        record: MigrationRecord,
         document: RVABREPDocument,
         mapping: CMMapping,
         trigger: Trigger,
@@ -346,6 +347,8 @@ class As400NiarvilogStore:
         ``IntegrityError`` ⇒ otro proceso insertó la fila entre nuestro
         read batcheado y este write → False (conflicto). Espejo de
         ``_insert_new_claim`` pero con el estado final parametrizado.
+
+        147 REQ-004: ``CTECIF`` / ``CTENUM`` salen de *record*.
         """
         c = self._cols
         sql = (
@@ -356,16 +359,14 @@ class As400NiarvilogStore:
             f"{c.error_message}) "
             f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)"
         )
-        audit = trigger.audit_row()
-        cif_str = audit.get("cif") or ""
         params: list[Any] = [
-            audit.get("system_id") or "",
+            _pk_from(document=document, trigger=trigger)[0],
             document.txn_num,
             document.index7,
             document.file_name,
             document.image_type,
-            audit.get("shortname") or "",
-            int(cif_str) if cif_str.isdigit() else 0,
+            record.trigger_shortname,
+            _ctenum(record),
             stscod,
             mapping.id_corto,
             mapping.cmis_type,
@@ -468,7 +469,7 @@ class As400NiarvilogStore:
         imgarc: str,
         imgtip: str,
         ctecif: str,
-        ctenum: int,
+        ctenum: int | None,
         idnbac: str,
         tipidn: str,
         objidn: str,
@@ -559,7 +560,7 @@ class As400NiarvilogStore:
     def _insert_new_claim(
         self,
         *,
-        record: MigrationRecord,  # noqa: ARG002 — se mantiene para futuros campos
+        record: MigrationRecord,
         document: RVABREPDocument,
         mapping: CMMapping,
         trigger: Trigger,
@@ -573,18 +574,16 @@ class As400NiarvilogStore:
             f"{c.error_message}) "
             f"VALUES (?, ?, ?, ?, ?, ?, ?, 'I', ?, ?, '', 0, '')"
         )
-        # 046: trigger es polimórfico; usamos audit_row() para extraer la
-        # tripleta (shortname, cif, system_id) que NIARVILOG indexa.
-        audit = trigger.audit_row()
-        cif_str = audit.get("cif") or ""
+        # 147 REQ-004: la identidad del cliente sale del MISMO
+        # ``MigrationRecord`` que se escribe en SQLite — ver ``_ctenum``.
         params: list[Any] = [
-            audit.get("system_id") or "",
+            _pk_from(document=document, trigger=trigger)[0],
             document.txn_num,
             document.index7,
             document.file_name,
             document.image_type,
-            audit.get("shortname") or "",
-            int(cif_str) if cif_str.isdigit() else 0,
+            record.trigger_shortname,
+            _ctenum(record),
             mapping.id_corto,
             mapping.cmis_type,
         ]
@@ -741,8 +740,50 @@ class As400NiarvilogStore:
 # ---------------------------------------------------------------------------
 
 
+def _ctenum(record: MigrationRecord) -> int | None:
+    """147 REQ-004: el valor que va a la columna numérica ``CTENUM``.
+
+    Reemplaza a ``int(cif) if cif.isdigit() else 0``. Ese ``0`` validaba el
+    TIPO y nunca la MAGNITUD: un CIF no numérico terminaba escrito como
+    **cliente 0** en el log del banco sin que nadie se enterara. Acá no se
+    inventa nada — sin número válido va ``NULL``, que es lo que "no sé qué
+    cliente es" significa en una columna numérica.
+
+    La política ya corrió: ``identity.cif`` aplicó ``on_missing`` y
+    ``max_digits`` al INICIO de S2 (REQ-002/003), así que el valor que llega
+    en el record o es el bueno o es el que el operador eligió. Un operador
+    que de verdad quiera un ``0`` lo declara con ``on_missing: default`` +
+    ``default_value: "0"`` — explícito, en el YAML, auditable.
+
+    El adaptador no importa ``services.identity`` a propósito: la regla de
+    dependencias es ``adapters/ → domain/``, nunca ``adapters/ → services/``.
+    """
+    cif = record.trigger_cif
+    if cif.isdigit():
+        return int(cif)
+    if cif:
+        _log.warning(
+            "niarvilog: CTENUM queda en NULL para trnnum=%s — el CIF resuelto no es numérico",
+            record.rvabrep_txn_num,
+        )
+    return None
+
+
 def _pk_from(*, document: RVABREPDocument, trigger: Trigger) -> tuple[str, str, str, str]:
-    """Construye las cuatro columnas de PK (SISCOD, TRNNUM, DOCFRM, IMGARC)."""
+    """Construye las cuatro columnas de PK (SISCOD, TRNNUM, DOCFRM, IMGARC).
+
+    147 REQ-004 — ``SISCOD`` se queda leyendo ``audit_row()`` A PROPÓSITO,
+    aunque el resto de la fila salga de la identidad resuelta. Esta PK
+    identifica a la FILA RVABREP, no al cliente: el proceso Java del
+    banco crea sus filas con el ``system_id`` crudo, y resolverlo acá
+    desalinearía las claves entre los dos productores y rompería el
+    claim distribuido.
+
+    Consecuencia buscada: con ``identity.system_id`` declarado y distinto
+    del crudo, ``migration_log.trigger_system_id`` y ``SISCOD`` difieren.
+    No es un bug — es la diferencia entre "de qué cliente es" y "qué fila
+    de RVABREP es". No las unifiques.
+    """
     return (
         trigger.audit_row().get("system_id") or "",
         document.txn_num,

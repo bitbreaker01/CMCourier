@@ -315,3 +315,47 @@ class TestMemoPorCorrida:
         calls_after_first = len(call_log)
         chain_service.resolve(trigger, _document(index1="HIJO-9"), _mapping("BAC_CIF"))
         assert len(call_log) > calls_after_first
+
+
+# ---------------------------------------------------------------------------
+# REQ-003 — semilla: lo que S2 ya resolvió no se vuelve a resolver en S3
+# ---------------------------------------------------------------------------
+
+
+class TestSemillaDeResolucion:
+    """147 REQ-003: ``resolve(..., seed=...)`` recibe los campos que la
+    resolución de identidad (S2) ya resolvió. Un campo sembrado no se
+    re-consulta, y tampoco se resuelven las dependencias que existían SÓLO
+    para llegar a él — el ahorro es la cadena entera, no el último salto."""
+
+    def test_un_campo_sembrado_no_cuesta_ni_una_consulta(
+        self, chain_service: MetadataService, trigger: ClientTrigger, call_log: list[str]
+    ) -> None:
+        chain_service.resolve(
+            trigger, _document(), _mapping("BAC_CIF"), seed={"BAC_CIF": "123456789"}
+        )
+        assert call_log == []
+
+    def test_el_valor_sembrado_es_el_que_viaja(
+        self, chain_service: MetadataService, trigger: ClientTrigger
+    ) -> None:
+        result = chain_service.resolve(
+            trigger, _document(), _mapping("BAC_CIF"), seed={"BAC_CIF": "999999999"}
+        )
+        assert result.metadata["BAC_CIF"] == "999999999"
+
+    def test_la_semilla_de_un_eslabon_ahorra_los_saltos_previos(
+        self, chain_service: MetadataService, trigger: ClientTrigger, call_log: list[str]
+    ) -> None:
+        # Sembrando el shortname, los dos saltos de afiliado desaparecen y
+        # queda sólo el último (shortname → cif).
+        chain_service.resolve(
+            trigger, _document(), _mapping("BAC_CIF"), seed={"BAC_Shortname": "ACMESA01"}
+        )
+        assert call_log == ["clientes:[('CUSSHN', 'ACMESA01')]"]
+
+    def test_sin_semilla_el_comportamiento_no_cambia(
+        self, chain_service: MetadataService, trigger: ClientTrigger, call_log: list[str]
+    ) -> None:
+        chain_service.resolve(trigger, _document(), _mapping("BAC_CIF"), seed={})
+        assert len(call_log) == 3

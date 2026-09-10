@@ -11,6 +11,10 @@ Grupos (:data:`_CHECK_GROUPS` / :func:`group_of`):
     (129/130: una fila por conexion del registro que la config USA),
     ``tracking_openable`` (SQLite en WAL) y ``as400_sync`` (SKIP si
     ``tracking.as400_sync.enabled`` es false).
+  * ``tracking`` (147 REQ-006): ``tracking_openable`` + ``as400_sync`` (los dos
+    tambien viven en ``connections``) + ``as400_column_widths``, que lee
+    ``QSYS2.SYSCOLUMNS`` y compara el ancho REAL de la tabla del banco contra
+    lo que el pipeline manda (SKIP sin AS400).
   * ``mapping``: ``mapping_completeness`` (>=1 fila del Modelo Documental)
     y ``cm_manifest`` (145: cruce offline manifest / YAML / MapeoRVI_CM,
     SKIP si el mapping no esta en modo manifest).
@@ -74,7 +78,13 @@ from cmcourier.config.schema import (
     PipelineConfig,
     SingleDocTriggerConfig,
 )
-from cmcourier.config.wiring import build_mapping_service, build_metadata_config, build_pipeline
+from cmcourier.config.wiring import (
+    build_identity_config,
+    build_mapping_service,
+    build_metadata_config,
+    build_pipeline,
+    niarvilog_columns_from_schema,
+)
 from cmcourier.domain.models import trigger_system_id
 from cmcourier.domain.ports import S0Strategy
 from cmcourier.services.indexing import IndexingService
@@ -157,6 +167,11 @@ _CHECK_GROUPS: dict[str, frozenset[str]] = {
             "as400_sync",
         }
     ),
+    # 147 REQ-006: `tracking` agrupa lo que toca el log de AS400. Los dos
+    # primeros ya viven en `connections` y siguen reportandose ahi (`group_of`
+    # devuelve el primer grupo declarado); el grupo nuevo existe para que
+    # `--check tracking` corra la tabla del banco de una.
+    "tracking": frozenset({"tracking_openable", "as400_sync", "as400_column_widths"}),
     # 145 REQ-005: `cm_manifest` es OFFLINE (manifest + YAML + CSV), por eso
     # vive con el resto del mapping y no bajo `cm-targets`, que necesita CMIS.
     "mapping": frozenset({"mapping_completeness", "cm_manifest"}),
@@ -183,6 +198,7 @@ CHECK_NAMES: tuple[str, ...] = (
     "mssql_connectivity",  # 130
     "tracking_openable",
     "as400_sync",
+    "as400_column_widths",  # 147
     "mapping_completeness",
     "cm_manifest",  # 145
     "metadata_sources",
@@ -286,6 +302,8 @@ def run_doctor(
         results.append(_check_tracking_openable(config))
     if _selected("as400_sync", selected):
         results.append(_check_as400_sync(config, secrets))
+    if _selected("as400_column_widths", selected):
+        results.append(_check_as400_column_widths(config, secrets))
     if _selected("mapping_completeness", selected):
         results.append(_check_mapping_completeness(config))
     if _selected("cm_manifest", selected):
@@ -698,6 +716,235 @@ def _check_as400_sync(config: PipelineConfig, secrets: Secrets) -> CheckResult:
         status=CheckStatus.PASS,
         message=f"AS400 NIARVILOG reachable at {host}/{full_table}",
         details=_frozen({"host": host, "table": full_table}),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 147 REQ-006 — as400_column_widths
+# ---------------------------------------------------------------------------
+
+#: ``as400_niarvilog.py`` trunca EERRMSG a este largo antes del wire.
+_EERRMSG_TRUNCATE = 1024
+#: CCSID UTF-8 de DB2 for i: ahi ``LENGTH`` cuenta BYTES, no caracteres.
+_UTF8_CCSID = "1208"
+
+
+class _ColumnBudget(NamedTuple):
+    """Lo que el pipeline manda a una columna del log de AS400.
+
+    ``needs`` es el minimo que la columna real tiene que aguantar, y ``source``
+    de donde sale ese minimo — el mensaje del FAIL los nombra a los dos junto
+    con la definicion REAL, que es todo lo que el operador necesita para
+    decidir si agranda la columna o baja el valor configurado.
+    ``needs=None`` es informativo: no hay cota declarada contra la cual medir.
+    """
+
+    role: str
+    column: str
+    needs: int | None
+    source: str
+    numeric: bool = False
+
+
+def _declared_width(fmt: object) -> int | None:
+    """146: el largo que un ``format:`` de campo garantiza, si garantiza alguno."""
+    truncate = getattr(fmt, "truncate", None)
+    if truncate is not None:
+        return int(truncate)
+    widths = [
+        int(pad.width)
+        for pad in (getattr(fmt, "pad_left", None), getattr(fmt, "pad_right", None))
+        if pad is not None
+    ]
+    return max(widths) if widths else None
+
+
+def _shortname_budget(config: PipelineConfig) -> tuple[int | None, str]:
+    """Cuanto puede medir el shortname que va a CTECIF."""
+    slot = build_identity_config(config.identity).shortname
+    if slot is None:
+        return None, "identity.shortname sin declarar; sin cota configurada"
+    fsc = build_metadata_config(config.metadata).field_sources.get(slot.field)
+    width = _declared_width(getattr(fsc, "format", None))
+    if width is None:
+        return None, f"identity.shortname → {slot.field} sin `format` que acote el largo"
+    return width, f"identity.shortname → {slot.field}.format ({width})"
+
+
+def _mapping_budgets(config: PipelineConfig) -> tuple[int | None, int | None]:
+    """El IDCM y el CMISType mas largos del Modelo Documental.
+
+    Es lo que el pipeline manda a IDNBAC / TIPIDN. Un mapping que no carga
+    deja las dos cotas en ``None``: este check es sobre la tabla de AS400, no
+    sobre el mapping — para eso esta ``mapping_completeness``.
+    """
+    try:
+        mappings = list(build_mapping_service(config.mapping).get_all())
+    except Exception:  # noqa: BLE001 — el mapping no es asunto de este check
+        _log.debug("as400_column_widths: el mapping no cargo; IDNBAC/TIPIDN quedan informativos")
+        return None, None
+    if not mappings:
+        return None, None
+    return (
+        max(len(m.id_corto) for m in mappings),
+        max(len(m.cmis_type or "") for m in mappings) or None,
+    )
+
+
+def _niarvilog_budgets(config: PipelineConfig) -> tuple[_ColumnBudget, ...]:
+    """Las seis columnas que 147 REQ-006 mira, con su nombre FISICO (049)."""
+    cols = niarvilog_columns_from_schema(config.tracking.as400_sync.columns)
+    cif_slot = build_identity_config(config.identity).cif
+    shortname_needs, shortname_source = _shortname_budget(config)
+    idnbac, tipidn = _mapping_budgets(config)
+    return (
+        _ColumnBudget("CTECIF", cols.client_cif, shortname_needs, shortname_source),
+        _ColumnBudget(
+            "CTENUM",
+            cols.client_num,
+            cif_slot.max_digits if cif_slot is not None else None,
+            (
+                f"identity.cif.max_digits ({cif_slot.max_digits})"
+                if cif_slot is not None and cif_slot.max_digits is not None
+                else "identity.cif.max_digits sin declarar"
+            ),
+            numeric=True,
+        ),
+        _ColumnBudget("IDNBAC", cols.idcm, idnbac, "el IDCM mas largo del Modelo Documental"),
+        _ColumnBudget(
+            "TIPIDN", cols.cm_type, tipidn, "el CMISType mas largo del Modelo Documental"
+        ),
+        _ColumnBudget("OBJIDN", cols.cm_object_id, None, "lo devuelve CM; sin cota configurable"),
+        _ColumnBudget(
+            "EERRMSG",
+            cols.error_message,
+            _EERRMSG_TRUNCATE,
+            f"as400_niarvilog.py trunca el error a {_EERRMSG_TRUNCATE}",
+        ),
+    )
+
+
+def _read_syscolumns(
+    config: PipelineConfig, secrets: Secrets, ref: ConnectionRef
+) -> dict[str, Mapping[str, object]]:
+    """``QSYS2.SYSCOLUMNS`` para la libreria/tabla configuradas, por columna."""
+    sync_cfg = config.tracking.as400_sync
+    src = _open_as400(ref, secrets)
+    try:
+        rows = src.query(
+            "SELECT COLUMN_NAME, DATA_TYPE, LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, CCSID "
+            "FROM QSYS2.SYSCOLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+            [sync_cfg.library, sync_cfg.table],
+        )
+    finally:
+        src.close()
+    return {str(r.get("COLUMN_NAME", "")).strip().upper(): r for r in rows}
+
+
+def _as_int(value: object) -> int:
+    """El entero de una celda de SYSCOLUMNS; 0 cuando viene NULL o ilegible."""
+    try:
+        return int(str(value).strip() or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _real_definition(row: Mapping[str, object], *, numeric: bool) -> tuple[int, str]:
+    """(capacidad real, como se lee la definicion) para una fila de SYSCOLUMNS."""
+    data_type = str(row.get("DATA_TYPE", "")).strip()
+    if numeric:
+        precision = _as_int(row.get("NUMERIC_PRECISION")) or _as_int(row.get("LENGTH"))
+        return precision, f"{data_type}({precision},{_as_int(row.get('NUMERIC_SCALE'))})"
+    length = _as_int(row.get("LENGTH"))
+    return length, f"{data_type}({length})"
+
+
+def _column_problem(budget: _ColumnBudget, row: Mapping[str, object] | None) -> str | None:
+    """El texto del problema de UNA columna, o ``None`` si esta bien."""
+    if row is None:
+        return f"{budget.column} ({budget.role}) no existe en la tabla"
+    real, rendered = _real_definition(row, numeric=budget.numeric)
+    if budget.needs is None or real >= budget.needs:
+        return None
+    unit = "digitos" if budget.numeric else "caracteres"
+    return (
+        f"{budget.column} es {rendered} y el pipeline manda hasta "
+        f"{budget.needs} {unit} — {budget.source}"
+    )
+
+
+def _check_as400_column_widths(config: PipelineConfig, secrets: Secrets) -> CheckResult:
+    """147 REQ-006: el ancho REAL de la columna contra lo que el pipeline manda.
+
+    El caso que motiva el check: ``CTENUM`` con menos precision que
+    ``identity.cif.max_digits`` rompe con ``22003`` — 1194 filas en la corrida
+    del operador. Eso se detecta el lunes en el preflight, no el viernes con
+    el batch a medio subir. SKIP sin AS400 configurado: sin tabla no hay
+    definicion que leer.
+    """
+    name = "as400_column_widths"
+    sync_cfg = config.tracking.as400_sync
+    if not sync_cfg.enabled:
+        return _skip(name, "disabled (tracking.as400_sync.enabled=false)")
+    ref = config.connection_ref("tracking.as400_sync")
+    if ref is None or secrets.get(ref.alias) is None:
+        return _skip(name, "no AS400 connection or credentials; see the as400_sync check")
+    full_table = f"{sync_cfg.library}.{sync_cfg.table}"
+    try:
+        by_column = _read_syscolumns(config, secrets, ref)
+    except Exception as exc:  # noqa: BLE001
+        return _fail(name, exc, {"host": ref.spec.host, "table": full_table})
+    budgets = _niarvilog_budgets(config)
+    problems = [
+        p
+        for p in (_column_problem(b, by_column.get(b.column.upper())) for b in budgets)
+        if p is not None
+    ]
+    details = _column_width_details(full_table, budgets, by_column)
+    if problems:
+        return CheckResult(
+            name=name,
+            status=CheckStatus.FAIL,
+            message=f"{full_table}: " + "; ".join(problems),
+            details=details,
+        )
+    return CheckResult(
+        name=name,
+        status=CheckStatus.PASS,
+        message=f"{full_table}: las {len(budgets)} columnas aguantan lo que el pipeline manda",
+        details=details,
+    )
+
+
+def _column_width_details(
+    full_table: str,
+    budgets: tuple[_ColumnBudget, ...],
+    by_column: Mapping[str, Mapping[str, object]],
+) -> Mapping[str, str]:
+    """La definicion REAL de cada columna, mas la nota de CCSID.
+
+    Principio VIII: son nombres y anchos de columna, nunca valores.
+    """
+    real: list[str] = []
+    utf8: list[str] = []
+    for budget in budgets:
+        row = by_column.get(budget.column.upper())
+        if row is None:
+            real.append(f"{budget.column}=<ausente>")
+            continue
+        real.append(f"{budget.column}={_real_definition(row, numeric=budget.numeric)[1]}")
+        if str(row.get("CCSID") or "").strip() == _UTF8_CCSID:
+            utf8.append(budget.column)
+    return _frozen(
+        {
+            "table": full_table,
+            "real": ", ".join(real),
+            "utf8_columns": f"CCSID {_UTF8_CCSID}: {', '.join(utf8)}" if utf8 else "ninguna",
+            "ccsid_note": (
+                f"en CCSID {_UTF8_CCSID} (UTF-8) LENGTH cuenta BYTES, no caracteres: "
+                "un valor con acentos entra en menos posiciones de las que parece"
+            ),
+        }
     )
 
 

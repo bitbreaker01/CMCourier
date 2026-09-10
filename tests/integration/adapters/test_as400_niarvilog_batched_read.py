@@ -191,9 +191,16 @@ class TestTerminalWrites117:
     ) -> None:
         store, module = _make_store(monkeypatch, set())
         module.raise_integrity_on_insert = True
-        _record, document, mapping, trigger = self._doc_pack()
+        record, document, mapping, trigger = self._doc_pack()
         assert (
-            store.insert_terminal(document=document, mapping=mapping, trigger=trigger, stscod="O")
+            store.insert_terminal(
+                # 147 REQ-004: CTECIF / CTENUM salen del record, no del trigger.
+                record=record,
+                document=document,
+                mapping=mapping,
+                trigger=trigger,
+                stscod="O",
+            )
             is False
         )
         store.close()

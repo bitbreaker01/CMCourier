@@ -12,8 +12,7 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
-- **Cadenas configurables de identidad — motor y bloque `identity:`
-  (147, parte 1).** `lookup_value_source` acepta un tercer scope,
+- **Cadenas configurables de identidad (147).** `lookup_value_source` acepta un tercer scope,
   `field.<NOMBRE_CANONICO>`: la clave de búsqueda pasa a ser el valor YA
   RESUELTO de otro campo, que es lo que permite encadenar los saltos que
   el operador necesita (hijo → padre → shortname → CIF). El resolver de
@@ -35,6 +34,57 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
   de convertirse en un `0` silencioso. Memo en memoria por corrida sobre
   los saltos de la cadena, con contador de hits, ortogonal al `prefetch`
   de tablas y al cache de metadata (037).
+
+  La identidad se resuelve al **inicio de S2**, sin etapa nueva: el
+  `ResolvedIdentity` se cuelga del item y viaja con el documento. Se
+  evaluó y se descartó una S1.5 propia por costo (migrar `migration_log`,
+  estados nuevos en toda la máquina de recovery, consola y docs). El
+  precio es que **S2 pasa a poder hacer red**; lo acotan tres cosas: la
+  cadena se resuelve una vez por documento, cada salto se memoiza por
+  corrida, y lo que S2 resolvió entra como **semilla de S3**, que por eso
+  no vuelve a consultar ni el campo ni sus eslabones intermedios. Una
+  identidad que no resuelve con `on_missing: fail` es un `S2_FAILED` con
+  su motivo y la cadena completa — no hay estado nuevo. Con
+  `identity.system_id` declarado, la clave del mapeo `(sistema, IDRVI)`
+  también sale de la identidad resuelta; sin declarar, sigue saliendo del
+  trigger. Los tres orquestadores (batched, streaming y multi-batch)
+  comparten el mismo `_s2_one`, así que ninguno queda en el camino viejo.
+
+  Y con eso, **un solo origen para las tres escrituras** que hasta ahora
+  podían discrepar: la fila de `migration_log`, las columnas
+  `CTECIF`/`CTENUM` del log de AS400 y la clave del mapeo salen todas del
+  mismo `ResolvedIdentity`. Esto cierra una divergencia REAL: el tracking
+  guardaba el CIF curado y `CTENUM` el crudo, porque el self-healing sólo
+  reconstruía el trigger cuando era un `ClientTrigger` y el camino de
+  producción es un `RvabrepRowTrigger` con fila inmutable. El adaptador de
+  NIARVILOG lee ahora el `MigrationRecord` en vez de proyectar el trigger.
+  El `int(cif) if cif.isdigit() else 0` se borró de sus dos call sites: en
+  el pipeline la política ya corrió en S2, y `sync recover` — que lee el
+  CIF de SQLite y no tiene trigger vivo — re-valida contra el MISMO
+  `identity.cif` del YAML antes del wire (offline, cero red), dejando el
+  txn como no recuperable con el motivo si `on_missing` es `fail`. Sin
+  número válido va **`NULL`**, nunca un `0` inventado; el `0` explícito se
+  declara con `on_missing: default` + `default_value: "0"`.
+  `healed_trigger` / `healed_cif` quedan deprecados un ciclo: ninguna
+  escritura los lee ya.
+
+  Check nuevo del `doctor`, **`as400_column_widths`** (grupo `tracking`,
+  SKIP sin AS400): lee `QSYS2.SYSCOLUMNS` para la librería y tabla
+  configuradas — que no son necesariamente `RVILIB.NIARVILOG`; la del
+  operador es `RVIMGLOG` — y compara la definición REAL contra lo que el
+  pipeline manda: la precisión de `CTENUM` contra `identity.cif.max_digits`
+  y el largo de `CTECIF`, `IDNBAC`, `TIPIDN`, `OBJIDN` y `EERRMSG` (que el
+  adaptador trunca a 1024). El FAIL nombra la definición real Y el valor
+  configurado, y los `details` marcan qué columnas están en CCSID 1208,
+  donde el largo cuenta BYTES y no caracteres. El `22003` se detecta el
+  lunes en el preflight, no el viernes con el batch a medio subir. El
+  grupo `tracking` junta además `tracking_openable` y `as400_sync`.
+
+  Documentación: how-to nueva
+  [`docs/how-to/identity-chain.md`](docs/how-to/identity-chain.md) con la
+  cadena de tres saltos de punta a punta y un YAML completo, más
+  `config-schema.md`, `config-reference.yaml`, `pipeline-stages.md` (S2
+  hace red) y `cli.md`.
 
 - **Formato declarativo del valor de un metadato (146).** Bloque
   `format:` nuevo en `metadata.field_sources`, en dos ubicaciones y dos

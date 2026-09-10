@@ -110,13 +110,23 @@ También chequea idempotencia cross-batch acá: si `tracking.is_uploaded(txn_num
 
 ### S2 — Mapping
 
-**Qué hace**: traduce el `ID RVI` (un identificador del modelo documental de RVI) al `cm_object_type` y la `cm_folder` correspondientes en Content Manager. La traducción se carga al startup desde un CSV (`MapeoRVI_CM.csv`) que mantiene el banco. Es un lookup en un dict.
+**Qué hace**: dos cosas, en este orden.
+
+**(1) Resuelve la identidad del cliente** (147). RVABREP no siempre la trae: a veces viene sólo el shortname, a veces sólo el CIF, a veces ninguno de los dos y lo único disponible es un afiliado hijo. El bloque `identity:` del YAML declara qué campo alimenta cada slot (`shortname` / `cif` / `system_id`) y esos campos se resuelven con el **mismo motor de `field_sources`** que usa S3, así que un slot puede llegar después de tres saltos encadenados (hijo → padre → shortname → CIF). El resultado es un `ResolvedIdentity` frozen que se cuelga del `_StageItem` y viaja con el documento hasta las tres escrituras: la fila de `migration_log`, `CTECIF`/`CTENUM` del log de AS400 y la clave del mapeo de acá abajo.
+
+Los tres slots son opcionales, y un slot ausente deja el comportamiento pre-147 (el valor se lee del trigger, sin cadena). Ver [`how-to/identity-chain.md`](../how-to/identity-chain.md).
+
+**(2) Traduce el `ID RVI`** (un identificador del modelo documental de RVI) al `cm_object_type` y la `cm_folder` correspondientes en Content Manager. La traducción se carga al startup desde un CSV (`MapeoRVI_CM.csv`) que mantiene el banco. Es un lookup en un dict.
 
 En modo **manifest** (145, recomendado) el lookup es por `(sistema, ID RVI)`, no sólo por `ID RVI`: `MappingService.get_mapping` primero busca la fila específica del sistema que trajo el trigger (`domain/models.py:trigger_system_id`) y, si no hay, cae al comodín (`IDSistema` vacío). Esto permite que el mismo `ID RVI` resuelva a clases CM distintas según de qué sistema vino el documento — algo que los modos consolidado y split no soportan (ahí todo el mapeo vive bajo un único comodín implícito, sin distinguir sistema). El resto de `CMMapping` (tipo, carpeta, propiedades requeridas) sale del manifest JSON de tipos CM en vez de columnas del CSV — ver [`how-to/cm-type-manifest.md`](../how-to/cm-type-manifest.md).
 
-**Dónde corre**: mismo thread que S1 (el producer/prep_worker). Es CPU-trivial — un dict.get().
+Cuando `identity.system_id` está declarado, la primera mitad de esa clave sale de la identidad resuelta en el paso (1) en lugar del trigger crudo — el sistema también se puede resolver por cadena. Sin el slot declarado, sigue saliendo de `trigger_system_id(trigger)`, byte-idéntico al pre-147.
 
-**Qué tira**: `IDRViNotMappedError` cuando el ID RVI no aparece en el mapping cargado (ni para el sistema del trigger ni para el comodín). Eso indica que el banco agregó un tipo nuevo al modelo documental y nadie actualizó el CSV. En modo manifest, un `IDCM` que el CSV referencia pero el manifest no conoce no levanta esta excepción — la fila se descarta con WARNING al cargar y el código queda en `MappingService.missing_cm_codes`, visible en `types check` / doctor `cm_manifest`.
+**Dónde corre**: mismo thread que S1 (el producer/prep_worker). **Ojo: desde 147, S2 puede hacer red.** Antes era CPU-trivial (un `dict.get()`); ahora, si el bloque `identity:` declara una cadena que necesita un lookup contra AS400 o SQL Server, S2 paga ese round-trip. Tres cosas lo acotan: la cadena se resuelve UNA vez por documento; cada salto se memoiza por corrida, así que todos los documentos del mismo cliente pagan el primero y nada más; y lo que S2 resolvió entra como **semilla** de S3, que por eso no vuelve a consultar ni el campo ni sus eslabones intermedios.
+
+Se evaluó y se descartó darle etapa propia (una "S1.5") por costo: habría significado migrar `migration_log`, agregar estados nuevos a toda la máquina de recovery, a la consola y a los docs. Si la resolución de identidad resulta cara o falla seguido, se reconsidera con su propia spec.
+
+**Qué tira**: `IDRViNotMappedError` cuando el ID RVI no aparece en el mapping cargado (ni para el sistema del trigger ni para el comodín). Y `IdentityResolutionError` (147) cuando un slot con `on_missing: fail` no resolvió; desciende de `MappingError` a propósito, así que **es un `S2_FAILED` con su motivo, no un estado nuevo**. El mensaje nombra el slot Y la cadena completa que se intentó, fuente por fuente y con el motivo de cada descarte — sin eso el operador ve "no resolvió el CIF" y no tiene forma de saber cuál de los tres saltos se cortó. Eso indica que el banco agregó un tipo nuevo al modelo documental y nadie actualizó el CSV. En modo manifest, un `IDCM` que el CSV referencia pero el manifest no conoce no levanta esta excepción — la fila se descarta con WARNING al cargar y el código queda en `MappingService.missing_cm_codes`, visible en `types check` / doctor `cm_manifest`.
 
 **Qué deja en tracking**: `S2_PENDING` / `S2_DONE` / `S2_FAILED`.
 
@@ -129,6 +139,8 @@ Las fuentes pueden ser:
 - `rvabrep:<campo>` — sacar de la fila RVABREP.
 - `csv:<alias>` — querear una CSV de metadatos (clientes, cuentas, etc.).
 - `as400:<alias>` — querear AS400.
+
+Y la clave de búsqueda de esas dos últimas puede salir de otro campo ya resuelto (`lookup_value_source: "field.<NOMBRE>"`, 147): el resolver arma el grafo de dependencias, lo ordena topológicamente y resuelve en ese orden, sólo lo pedido más sus dependencias transitivas. Los campos que S2 ya resolvió para la identidad entran como semilla y no se vuelven a consultar.
 
 Con `prefetch_enabled: True` (default), los CSV de metadatos se pre-cargan en memoria al startup; AS400 se queryea por documento. Con el cache de 037 activo (post-MVP §9), las resoluciones recientes se memoizan en SQLite con TTL.
 

@@ -243,9 +243,10 @@ metadata:
         - source_type: rvabrep
           lookup_value_column: index2
       default_value: "000000"              # (default: null) used if no source matches
-    # lookup_value_source (084) — for `csv:` / `as400:` / `mssql:` sources ONLY,
-    # WHERE the lookup key comes from. Syntax "<scope>.<attr>" with scope
-    # `trigger` (cif, shortname, system_id) or `rvabrep` (txn_num, index1..7, …).
+    # lookup_value_source (084 + 147) — for `csv:` / `as400:` / `mssql:` sources
+    # ONLY, WHERE the lookup key comes from. Syntax "<scope>.<attr>" with scope
+    # `trigger` (cif, shortname, system_id), `rvabrep` (txn_num, index1..7, …)
+    # or `field` (147 — see BAC_Shortname / BAC_CIF further down).
     # Ignored by the `trigger` / `rvabrep` source types (they read directly).
     BAC_Numero_Cuenta:
       sources:
@@ -304,6 +305,45 @@ metadata:
         - source_type: "as400:branch_lookup"
           lookup_value_column: BRANCH_NAME
           lookup_key_column: BRANCH_ID
+    # lookup_value_source: "field.<CANONICAL_NAME>" (147) — the lookup key is
+    # the ALREADY-RESOLVED value of ANOTHER field. This is what lets you chain
+    # hops: child affiliate → parent → shortname → CIF → name. The resolver
+    # builds the dependency graph, sorts it topologically and resolves in that
+    # order, so the DECLARATION ORDER BELOW DOES NOT MATTER. Cycles and
+    # references to fields that do not exist fail at LOAD time, with the full
+    # cycle in the message — never mid-batch. A dependency that did not resolve
+    # skips ONLY that source; the chain moves on to the next one.
+    BAC_Afiliado_Hijo:
+      sources:
+        - source_type: rvabrep
+          lookup_value_column: index1
+    BAC_Afiliado_Padre:
+      sources:
+        - source_type: "as400:afiliados"
+          lookup_value_source: "field.BAC_Afiliado_Hijo"   # hop 1
+          lookup_key_column: AFIHIJ
+          lookup_value_column: AFIPAD
+    BAC_Shortname:
+      sources:
+        - source_type: trigger              # if RVABREP already brought it, free
+          lookup_value_column: shortname
+        - source_type: "as400:clientes"     # otherwise, hop 2
+          lookup_value_source: "field.BAC_Afiliado_Padre"
+          lookup_key_column: CUSAFI
+          lookup_value_column: CUSSHN
+    # In a real config this last hop would be one more source appended to the
+    # `BAC_CIF` chain above; it is a separate field here only so that both
+    # examples can live in the same file.
+    BAC_CIF_Chained:
+      sources:
+        - source_type: "as400:clientes"     # hop 3
+          lookup_value_source: "field.BAC_Shortname"
+          lookup_key_column: CUSSHN
+          lookup_value_column: CUSCIF
+    BAC_Sistema:
+      sources:
+        - source_type: trigger
+          lookup_value_column: system_id
 
   # sources — named lookup sources referenced by `csv:<alias>` / `as400:<alias>`
   # / `mssql:<alias>` above. A list; it MAY mix csv, as400 and mssql entries freely.
@@ -337,6 +377,43 @@ metadata:
   cache:
     enabled: false                         # (default: false)
     ttl_minutes: 60                        # (default: 60)  range 1..43200 (30 days)
+
+
+# -----------------------------------------------------------------------------
+# identity  (optional, 147)  — WHO the client of this document is.
+#
+# Resolved at the HEAD of S2, with the same field_sources engine as the
+# metadata, so a slot can arrive after three chained hops. It is the SINGLE
+# SOURCE for the three writes that used to be able to disagree:
+#   * the `migration_log` row (SQLite),
+#   * CTECIF / CTENUM in the AS400 log (RVIMGLOG / NIARVILOG),
+#   * the (system, IDRVI) mapping key of S2.
+#
+# ALL THREE SLOTS ARE OPTIONAL. An absent slot ⇒ pre-147 behaviour: the value
+# is read from the trigger, with no chain, and the mapping key keeps coming
+# from `trigger_system_id(trigger)`.
+#
+# Validators (they fail at LOAD time): `field` must be a key of
+# `metadata.field_sources`, and `max_digits` is only valid on `cif`.
+# -----------------------------------------------------------------------------
+identity:                                  # (default: every slot null)
+  shortname:                               # (default: null) feeds CTECIF
+    field: BAC_Shortname                   # (REQUIRED) key of metadata.field_sources
+    on_missing: fail                       # (default: "fail") fail | warn | default
+  cif:                                     # (default: null) feeds CTENUM
+    field: BAC_CIF
+    on_missing: fail
+    # max_digits (cif ONLY) — the REAL precision of the CTENUM column. It
+    # compares the LENGTH; it never converts anything. This is what replaces
+    # `int(cif) if cif.isdigit() else 0`, which validated the TYPE and never
+    # the MAGNITUDE: a longer CIF blew up with 22003 on the bank's side, and a
+    # non-numeric one silently became customer `0`. When there is no valid
+    # number left for CTENUM, NULL goes to the wire — never an invented 0.
+    max_digits: 9                          # (default: null) > 0
+    default_value: null                    # (default: null) REQUIRED if on_missing: default
+  system_id:                               # (default: null) feeds the mapping key
+    field: BAC_Sistema
+    on_missing: warn                       # `warn` logs the full chain and leaves ""
 
 
 # -----------------------------------------------------------------------------

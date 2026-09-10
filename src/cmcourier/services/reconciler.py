@@ -332,6 +332,8 @@ class As400Reconciler:
         else:
             # Fila ausente → INSERT directo con el estado terminal.
             synced = self._as400.insert_terminal(
+                # 147 REQ-004: la identidad sale del record, no del trigger.
+                record=item.record,
                 document=item.document,
                 mapping=item.mapping,
                 trigger=item.trigger,

@@ -18,6 +18,7 @@ Convenciones de los rangos:
 | `indexing` | `IndexingConfig` (required) | — | — | Config de S1 + source RVABREP. |
 | `mapping` | `MappingConfig` (required) | — | — | Modelo Documental (S2). |
 | `metadata` | `MetadataConfigModel` (required) | — | — | Resolución de propiedades (S3). |
+| `identity` | `IdentityConfigModel` | factory | — | (147) Qué campo alimenta el shortname / CIF / sistema del cliente. Todos los slots opcionales; sin declarar nada, comportamiento pre-147. |
 | `assembly` | `AssemblyConfig` (required) | — | — | Fuentes + temp dir para S4. |
 | `cmis` | `CmisConfigModel` (required) | — | — | Conexión + retries de S5. |
 | `tracking` | `TrackingConfig` (required) | — | — | SQLite + AS400 sync. |
@@ -267,8 +268,42 @@ En modo manifest, las columnas requeridas de `MapeoRVI_CM.csv` son sólo `IDRVI`
 | `source_type` | str (required) | — | `"trigger"`, `"rvabrep"`, `"csv:{alias}"`, `"as400:{alias}"` o `"mssql:{alias}"` (130). El prefijo se parsea con `split_lookup_source_type()`; `LOOKUP_SOURCE_KINDS = ("csv", "as400", "mssql")`. |
 | `lookup_value_column` | str (required) | — | Columna a leer. |
 | `lookup_key_column` | `str \| None` | `None` | Columna pivot. |
+| `lookup_value_source` | str | `"trigger.cif"` | (084/147) De dónde sale el VALOR que se busca. Tres scopes: `trigger.<attr>`, `rvabrep.<col>` y `field.<NOMBRE_CANONICO>` (147). Sólo aplica a fuentes de lookup (`csv:` / `as400:` / `mssql:`). |
 | `validation` | `ValidationModel \| None` | `None` | — |
 | `format` | `ValueFormatModel \| None` | `None` | (146) Formato POR FUENTE: corre **entre el fetch y `validation`**. |
+
+#### `lookup_value_source: "field.<NOMBRE>"` (147)
+
+El tercer scope. La clave de búsqueda deja de salir del trigger o de la fila
+RVABREP y pasa a ser **el valor YA RESUELTO de otro campo** — que es lo que
+permite encadenar saltos (afiliado hijo → padre → shortname → CIF → nombre):
+
+```yaml
+BAC_Shortname:
+  sources:
+    - source_type: trigger                  # 1º: si ya vino, es gratis
+      lookup_value_column: shortname
+    - source_type: "as400:clientes"         # 2º: si no, se busca
+      lookup_value_source: "field.BAC_Afiliado_Padre"
+      lookup_key_column:   CUSAFI
+      lookup_value_column: CUSSHN
+```
+
+Reglas:
+
+- El resolver arma el **grafo de dependencias** entre campos, lo ordena
+  topológicamente y resuelve en ese orden. **El orden de declaración en el
+  YAML no importa**.
+- Sólo se resuelven los campos pedidos **más sus dependencias transitivas**.
+  Un campo que nadie pide ni nadie depende de él ni se toca.
+- **Los ciclos y las referencias a campos inexistentes fallan al CARGAR el
+  YAML**, con el ciclo completo en el mensaje (`A -> B -> C -> A`). Nunca en
+  runtime, nunca a mitad de un batch de producción.
+- Una dependencia que **no resolvió** deja su dependiente sin esa fuente: se
+  saltea SÓLO esa fuente (igual que un valor vacío) y la cadena sigue con la
+  próxima. No aborta el documento.
+- Cada salto se memoiza por corrida (REQ-005), con clave
+  `(campo, source_type, columna clave, columna valor, valor de clave)`.
 
 ### `ValidationModel`
 
@@ -349,6 +384,83 @@ Exactamente uno de `table` / `query`. El prefijo de `source_type` debe coincidir
 |-------|------|---------|------------|-------------|
 | `enabled` | bool | `False` | — | Activa cache cross-batch en `document_cache`. |
 | `ttl_minutes` | int | `60` | `1..43200` | Tope 30 días. |
+
+---
+
+## Identity (`identity`, 147)
+
+Quién es el cliente de ESTE documento. Reemplaza al hardcode de `"BAC_CIF"`
+que vivía adentro del resolver de metadata: ahora el YAML declara qué campo
+alimenta cada slot, y ese campo puede llegar por una cadena de tres saltos
+(`field.<NOMBRE>`, arriba).
+
+Lo que resuelve este bloque es **un solo origen para las tres escrituras**
+que antes podían discrepar: la fila de `migration_log`, las columnas
+`CTECIF`/`CTENUM` del log de AS400 (`RVIMGLOG`/`NIARVILOG`) y la clave del
+mapeo de S2. Ver [`how-to/identity-chain.md`](../how-to/identity-chain.md).
+
+```yaml
+identity:
+  shortname:
+    field: BAC_Shortname
+    on_missing: fail
+  cif:
+    field: BAC_CIF
+    on_missing: fail
+    max_digits: 9          # la precisión REAL de CTENUM
+  system_id:
+    field: BAC_Sistema
+    on_missing: warn
+```
+
+### `IdentityConfigModel`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `shortname` | `IdentitySlotModel \| None` | `None` | Alimenta `CTECIF` y `migration_log.trigger_shortname`. |
+| `cif` | `IdentitySlotModel \| None` | `None` | Alimenta `CTENUM` y `migration_log.trigger_cif`. |
+| `system_id` | `IdentitySlotModel \| None` | `None` | Alimenta la clave `(sistema, IDRVI)` del mapeo y `migration_log.trigger_system_id`. |
+
+**Los tres slots son opcionales.** Un slot ausente ⇒ comportamiento
+pre-147: el valor se lee de `trigger.audit_row()` sin cadena, y la clave del
+mapeo sigue saliendo de `trigger_system_id(trigger)`.
+
+Validadores de schema (fallan al CARGAR, no en runtime):
+
+- `identity.<slot>.field` tiene que ser una clave de `metadata.field_sources`.
+- `max_digits` **sólo** es válido en `cif` — modela la precisión real de
+  `CTENUM`, y no tiene lectura sobre el shortname ni sobre el sistema.
+
+### `IdentitySlotModel`
+
+| Field | Type | Default | Constraint | Description |
+|-------|------|---------|------------|-------------|
+| `field` | str (required) | — | clave de `metadata.field_sources` | Qué campo canónico resuelve este pedazo de identidad. |
+| `on_missing` | `Literal["fail","warn","default"]` | `"fail"` | — | Qué hacer cuando la cadena no dio nada. |
+| `max_digits` | `int \| None` | `None` | `> 0`, sólo en `cif` | Largo máximo aceptable. Compara el LARGO — no convierte nada. |
+| `default_value` | `str \| None` | `None` | required si `on_missing: default` | El valor de fallback. |
+
+`on_missing` en detalle:
+
+| Valor | Qué pasa |
+|-------|----------|
+| `fail` (default) | El documento falla como **`S2_FAILED`** con un error que nombra el slot **y la cadena completa que se intentó**, fuente por fuente. No hay estado nuevo: `IdentityResolutionError` desciende de `MappingError`. |
+| `warn` | Se loguea un WARNING con la cadena, el slot queda en `""` y el documento sigue. |
+| `default` | Se usa `default_value`. |
+
+`max_digits` es lo que mata al viejo `int(cif) if cif.isdigit() else 0`:
+
+- Validaba el **tipo** y nunca la **magnitud**. Un CIF más largo que la
+  precisión de `CTENUM` rompía del lado del banco con `22003` (1194 filas en
+  una corrida real del operador).
+- Un CIF **no numérico** se escribía como **cliente `0`** en el log del banco,
+  en silencio. Post-147 el valor nunca se convierte ni se reemplaza solo: o
+  pasa tal cual, o se aplica `on_missing`. Cuando aun así no hay número
+  válido para `CTENUM`, va **`NULL`** — nunca un `0` inventado. Un operador
+  que quiera el `0` lo declara con `on_missing: default` + `default_value: "0"`.
+
+El check `as400_column_widths` del `doctor` (147 REQ-006) cruza `max_digits`
+contra la precisión REAL de la columna antes de que arranque el batch.
 
 ---
 

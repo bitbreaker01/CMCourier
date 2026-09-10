@@ -481,7 +481,16 @@ def single_doc_run_command(
     "--check",
     "selected_check",
     type=click.Choice(
-        ["connections", "mapping", "metadata", "cm-types", "cm-targets", "all", *CHECK_NAMES]
+        [
+            "connections",
+            "tracking",  # 147
+            "mapping",
+            "metadata",
+            "cm-types",
+            "cm-targets",
+            "all",
+            *CHECK_NAMES,
+        ]
     ),
     default="all",
     help="Run only the named check group, or a single check by name (default: all).",

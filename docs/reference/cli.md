@@ -246,7 +246,7 @@ Pre-flight validation. No corre el pipeline.
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--config` | Path (required) | — | Pipeline YAML. |
-| `--check` | choice | `all` | Un grupo (`connections`, `mapping`, `metadata`, `cm-types`, `cm-targets`, `all`) o un check individual por nombre (126). |
+| `--check` | choice | `all` | Un grupo (`connections`, `tracking`, `mapping`, `metadata`, `cm-types`, `cm-targets`, `all`) o un check individual por nombre (126). El grupo `tracking` (147) junta `tracking_openable` + `as400_sync` + `as400_column_widths`; los dos primeros siguen reportándose bajo `connections`, que es su grupo declarado primero. |
 | `--log-level` | choice | `INFO` | — |
 
 Checks individuales (`CHECK_NAMES`, en orden de ejecución):
@@ -257,8 +257,9 @@ Checks individuales (`CHECK_NAMES`, en orden de ejecución):
 | `cmis_connectivity` | connections | `repositoryInfo` del CMIS. |
 | `as400_connectivity` | connections | Cada conexión `as400` del registro (129): credenciales presentes + login + la consulta de prueba de la conexión (143: `probe_query` o derivada de la tabla/query del sitio; sin sitio, sólo login). SKIP si no hay ninguna. |
 | `mssql_connectivity` | connections | Cada conexión `mssql` del registro (130): credenciales presentes + login + la consulta de prueba (143, ídem con `SELECT TOP 1 1`). SKIP si no hay ninguna. |
-| `tracking_openable` | connections | La SQLite de tracking abre en WAL. |
-| `as400_sync` | connections | Conexión + tabla NIARVILOG cuando `tracking.as400_sync.enabled`. SKIP si está off. |
+| `tracking_openable` | connections, tracking | La SQLite de tracking abre en WAL. |
+| `as400_sync` | connections, tracking | Conexión + tabla NIARVILOG cuando `tracking.as400_sync.enabled`. SKIP si está off. |
+| `as400_column_widths` | tracking | (147) Lee `QSYS2.SYSCOLUMNS` para la librería/tabla configuradas en `tracking.as400_sync` (la del operador es `RVIMGLOG`, no `NIARVILOG`) y compara la definición REAL contra lo que el pipeline manda: precisión de `CTENUM` vs `identity.cif.max_digits`, y el largo de `CTECIF`, `IDNBAC`, `TIPIDN`, `OBJIDN` y `EERRMSG` (truncado a 1024). El FAIL nombra la definición real y el valor configurado. Los `details` marcan qué columnas están en CCSID 1208, donde el largo cuenta BYTES y no caracteres. SKIP sin AS400 configurado. Ver [`how-to/identity-chain.md`](../how-to/identity-chain.md). |
 | `mapping_completeness` | mapping | El Modelo Documental tiene ≥1 fila. |
 | `cm_manifest` | mapping | (145) Cruza manifest ↔ YAML ↔ `MapeoRVI_CM.csv` y reporta sólo los CRITICAL (mismo motor que `types check`, ver [`how-to/cm-type-manifest.md`](../how-to/cm-type-manifest.md)). SKIP si `mapping` no está en modo manifest. |
 | `metadata_sources` | metadata | Cada fuente de `metadata.sources` (csv / as400 / mssql) devuelve ≥1 fila. |

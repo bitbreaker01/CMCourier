@@ -19,13 +19,16 @@ from __future__ import annotations
 
 __all__ = [
     "IdentityConfig",
+    "IdentityOutcome",
     "IdentityResolver",
     "IdentitySlotConfig",
     "ResolvedIdentity",
+    "ctenum_for",
 ]
 
 import logging
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Literal
 
 from cmcourier.domain.exceptions import IdentityResolutionError
@@ -88,6 +91,68 @@ class ResolvedIdentity:
     system_id: str
 
 
+def ctenum_for(
+    cif: str,
+    slot: IdentitySlotConfig | None,
+    *,
+    chain: tuple[str, ...] = (),
+) -> int | None:
+    """147 REQ-004: el valor de ``CTENUM`` para un CIF **sin trigger vivo**.
+
+    Es el gemelo offline de :meth:`IdentityResolver._value_for`, para los
+    consumidores que leen el CIF de ``migration_log`` en vez de resolverlo
+    (``services.recovery``). La cadena NO se re-corre — no hay documento ni
+    trigger que la alimente — pero la política sí se re-aplica: ``max_digits``
+    y ``on_missing`` son datos del YAML, no del runtime, y validarlos acá
+    cuesta cero red y evita mandar de nuevo el valor que rompió con ``22003``.
+
+    Sin *slot* declarado queda la única regla que nunca debió faltar: un valor
+    no numérico devuelve ``None`` (⇒ ``NULL``), NUNCA un ``0`` inventado.
+    """
+    reason = _ctenum_violation(cif, slot)
+    if reason is None:
+        return int(cif)
+    if slot is None:
+        _logger.warning("CTENUM queda en NULL: el CIF de tracking %s", reason)
+        return None
+    if slot.on_missing == "fail":
+        raise IdentityResolutionError(slot="cif", field_name=slot.field, reason=reason, chain=chain)
+    if slot.on_missing == "warn":
+        _logger.warning(
+            "identity slot cif unusable for CTENUM from field=%s (%s)", slot.field, reason
+        )
+        return None
+    default = slot.default_value or ""
+    return int(default) if default.isdigit() else None
+
+
+def _ctenum_violation(cif: str, slot: IdentitySlotConfig | None) -> str | None:
+    """Por qué *cif* no sirve como ``CTENUM``, o ``None`` si sirve."""
+    if not cif:
+        return "no value"
+    if not cif.isdigit():
+        return f"value is not numeric ({len(cif)} characters)"
+    if slot is not None and slot.max_digits is not None and len(cif) > slot.max_digits:
+        return f"value is {len(cif)} digits long, max_digits is {slot.max_digits}"
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityOutcome:
+    """147 REQ-003: la identidad MÁS los campos que costó resolverla.
+
+    ``fields`` va indexado por nombre canónico (``BAC_CIF``, …) y lleva sólo
+    lo que REALMENTE resolvió. Es la semilla que S2 le pasa a S3
+    (``MetadataService.resolve(..., seed=...)``) para que la cadena no se
+    recorra dos veces sobre el mismo documento. Un campo que no resolvió no
+    entra: sembrar el ``default_value`` de un slot le mentiría a S3 sobre lo
+    que la cadena dio.
+    """
+
+    identity: ResolvedIdentity
+    fields: Mapping[str, str] = field(default_factory=dict)
+
+
 class IdentityResolver:
     """Resuelve un :class:`ResolvedIdentity` para un par (trigger, documento).
 
@@ -101,17 +166,33 @@ class IdentityResolver:
         self._config = config
         self._metadata = metadata_service
 
+    def declares(self, slot_name: str) -> bool:
+        """147 REQ-003: ¿el YAML declaró este slot?
+
+        S2 lo pregunta por ``system_id``: con el slot declarado la clave del
+        mapping sale de la identidad resuelta; sin declarar sigue saliendo de
+        ``trigger_system_id(trigger)``, byte-idéntico al pre-147.
+        """
+        return self._config.slot(slot_name) is not None
+
     def resolve(self, trigger: Trigger, document: RVABREPDocument) -> ResolvedIdentity:
+        return self.resolve_outcome(trigger, document).identity
+
+    def resolve_outcome(self, trigger: Trigger, document: RVABREPDocument) -> IdentityOutcome:
+        """La identidad más la semilla de campos ya resueltos (REQ-003)."""
         audit = trigger.audit_row()
         declared = self._config.declared_fields()
         # Una sola pasada por el motor para los tres slots: si `cif` depende
         # de `shortname`, el salto se comparte en vez de repetirse.
         resolutions = self._metadata.resolve_fields(declared, trigger, document) if declared else {}
         values = {name: self._value_for(name, audit.get(name), resolutions) for name in _SLOTS}
-        return ResolvedIdentity(
-            shortname=values["shortname"],
-            cif=values["cif"],
-            system_id=values["system_id"],
+        return IdentityOutcome(
+            identity=ResolvedIdentity(
+                shortname=values["shortname"],
+                cif=values["cif"],
+                system_id=values["system_id"],
+            ),
+            fields={name: res.value for name, res in resolutions.items() if res.value is not None},
         )
 
     def _value_for(

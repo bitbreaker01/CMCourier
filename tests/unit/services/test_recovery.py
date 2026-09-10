@@ -6,6 +6,7 @@ mockean con :class:`MagicMock`.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 from unittest.mock import MagicMock
 
@@ -13,6 +14,7 @@ import pytest
 
 from cmcourier.adapters.tracking.sqlite import UploadedRecord
 from cmcourier.domain.exceptions import IDRViNotMappedError
+from cmcourier.services.identity import IdentitySlotConfig
 from cmcourier.services.recovery import As400Recovery, RecoveryItem, SyncProgress
 
 pytestmark = pytest.mark.unit
@@ -455,3 +457,72 @@ class TestProgress144:
             uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
         )
         assert rec.recover(apply=True).recovered == txns
+
+
+# ---------------------------------------------------------------------------
+# 147 REQ-004 — el CIF del recover se valida, no se convierte a 0
+# ---------------------------------------------------------------------------
+
+
+class TestCtenumValidado:
+    """147 REQ-004: acá NO hay trigger vivo ni cadena que re-correr — el CIF
+    sale de ``migration_log``, donde lo dejó la corrida original (que ya lo
+    resolvió y validó). Lo que sí se puede es re-validarlo contra el MISMO
+    ``identity.cif`` del YAML antes de mandarlo al wire: es barato, es
+    offline y evita repetir el ``22003`` que motivó la spec. Sin
+    ``identity.cif`` declarado, la única regla es la que nunca debió faltar:
+    un valor no numérico va NULL, jamás ``0``.
+    """
+
+    def _recover_one(self, cif: str, slot: IdentitySlotConfig | None = None) -> MagicMock:
+        as400 = MagicMock()
+        as400.read_states_by_txns.return_value = {}
+        indexing = MagicMock()
+        indexing.find_documents_by_txns.return_value = {"0000001": _document()}
+        mapping = MagicMock()
+        mapping.get_mapping.return_value = _mapping()
+        sqlite = MagicMock()
+        sqlite.uploaded_records.return_value = [dataclasses.replace(_uploaded("0000001"), cif=cif)]
+        recovery = As400Recovery(
+            sqlite_store=sqlite,
+            as400_store=as400,
+            indexing_service=indexing,
+            mapping_service=mapping,
+            cif_slot=slot,
+        )
+        self.result = recovery.recover(apply=True)
+        return as400
+
+    def test_un_cif_numerico_pasa_tal_cual(self) -> None:
+        as400 = self._recover_one("123456")
+        assert as400.insert_recovered_row.call_args.kwargs["ctenum"] == 123456
+
+    def test_un_cif_no_numerico_ya_no_escribe_un_cero(self) -> None:
+        as400 = self._recover_one("AB123")
+        assert as400.insert_recovered_row.call_args.kwargs["ctenum"] is None
+
+    def test_un_cif_vacio_va_null(self) -> None:
+        as400 = self._recover_one("")
+        assert as400.insert_recovered_row.call_args.kwargs["ctenum"] is None
+
+    def test_max_digits_con_fail_deja_el_txn_como_no_recuperable(self) -> None:
+        slot = IdentitySlotConfig(field="BAC_CIF", max_digits=9, on_missing="fail")
+        as400 = self._recover_one("1234567890", slot)
+        as400.insert_recovered_row.assert_not_called()
+        assert self.result.recovered == []
+        assert len(self.result.unrecoverable) == 1
+        reason = self.result.unrecoverable[0].reason
+        assert "identity.cif" in reason
+        assert "max_digits" in reason
+
+    def test_max_digits_con_warn_va_null(self) -> None:
+        slot = IdentitySlotConfig(field="BAC_CIF", max_digits=9, on_missing="warn")
+        as400 = self._recover_one("1234567890", slot)
+        assert as400.insert_recovered_row.call_args.kwargs["ctenum"] is None
+
+    def test_on_missing_default_usa_el_default_value(self) -> None:
+        slot = IdentitySlotConfig(
+            field="BAC_CIF", max_digits=9, on_missing="default", default_value="7"
+        )
+        as400 = self._recover_one("", slot)
+        assert as400.insert_recovered_row.call_args.kwargs["ctenum"] == 7

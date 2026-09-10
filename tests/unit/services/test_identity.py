@@ -308,3 +308,67 @@ class TestMaxDigits:
         identity = resolver.resolve(_trigger(shortname="RAROSA01"), _document())
         assert identity.cif == "AB123"
         assert identity.cif != "0"
+
+
+# ---------------------------------------------------------------------------
+# 147 REQ-003 — la semilla para S3 y el saber qué slots están declarados
+# ---------------------------------------------------------------------------
+
+
+class TestSemillaParaS3:
+    """``resolve_outcome`` devuelve, además de la identidad, el mapa
+    ``campo canónico → valor`` que S3 usa como semilla. Sin eso, S3 tendría
+    que volver a recorrer el grafo para llegar a lo mismo."""
+
+    def test_la_identidad_es_la_misma_que_devuelve_resolve(
+        self, metadata_service: MetadataService
+    ) -> None:
+        resolver = IdentityResolver(_full_config(), metadata_service)
+        outcome = resolver.resolve_outcome(_trigger(), _document())
+        assert outcome.identity == resolver.resolve(_trigger(), _document())
+
+    def test_los_campos_resueltos_viajan_por_nombre_canonico(
+        self, metadata_service: MetadataService
+    ) -> None:
+        outcome = IdentityResolver(_full_config(), metadata_service).resolve_outcome(
+            _trigger(), _document()
+        )
+        assert outcome.fields == {
+            "BAC_Shortname": "ACMESA01",
+            "BAC_CIF": "123456789",
+            "BAC_Sistema": "1",
+        }
+
+    def test_un_campo_que_no_resolvio_no_se_siembra(
+        self, metadata_service: MetadataService
+    ) -> None:
+        # `BAC_CIF` con on_missing warn y un shortname que no está en la tabla:
+        # el campo no resolvió, así que no puede sembrar nada en S3.
+        config = IdentityConfig(cif=IdentitySlotConfig(field="BAC_CIF", on_missing="warn"))
+        outcome = IdentityResolver(config, metadata_service).resolve_outcome(
+            _trigger(shortname="NO_EXISTE"), _document()
+        )
+        assert outcome.fields == {}
+
+    def test_sin_slots_declarados_no_hay_semilla(self, metadata_service: MetadataService) -> None:
+        outcome = IdentityResolver(IdentityConfig(), metadata_service).resolve_outcome(
+            _trigger(cif="999999"), _document()
+        )
+        assert outcome.fields == {}
+
+
+class TestSlotsDeclarados:
+    """S2 necesita saber si ``identity.system_id`` está declarado: si no lo
+    está, la clave del mapping sigue saliendo de ``trigger_system_id``."""
+
+    def test_declara_lo_que_el_yaml_declaro(self, metadata_service: MetadataService) -> None:
+        resolver = IdentityResolver(_full_config(), metadata_service)
+        assert resolver.declares("system_id") is True
+        assert resolver.declares("cif") is True
+
+    def test_no_declara_lo_ausente(self, metadata_service: MetadataService) -> None:
+        resolver = IdentityResolver(
+            IdentityConfig(cif=IdentitySlotConfig(field="BAC_CIF")), metadata_service
+        )
+        assert resolver.declares("system_id") is False
+        assert resolver.declares("shortname") is False

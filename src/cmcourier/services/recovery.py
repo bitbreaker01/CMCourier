@@ -33,9 +33,10 @@ from dataclasses import dataclass, field
 
 from cmcourier.adapters.tracking.as400_niarvilog import As400NiarvilogStore
 from cmcourier.adapters.tracking.sqlite import SQLiteTrackingStore, UploadedRecord
-from cmcourier.domain.exceptions import IDRViNotMappedError
+from cmcourier.domain.exceptions import IdentityResolutionError, IDRViNotMappedError
 from cmcourier.domain.models import RVABREPDocument
 from cmcourier.domain.ports import IDataSource
+from cmcourier.services.identity import IdentitySlotConfig, ctenum_for
 from cmcourier.services.indexing import IndexingService
 from cmcourier.services.mapping import MappingService
 
@@ -47,6 +48,12 @@ _log = logging.getLogger(__name__)
 
 # 144: cada cuántos INSERT completados se emite progreso en `insertando`.
 _INSERT_PROGRESS_EVERY = 50
+
+# 147 REQ-004: la "cadena" que el error de identidad reporta acá. No es una
+# cadena de fuentes porque no la hay: el valor lo escribió la corrida original.
+_TRACKING_CHAIN: tuple[str, ...] = (
+    "cif <- migration_log (SQLite): recorded by the original run; the chain was not re-run",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +85,8 @@ class _InsertPlan:
     document: RVABREPDocument
     idnbac: str
     tipidn: str
+    # 147 REQ-004: ``None`` ⇒ NULL. Nunca un ``0`` inventado.
+    ctenum: int | None = None
 
 
 class As400Recovery:
@@ -92,6 +101,7 @@ class As400Recovery:
         mapping_service: MappingService,
         rvabrep_source: IDataSource | None = None,
         write_workers: int = 8,
+        cif_slot: IdentitySlotConfig | None = None,
     ) -> None:
         self._sqlite = sqlite_store
         self._as400 = as400_store
@@ -99,6 +109,11 @@ class As400Recovery:
         self._mapping = mapping_service
         self._rvabrep_source = rvabrep_source
         self._write_workers = max(1, write_workers)
+        # 147 REQ-004: la política de ``identity.cif`` del YAML (``max_digits``
+        # + ``on_missing``). Acá no hay trigger vivo — el CIF sale de
+        # ``migration_log`` — así que la cadena no se re-corre, pero la
+        # validación sí: es offline y evita repetir el ``22003``.
+        self._cif_slot = cif_slot
 
     def close(self) -> None:
         """128: cierra lo que el wiring construyó para esta recovery (el
@@ -193,7 +208,15 @@ class As400Recovery:
             mapping = self._mapping.get_mapping(document.index7, rec.system_id or None)
         except IDRViNotMappedError:
             return RecoveryItem(rec.txn_num, f"id_rvi_not_mapped:{document.index7}")
-        return _InsertPlan(rec, document, mapping.id_corto, mapping.cmis_type)
+        # 147 REQ-004: el CIF se re-valida contra ``identity.cif`` ANTES de
+        # planificar el INSERT. Un ``on_missing: fail`` deja el txn como no
+        # recuperable con el motivo, en vez de mandar al wire el mismo valor
+        # que ya rompió con ``22003``.
+        try:
+            ctenum = ctenum_for(rec.cif, self._cif_slot, chain=_TRACKING_CHAIN)
+        except IdentityResolutionError as exc:
+            return RecoveryItem(rec.txn_num, str(exc))
+        return _InsertPlan(rec, document, mapping.id_corto, mapping.cmis_type, ctenum)
 
     def _insert_all(
         self, plans: list[_InsertPlan], emit: ProgressEmitter
@@ -235,7 +258,7 @@ class As400Recovery:
                 imgarc=rec.file_name,
                 imgtip=document.image_type,
                 ctecif=rec.shortname,
-                ctenum=int(rec.cif) if rec.cif.isdigit() else 0,
+                ctenum=plan.ctenum,
                 idnbac=plan.idnbac,
                 tipidn=plan.tipidn,
                 objidn=rec.cm_object_id,

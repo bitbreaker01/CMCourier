@@ -177,6 +177,16 @@ class MetadataResolution:
     """Resultado de ``resolve()``: la bolsa de metadata más el trigger
     (posiblemente self-healed).
 
+    .. deprecated:: 147
+       ``healed_trigger`` y ``healed_cif`` quedan **deprecados** por 147
+       REQ-004: la identidad del cliente ya no se deduce del trigger curado
+       sino de la :class:`~cmcourier.services.identity.ResolvedIdentity` que
+       S2 resuelve, y de ahí salen las TRES escrituras (``migration_log``,
+       ``CTECIF``/``CTENUM`` de RVIMGLOG y la clave del mapeo). Ninguna
+       escritura los lee ya. Se mantienen un ciclo por compatibilidad de
+       hooks y tests, y porque el ``document_cache`` (037) sigue guardando
+       ``trigger_cif`` para reconstruir un ``ClientTrigger`` en un cache hit.
+
     046: ``healed_trigger`` es polimórfico. Para inputs
     ``ClientTrigger`` el resolver puede producir un nuevo
     ``ClientTrigger`` con el campo CIF seteado al valor self-healed.
@@ -188,10 +198,12 @@ class MetadataResolution:
     """
 
     metadata: ResolvedMetadata
+    #: .. deprecated:: 147 — ver el docstring de la clase.
     healed_trigger: Trigger
     # 046: el CIF resuelto, capturado explícitamente para que el
     # `document_cache` pueda persistirlo sin inspeccionar el subtipo
     # de trigger.
+    #: .. deprecated:: 147 — ver el docstring de la clase.
     healed_cif: str | None = None
 
 
@@ -315,7 +327,7 @@ class MetadataService:
         self._dependencies = {
             name: self._declared_dependencies(name) for name in config.field_sources
         }
-        self._order_cache: dict[tuple[str, ...], tuple[str, ...]] = {}
+        self._order_cache: dict[tuple[tuple[str, ...], tuple[str, ...]], tuple[str, ...]] = {}
         # 147 REQ-005: memo de la CADENA, con vida de corrida. Ortogonal al
         # `prefetch` de tablas (que indexa la tabla entera al arrancar) y al
         # cache de metadata cross-batch de 037 (que vive en SQLite): éste
@@ -378,17 +390,27 @@ class MetadataService:
         trigger: Trigger,
         document: RVABREPDocument,
         mapping: CMMapping,
+        seed: Mapping[str, str] | None = None,
     ) -> MetadataResolution:
         """Resuelve cada campo requerido de metadata.
 
         147 REQ-001: se resuelve en orden TOPOLÓGICO, no en el orden de
         entrada, y sólo los campos pedidos más sus dependencias transitivas
         (el resto de ``field_sources`` ni se toca).
+
+        147 REQ-003: *seed* son los campos que la resolución de identidad ya
+        resolvió al INICIO de S2. Entran al dict de resolución como si ya se
+        hubieran resuelto en esta pasada, así que S3 no repite el trabajo: ni
+        el campo sembrado, ni las dependencias que existían SÓLO para llegar
+        a él (el ahorro es la cadena entera, no el último salto). El memo por
+        corrida (REQ-005) hace lo mismo entre documentos; la semilla lo hace
+        entre etapas del MISMO documento, donde el memo ya alcanzaría pero
+        igual pagaría el recorrido del grafo.
         """
         canonical_fields, canonical_to_friendly = self._normalize_fields_with_friendly(
             mapping.required_metadata_fields
         )
-        values = self._resolve_graph(canonical_fields, trigger, document)
+        values = self._resolve_graph(canonical_fields, trigger, document, seed)
         resolved = {f: values[f] for f in canonical_fields if f in values}
 
         # 046: el trigger es polimórfico. ``_trigger_cif`` extrae el
@@ -455,15 +477,21 @@ class MetadataService:
             deps.append(dep)
         return tuple(deps)
 
-    def _resolution_order(self, requested: Sequence[str]) -> tuple[str, ...]:
+    def _resolution_order(
+        self, requested: Sequence[str], seeded: frozenset[str] = frozenset()
+    ) -> tuple[str, ...]:
         """Orden topológico del cierre transitivo de *requested*: dependencias
-        antes que dependientes, y NADA que no haga falta para lo pedido."""
-        cache_key = tuple(requested)
+        antes que dependientes, y NADA que no haga falta para lo pedido.
+
+        147 REQ-003: un campo de *seeded* corta la bajada — ya está resuelto,
+        así que sus dependencias dejan de hacer falta.
+        """
+        cache_key = (tuple(requested), tuple(sorted(seeded)))
         cached = self._order_cache.get(cache_key)
         if cached is not None:
             return cached
         order: list[str] = []
-        done: set[str] = set()
+        done: set[str] = set(seeded)
         on_stack: set[str] = set()
 
         def visit(field: str) -> None:
@@ -490,6 +518,7 @@ class MetadataService:
         requested: Sequence[str],
         trigger: Trigger,
         document: RVABREPDocument,
+        seed: Mapping[str, str] | None = None,
     ) -> dict[str, str]:
         """Resuelve el cierre transitivo de *requested* en orden topológico.
 
@@ -497,10 +526,12 @@ class MetadataService:
         fuera del dict y su dependiente saltea esa fuente igual que un valor
         vacío. Un campo PEDIDO que no resolvió sí propaga su error — es el
         contrato pre-147 y no cambia.
+
+        147 REQ-003: *seed* arranca el dict con lo que S2 ya resolvió.
         """
         wanted = set(requested)
-        values: dict[str, str] = {}
-        for field in self._resolution_order(requested):
+        values: dict[str, str] = dict(seed or {})
+        for field in self._resolution_order(requested, frozenset(values)):
             try:
                 values[field] = self._resolve_one(field, trigger, document, values)
             except MetadataError:

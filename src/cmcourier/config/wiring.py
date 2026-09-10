@@ -245,6 +245,10 @@ def build_pipeline(
         s4_process_pool=s4_process_pool,
         keep_staged_files=config.assembly.keep_staged_files,
         s4_smart_routing=config.processing.s4_smart_routing,
+        # 147 REQ-003: MISMA instancia de MetadataService que usa S3 — el memo
+        # de la cadena vive adentro del servicio, así que un CIF resuelto en
+        # S2 sale gratis cuando S3 pide el mismo salto.
+        identity_resolver=build_identity_resolver(config, metadata_service),
     )
 
 
@@ -323,6 +327,9 @@ def build_as400_recovery(
         indexing_service=indexing_service,
         mapping_service=build_mapping_service(config.mapping),
         rvabrep_source=rvabrep_src,
+        # 147 REQ-004: el recover lee el CIF de SQLite (no hay trigger vivo),
+        # pero re-valida contra la MISMA política del YAML antes del wire.
+        cif_slot=build_identity_config(config.identity).cif,
     )
 
 

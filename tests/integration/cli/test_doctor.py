@@ -281,6 +281,7 @@ class TestRunDoctorHappyPath:
             "mssql_connectivity",  # 130
             "tracking_openable",
             "as400_sync",
+            "as400_column_widths",  # 147
             "mapping_completeness",
             "cm_manifest",  # 145
             "metadata_sources",
@@ -668,6 +669,7 @@ class TestDoctorCheckFilter:
                 "mssql_connectivity",  # 130
                 "tracking_openable",
                 "as400_sync",
+                "as400_column_widths",  # 147
                 "mapping_completeness",
                 "cm_manifest",  # 145
                 "metadata_sources",
@@ -1073,3 +1075,167 @@ class TestCmManifestCheck:
         )
         assert result.status == CheckStatus.PASS
         assert result.details["warning_count"] == "1"
+
+
+# ---------------------------------------------------------------------------
+# 147 REQ-006 — as400_column_widths
+# ---------------------------------------------------------------------------
+
+
+_SYSCOLUMNS_OK: list[dict[str, object]] = [
+    {"COLUMN_NAME": "CTECIF", "DATA_TYPE": "VARCHAR", "LENGTH": 30, "CCSID": 1208},
+    {
+        "COLUMN_NAME": "CTENUM",
+        "DATA_TYPE": "DECIMAL",
+        "LENGTH": 9,
+        "NUMERIC_PRECISION": 9,
+        "NUMERIC_SCALE": 0,
+    },
+    {"COLUMN_NAME": "IDNBAC", "DATA_TYPE": "VARCHAR", "LENGTH": 10, "CCSID": 1208},
+    {"COLUMN_NAME": "TIPIDN", "DATA_TYPE": "VARCHAR", "LENGTH": 128, "CCSID": 1208},
+    {"COLUMN_NAME": "OBJIDN", "DATA_TYPE": "VARCHAR", "LENGTH": 128, "CCSID": 1208},
+    {"COLUMN_NAME": "EERRMSG", "DATA_TYPE": "VARCHAR", "LENGTH": 1024, "CCSID": 1208},
+]
+
+
+def _syscolumns(**overrides: dict[str, object]) -> list[dict[str, object]]:
+    rows = [dict(r) for r in _SYSCOLUMNS_OK]
+    for name, patch in overrides.items():
+        for row in rows:
+            if row["COLUMN_NAME"] == name:
+                row.update(patch)
+    return rows
+
+
+def _write_sync_yaml(
+    tmp_path: Path,
+    *,
+    max_digits: int | None = 9,
+    library: str = "RVILIB",
+    table: str = "RVIMGLOG",
+) -> Path:
+    """La config del doctor + ``tracking.as400_sync`` + el bloque ``identity``."""
+    yaml_path = _write_yaml(tmp_path)
+    identity = ""
+    if max_digits is not None:
+        identity = (
+            "identity:\n"
+            "  cif:\n"
+            "    field: BAC_CIF\n"
+            "    on_missing: warn\n"
+            f"    max_digits: {max_digits}\n"
+        )
+    yaml_path.write_text(
+        "connections:\n"
+        "  rvilib:\n"
+        "    kind: as400\n"
+        "    host: as400.test\n"
+        "    database: RVILIB\n" + yaml_path.read_text() + "  as400_sync:\n"
+        "    enabled: true\n"
+        "    connection: rvilib\n"
+        f"    library: {library}\n"
+        f"    table: {table}\n" + identity
+    )
+    return yaml_path
+
+
+def _sync_secrets() -> Secrets:
+    return Secrets(
+        {
+            "cmis": Credential("tester", "secret-not-real"),
+            "rvilib": Credential("as400user", "not-real"),
+        }
+    )
+
+
+def _patch_syscolumns(monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, object]]) -> list[str]:
+    queries: list[str] = []
+
+    def _query(sql: str, params: list[object] | None = None) -> list[dict[str, object]]:
+        queries.append(sql)
+        return rows if "SYSCOLUMNS" in sql.upper() else []
+
+    fake = MagicMock()
+    fake.query = MagicMock(side_effect=_query)
+    monkeypatch.setattr(doctor_module, "As400DataSource", lambda **kw: fake)
+    return queries
+
+
+class TestAs400ColumnWidths:
+    """147 REQ-006: el ancho REAL de la columna se detecta el lunes en el
+    preflight, no el viernes con 1194 filas de ``22003``."""
+
+    def _run(
+        self, config_path: Path, monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, object]]
+    ) -> CheckResult:
+        _patch_syscolumns(monkeypatch, rows)
+        report = run_doctor(
+            load_config(config_path), _sync_secrets(), selected="as400_column_widths"
+        )
+        return report.results[0]
+
+    def test_skips_when_as400_sync_is_off(self, tmp_path: Path) -> None:
+        config = load_config(_write_yaml(tmp_path))
+        report = run_doctor(config, _secrets(), selected="as400_column_widths")
+        check = report.results[0]
+        assert check.name == "as400_column_widths"
+        assert check.status == CheckStatus.SKIP
+
+    def test_passes_when_the_real_definition_fits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        check = self._run(_write_sync_yaml(tmp_path), monkeypatch, _syscolumns())
+        assert check.status == CheckStatus.PASS, check.message
+
+    def test_reads_the_configured_library_and_table(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        queries = _patch_syscolumns(monkeypatch, _syscolumns())
+        run_doctor(
+            load_config(_write_sync_yaml(tmp_path, library="PRDLIB", table="RVIMGLOG")),
+            _sync_secrets(),
+            selected="as400_column_widths",
+        )
+        assert any("QSYS2.SYSCOLUMNS" in q.upper() for q in queries)
+
+    def test_fails_when_ctenum_is_narrower_than_max_digits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = _syscolumns(CTENUM={"NUMERIC_PRECISION": 7, "LENGTH": 7})
+        check = self._run(_write_sync_yaml(tmp_path, max_digits=9), monkeypatch, rows)
+        assert check.status == CheckStatus.FAIL
+        # La definición REAL y el valor configurado, los dos en el mensaje.
+        assert "CTENUM" in check.message
+        assert "7" in check.message
+        assert "9" in check.message
+
+    def test_fails_when_eerrmsg_cannot_hold_the_truncation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = _syscolumns(EERRMSG={"LENGTH": 256})
+        check = self._run(_write_sync_yaml(tmp_path), monkeypatch, rows)
+        assert check.status == CheckStatus.FAIL
+        assert "EERRMSG" in check.message
+        assert "1024" in check.message
+
+    def test_fails_when_a_column_is_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [r for r in _syscolumns() if r["COLUMN_NAME"] != "CTENUM"]
+        check = self._run(_write_sync_yaml(tmp_path), monkeypatch, rows)
+        assert check.status == CheckStatus.FAIL
+        assert "CTENUM" in check.message
+
+    def test_ccsid_1208_is_reported_as_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = _syscolumns(EERRMSG={"LENGTH": 256})
+        check = self._run(_write_sync_yaml(tmp_path), monkeypatch, rows)
+        assert "1208" in check.details["utf8_columns"]
+        assert "bytes" in check.details["ccsid_note"].lower()
+
+    def test_is_in_the_tracking_group(self) -> None:
+        from cmcourier.cli.doctor import CHECK_NAMES, group_of
+
+        assert "as400_column_widths" in CHECK_NAMES
+        assert group_of("as400_column_widths") == "tracking"

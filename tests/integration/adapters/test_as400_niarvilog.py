@@ -7,6 +7,7 @@ de la Constitución permite fakear los bindings del driver.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -879,3 +880,80 @@ class TestRetryBackoff:
 
         # Dos sleeps entre intentos: 2s y 4s (base * 2^0, base * 2^1).
         assert slept == [2.0, 4.0]
+
+
+# ---------------------------------------------------------------------------
+# 147 REQ-004 — CTECIF / CTENUM salen del MigrationRecord, no del audit_row
+# ---------------------------------------------------------------------------
+
+
+class TestIdentidadDelRecord:
+    """147 REQ-004: el adaptador deja de proyectar el trigger crudo.
+
+    Pre-147 ``_insert_new_claim`` leía ``trigger.audit_row()`` mientras el
+    tracking escribía el CIF curado — las dos tablas discrepaban sobre el
+    mismo documento (``metadata.py:281`` sólo reconstruía ``ClientTrigger``s,
+    y el camino de producción es ``RvabrepRowTrigger``). Ahora ambas leen el
+    MISMO :class:`MigrationRecord`, que el orquestador arma desde la
+    ``ResolvedIdentity``.
+    """
+
+    def _claim_params(
+        self, monkeypatch: pytest.MonkeyPatch, record: MigrationRecord, **kw: Any
+    ) -> list[Any]:
+        cur = _FakeCursor()
+        cur.rowcount_queue = [0, 1]  # UPDATE no matchea → INSERT
+        store, _, _ = _make_store(monkeypatch, cursor=cur)
+        _, document, mapping, trigger = _make_record(**kw)
+        store.try_claim(record=record, document=document, mapping=mapping, trigger=trigger)
+        return cur.executions[1][1]
+
+    def test_el_claim_usa_el_cif_del_record_no_el_del_trigger(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # El trigger trae el CIF crudo (999999); el record trae el resuelto.
+        record, _, _, _ = _make_record(cif="999999")
+        healed = dataclasses.replace(
+            record, trigger_shortname="RESUELTOSA01", trigger_cif="123456789"
+        )
+        params = self._claim_params(monkeypatch, healed, cif="999999")
+        assert "RESUELTOSA01" in params
+        assert 123456789 in params
+        assert 999999 not in params
+
+    def test_un_cif_no_numerico_ya_no_escribe_un_cero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        record, _, _, _ = _make_record()
+        raro = dataclasses.replace(record, trigger_cif="AB123")
+        params = self._claim_params(monkeypatch, raro)
+        assert 0 not in params
+        assert None in params
+
+    def test_un_cif_vacio_escribe_null(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        record, _, _, _ = _make_record()
+        vacio = dataclasses.replace(record, trigger_cif="")
+        params = self._claim_params(monkeypatch, vacio)
+        assert 0 not in params
+        assert None in params
+
+    def test_insert_terminal_tambien_lee_el_record(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cur = _FakeCursor()
+        cur.rowcount_queue = [1]
+        store, _, _ = _make_store(monkeypatch, cursor=cur)
+        record, document, mapping, trigger = _make_record(cif="999999")
+        healed = dataclasses.replace(
+            record, trigger_shortname="RESUELTOSA01", trigger_cif="123456789"
+        )
+        store.insert_terminal(
+            record=healed,
+            document=document,
+            mapping=mapping,
+            trigger=trigger,
+            stscod="O",
+            cm_object_id="cmis-1",
+        )
+        params = cur.executions[0][1]
+        assert "RESUELTOSA01" in params
+        assert 123456789 in params
+        assert 999999 not in params

@@ -34,9 +34,9 @@ __all__ = ["StagedPipeline", "RunReport"]
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -54,6 +54,7 @@ from cmcourier.domain.exceptions import (
     CMISClientError,
     CMISServerError,
     DefaultValidationFailedError,
+    IdentityResolutionError,
     IDRViNotMappedError,
     IndexingError,
     PDFAssemblyFailedError,
@@ -81,6 +82,7 @@ from cmcourier.observability.system_metrics import SystemMetricsSampler
 from cmcourier.services.auto_tune import AutoTuneController
 from cmcourier.services.cancellation import CancellationToken
 from cmcourier.services.document_cache import DocumentCacheService
+from cmcourier.services.identity import IdentityResolver, ResolvedIdentity
 from cmcourier.services.indexing import IndexingService
 from cmcourier.services.lane_controller import LaneController
 from cmcourier.services.lane_splitter import Lane
@@ -134,6 +136,13 @@ class _StageItem:
     metadata: ResolvedMetadata | None = None
     staged_file: StagedFile | None = None
     cm_object_id: str | None = None
+    # 147 REQ-003: la identidad del cliente, resuelta al INICIO de S2 y
+    # arrastrada hasta las tres escrituras (REQ-004). ``None`` hasta que S2
+    # corra, y para siempre cuando no hay resolver cableado (pre-147).
+    identity: ResolvedIdentity | None = None
+    # 147 REQ-003: los campos que costó resolver la identidad, indexados por
+    # nombre canónico. S3 los usa como semilla para no repetir la cadena.
+    identity_fields: Mapping[str, str] = field(default_factory=dict)
 
 
 def _size_of_stage_item(item: _StageItem) -> int:
@@ -173,8 +182,14 @@ class StagedPipeline:
         s4_process_pool: ProcessPoolExecutor | None = None,
         keep_staged_files: bool = False,
         s4_smart_routing: bool = False,
+        identity_resolver: IdentityResolver | None = None,
     ) -> None:
         self._trigger_strategy = trigger_strategy
+        # 147 REQ-003: sin resolver, S2 se comporta byte-idéntico al pre-147.
+        # El resolver comparte la instancia de ``metadata_service`` (el memo
+        # de la cadena vive adentro), así que lo que S2 consulta S3 no lo
+        # vuelve a pagar ni siquiera cuando la semilla no alcanza.
+        self._identity_resolver = identity_resolver
         self._indexing_service = indexing_service
         self._mapping_service = mapping_service
         self._metadata_service = metadata_service
@@ -754,14 +769,25 @@ class StagedPipeline:
         batch_id: str,
         stage: StageStatus,
     ) -> MigrationRecord:
-        # 046: los triggers son polimórficos; audit_row() devuelve la
-        # proyección best-effort para las columnas trigger_* de
-        # migration_log.
+        # 147 REQ-004: UN SOLO ORIGEN para las tres escrituras. La identidad
+        # que S2 resolvió es la que va a `migration_log`, la que va a
+        # CTECIF/CTENUM de RVIMGLOG (el adaptador la lee de ESTE record) y la
+        # que armó la clave del mapeo. Pre-147 el tracking guardaba el CIF
+        # curado y NIARVILOG el crudo: dos tablas discrepando sobre el mismo
+        # documento.
+        # 046: hasta que S2 corra (S1_PENDING / S1_SKIPPED) todavía no hay
+        # identidad; ahí se cae a la proyección best-effort del trigger, que
+        # es exactamente el comportamiento pre-147.
         audit = item.trigger.audit_row()
+        identity = item.identity
         return MigrationRecord(
-            trigger_shortname=audit.get("shortname") or "",
-            trigger_cif=audit.get("cif") or "",
-            trigger_system_id=audit.get("system_id") or "",
+            trigger_shortname=(
+                identity.shortname if identity is not None else audit.get("shortname") or ""
+            ),
+            trigger_cif=(identity.cif if identity is not None else audit.get("cif") or ""),
+            trigger_system_id=(
+                identity.system_id if identity is not None else audit.get("system_id") or ""
+            ),
             rvabrep_txn_num=item.document.txn_num,
             rvabrep_file_name=item.document.file_name,
             batch_id=batch_id,
@@ -828,6 +854,10 @@ class StagedPipeline:
                     # trigger — las re-corridas colisionan
                     # idempotentemente vía INSERT OR IGNORE.
                     filtered += 1
+                    # 147 REQ-004: acá NO hay identidad resuelta — el doc se
+                    # filtra en S1 y nunca llega a S2, que es donde la cadena
+                    # corre. La proyección del trigger es lo único disponible,
+                    # y es lo mismo que se escribía pre-147.
                     audit_system_id = audit.get("system_id") or ""
                     synthetic_txn = f"FILTERED__{audit_shortname}__{audit_system_id}"
                     filtered_record = MigrationRecord(
@@ -1006,9 +1036,18 @@ class StagedPipeline:
     def _s2_one(
         self, item: _StageItem, batch_id: str, rec: MetricsRecorder
     ) -> tuple[_StageItem | None, bool]:
-        """S2 mapping para un item. Devuelve ``(survivor_or_None,
-        counted_failure)`` — una falla ya marcada como done en una
-        corrida previa se descarta sin contar."""
+        """S2 para un item: PRIMERO la identidad, después el mapeo.
+
+        147 REQ-003: la resolución de identidad se cuelga del arranque de S2
+        en vez de tener etapa propia (ver "Fuera de alcance" del spec: una
+        S1.5 costaba migrar ``migration_log``, estados nuevos en toda la
+        máquina de recovery, consola y docs). El precio es que **S2 pasa a
+        poder hacer red**; el beneficio, que la identidad ya está disponible
+        para la clave del mapeo y para las tres escrituras.
+
+        Devuelve ``(survivor_or_None, counted_failure)`` — una falla ya
+        marcada como done en una corrida previa se descarta sin contar.
+        """
         # 097: cancelación cooperativa — el item se saltea sin contar
         # como falla; queda pendiente para un resume.
         if not self._cancel_token.checkpoint():
@@ -1022,12 +1061,15 @@ class StagedPipeline:
             txn_num=txn,
         ) as timer:
             try:
-                # 145 REQ-001: la clave del mapping es ``(sistema, IDRVI)``;
-                # el sistema sale del trigger que arrastró este doc hasta acá.
+                self._resolve_identity(item)
+                # 145 REQ-001: la clave del mapping es ``(sistema, IDRVI)``.
                 mapping = self._mapping_service.get_mapping(
-                    item.document.index7, trigger_system_id(item.trigger)
+                    item.document.index7, self._s2_system_id(item)
                 )
-            except IDRViNotMappedError as exc:
+            # 147 REQ-003: ``IdentityResolutionError`` desciende de
+            # ``MappingError`` justo para esto — una identidad que no resolvió
+            # es un ``S2_FAILED`` con su motivo, no un estado nuevo.
+            except (IDRViNotMappedError, IdentityResolutionError) as exc:
                 timer.mark_failed()
                 if not self._tracking_store.is_stage_done(txn, batch_id, StageStatus.S2_DONE):
                     record = self._build_record(item, batch_id, StageStatus.S2_PENDING)
@@ -1043,6 +1085,34 @@ class StagedPipeline:
             self._tracking_store.mark_stage_done(txn, batch_id, StageStatus.S2_DONE)
         item.mapping = mapping
         return item, False
+
+    def _resolve_identity(self, item: _StageItem) -> None:
+        """147 REQ-003: resuelve la identidad y la cuelga del item.
+
+        No-op sin resolver cableado. Levanta
+        :class:`~cmcourier.domain.exceptions.IdentityResolutionError` cuando
+        un slot con ``on_missing: fail`` no resolvió; el caller la traduce a
+        ``S2_FAILED``.
+        """
+        if self._identity_resolver is None:
+            return
+        outcome = self._identity_resolver.resolve_outcome(item.trigger, item.document)
+        item.identity = outcome.identity
+        item.identity_fields = outcome.fields
+
+    def _s2_system_id(self, item: _StageItem) -> str | None:
+        """La primera mitad de la clave del mapeo.
+
+        147 REQ-003: sale de la identidad SÓLO cuando el YAML declaró
+        ``identity.system_id``. Sin declarar, sigue saliendo de
+        ``trigger_system_id`` — un slot ausente se comporta exactamente como
+        antes del 147. El ``or None`` conserva la semántica de "vacío ⇒
+        comodín" que ``get_mapping`` espera.
+        """
+        resolver = self._identity_resolver
+        if item.identity is not None and resolver is not None and resolver.declares("system_id"):
+            return item.identity.system_id or None
+        return trigger_system_id(item.trigger)
 
     def _stage_s3(
         self,
@@ -1099,8 +1169,14 @@ class StagedPipeline:
                 healed_cif: str | None = cached.trigger_cif
             else:
                 try:
+                    # 147 REQ-003: lo que S2 ya resolvió entra como semilla —
+                    # un BAC_CIF que costó tres saltos no se vuelve a
+                    # consultar acá, ni sus eslabones intermedios.
                     resolution = self._metadata_service.resolve(
-                        item.trigger, item.document, item.mapping
+                        item.trigger,
+                        item.document,
+                        item.mapping,
+                        seed=item.identity_fields,
                     )
                 except (SourceFailedError, DefaultValidationFailedError) as exc:
                     timer.mark_failed()
