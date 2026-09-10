@@ -112,9 +112,11 @@ También chequea idempotencia cross-batch acá: si `tracking.is_uploaded(txn_num
 
 **Qué hace**: traduce el `ID RVI` (un identificador del modelo documental de RVI) al `cm_object_type` y la `cm_folder` correspondientes en Content Manager. La traducción se carga al startup desde un CSV (`MapeoRVI_CM.csv`) que mantiene el banco. Es un lookup en un dict.
 
+En modo **manifest** (145, recomendado) el lookup es por `(sistema, ID RVI)`, no sólo por `ID RVI`: `MappingService.get_mapping` primero busca la fila específica del sistema que trajo el trigger (`domain/models.py:trigger_system_id`) y, si no hay, cae al comodín (`IDSistema` vacío). Esto permite que el mismo `ID RVI` resuelva a clases CM distintas según de qué sistema vino el documento — algo que los modos consolidado y split no soportan (ahí todo el mapeo vive bajo un único comodín implícito, sin distinguir sistema). El resto de `CMMapping` (tipo, carpeta, propiedades requeridas) sale del manifest JSON de tipos CM en vez de columnas del CSV — ver [`how-to/cm-type-manifest.md`](../how-to/cm-type-manifest.md).
+
 **Dónde corre**: mismo thread que S1 (el producer/prep_worker). Es CPU-trivial — un dict.get().
 
-**Qué tira**: `IDRViNotMappedError` cuando el ID RVI no aparece en el mapping cargado. Eso indica que el banco agregó un tipo nuevo al modelo documental y nadie actualizó el CSV.
+**Qué tira**: `IDRViNotMappedError` cuando el ID RVI no aparece en el mapping cargado (ni para el sistema del trigger ni para el comodín). Eso indica que el banco agregó un tipo nuevo al modelo documental y nadie actualizó el CSV. En modo manifest, un `IDCM` que el CSV referencia pero el manifest no conoce no levanta esta excepción — la fila se descarta con WARNING al cargar y el código queda en `MappingService.missing_cm_codes`, visible en `types check` / doctor `cm_manifest`.
 
 **Qué deja en tracking**: `S2_PENDING` / `S2_DONE` / `S2_FAILED`.
 

@@ -160,6 +160,42 @@ Antes de 141, probar un código CM contra el servidor de verdad significaba `sin
 
 **Por qué un puerto aparte de `IUploader`.** `PracticeUploadPort` (`domain/ports.py`) declara sólo `upload_raw` y `delete_object`, y devuelve `RawResponse` — un modelo de dominio, no algo que el caso de uso se inventa para sí mismo, porque el adapter CMIS no puede depender de `services` (Principio I: el adapter depende del dominio, nunca al revés). Fusionar este comportamiento con `IUploader` habría significado agregarle al contrato que usa TODO el pipeline un modo "sin reintentos" que casi nadie necesita, o peor, hacer que la corrida productiva comparta código con una pantalla de diagnóstico que se comporta distinto a propósito. `CmisUploader` implementa los dos puertos — es el mismo cliente HTTP, la misma sesión — pero cada puerto expone únicamente el subconjunto de comportamiento que su caller necesita. Es la misma lógica por la que `[0]` reusa `cli/doctor.py:build_uploader` en vez de construir un tercer cliente: comparte la fontanería (config, credenciales de sesión) y difiere sólo en el contrato de upload.
 
+## Pestaña `M·MODELO`
+
+> 145 — `cli/console/modelo_pane.py`. El flujo completo del manifest está en
+> [`how-to/cm-type-manifest.md`](../how-to/cm-type-manifest.md).
+
+`M·MODELO` es la versión interactiva de `cmcourier types`: descubrir,
+comparar, actualizar y revisar el manifest de tipos CM sin salir de la
+consola. Va al final de `_TABS` (tecla `m` / `F11`, fuera del rango
+`1`–`9`,`0` de las demás pestañas), con el mismo patrón que
+`sync_pane.py` / `practice_pane.py`.
+
+Layout: una botonera con cuatro acciones (`[Descubrir]` `[Comparar]`
+`[Actualizar]` `[Verificar YAML]`) más una línea de progreso
+(`Static#md-progress`, igual que `#sy-progress` en `[8] SYNC`), una
+tabla de tipos (`DataTable#md-types`: IDCM, nombre, cuántas propiedades
+`usar`/`omitir`, revisado ✓/✗, carpeta ✓/✗/?), una tabla de propiedades
+del tipo seleccionado (`DataTable#md-props`: propiedad, requerida, tipo,
+largo, default, decisión), un campo de carpeta (`Input#md-folder`) y un
+log (`Log#md-log`).
+
+Dentro del pane, `space` alterna `usar`/`omitir` en la propiedad
+seleccionada, `enter` marca el tipo como revisado, y `f` enfoca el campo
+de carpeta. Cada cambio se guarda al JSON de inmediato — mismo store
+atómico que la CLI (`JsonTypeManifestStore`, tmp + `os.replace`), así que
+no hay un paso de "guardar" separado ni riesgo de perder ediciones si se
+cambia de pestaña.
+
+Las tres operaciones que hablan con CMIS (Descubrir, Comparar, Actualizar)
+corren en un hilo aparte y marshalizan a la UI con `_apply_on_ui` (mismo
+mecanismo que el resto de la consola desde 144); el botón que las
+disparó queda deshabilitado mientras corren, y el progreso (`SyncProgress`,
+144) se refleja en vivo en `#md-progress`. Sin credenciales CMIS de
+sesión, esas tres avisan en el log y no rompen nada — `Verificar YAML`
+(el equivalente de `types check`) y la revisión de decisiones/carpeta
+funcionan completamente offline, igual que `types review` por CLI.
+
 ## Lo que la consola NO es
 
 - **No es un editor de texto libre.** `[9]` edita cualquier clave del schema y `[2]` administra el registro de conexiones, pero los dos siguen siendo un *formulario*: no hay forma de escribir una clave que pydantic no conozca (`extra: forbid` la rechaza al validar antes de escribir), y cambiar el `kind` de un ítem de lista descarta sus otros campos (conserva `alias`/`name` si los tenía). Un anchor, una clave nueva que el schema todavía no modela, sigue necesitando el editor de texto.
@@ -177,3 +213,4 @@ Antes de 141, probar un código CM contra el servidor de verdad significaba `sin
 - [`reference/cli.md`](../reference/cli.md#console--consola-de-operación-123135) — flags, pestañas y teclas
 - [`how-to/probar-la-consola.md`](../how-to/probar-la-consola.md) — el recorrido guiado, paso a paso
 - [`adr/008-textual-tui.md`](../adr/008-textual-tui.md) — por qué Textual y no logs a stdout
+- [`how-to/cm-type-manifest.md`](../how-to/cm-type-manifest.md) — el manifest de tipos CM que gobierna `M·MODELO` (145)

@@ -49,7 +49,7 @@ metadata:
 - `trigger` — atributo del `Trigger` (o `audit_row()` para subtipos basados en fila).
 - `rvabrep` — atributo del `RVABREPDocument`.
 - `csv:<alias>` — CSV registrado en `metadata.sources` con `alias=<alias>`.
-- `as400:<alias>` — fuente AS400 con nombre. **Atención**: hoy `MetadataService._fetch_from_source` levanta `NotImplementedError` para `as400:`. Si necesitás AS400 como fuente de metadata, abrí un spec antes — ver `services/metadata.py:_fetch_from_source`.
+- `as400:<alias>` / `mssql:<alias>` (130) — fuente AS400/SQL Server con nombre, registrada en `metadata.sources`. Implementado desde el cambio 084 (`MetadataService._fetch_from_source` → `_fetch_lookup`, con prefetch en memoria o `get_by_fields` por documento según `prefetch_enabled`) — la nota anterior sobre `NotImplementedError` quedó obsoleta.
 
 ### 3. Registrá la fuente CSV/AS400 si todavía no existe
 
@@ -67,13 +67,17 @@ Para AS400 (con `kind: as400`), pasa `as400_connection` y exactamente uno de `ta
 
 ### 4. Vinculá la propiedad en el Modelo Documental
 
-El `CMISPropertyId` final (lo que sale por el wire al servidor CMIS) NO se configura en `cmis.*` — sale del CSV `MetadatosCM.csv` columna `CMISPropertyId` (configurable vía `mapping.metadatos_cmis_property_id_column`, default `"CMISPropertyId"`). Asegurate de que la fila correspondiente al `IDCorto` del documento tenga:
+El `CMISPropertyId` final (lo que sale por el wire al servidor CMIS) NO se configura en `cmis.*`. De dónde sale depende del modo de `mapping`:
+
+**Modo split (035, deprecado)**: del CSV `MetadatosCM.csv`, columna `CMISPropertyId` (configurable vía `mapping.metadatos_cmis_property_id_column`, default `"CMISPropertyId"`). Asegurate de que la fila correspondiente al `IDCorto` del documento tenga:
 
 | IDCorto | Metadato | Requerido | CMISPropertyId |
 |---------|----------|-----------|----------------|
 | `BAC_CC03` | `BAC_OPDT` | `Yes` | `bac:opdt` |
 
-El servicio de mapping (`services/mapping.py`) lee esta tabla y arma `CMMapping.cmis_property_ids` que luego `MetadataService` consulta para emitir la propiedad correcta. Si el campo no aparece acá, no llega al uploader.
+**Modo manifest (145, recomendado)**: no hay CSV que editar. El `CMISPropertyId` sale directo del `id` de la propiedad tal cual la publica Content Manager (`clbNonGroup.BAC_OPDT`, `cmcourier:BAC_OPDT`, etc.), descubierto con `cmcourier types discover`. Para que la propiedad viaje al wire, marcala `usar` en el tipo correspondiente (`cmcourier types review <IDCM> --use BAC_OPDT`, o desde `M·MODELO`) — el nombre canónico que ves ahí (`BAC_OPDT`, sin el prefijo `clbNonGroup.`/`cmcourier:`) es la misma clave que `metadata.field_sources` espera. Ver [`cm-type-manifest.md`](../cm-type-manifest.md).
+
+En ambos modos, el servicio de mapping (`services/mapping.py`) arma `CMMapping.cmis_property_ids` que luego `MetadataService` consulta para emitir la propiedad correcta. Si el campo no aparece ahí (fila de `MetadatosCM` faltante, o propiedad marcada `omitir`/inexistente en el manifest), no llega al uploader — y en modo manifest, `types check` te lo marca CRITICAL antes de que llegue a producción.
 
 ### 5. Test unit del campo nuevo
 
@@ -136,6 +140,7 @@ cmcourier doctor --config tu-config.yaml --check cm-targets
 
 ## Ver también
 
+- [`../cm-type-manifest.md`](../cm-type-manifest.md) — modo manifest (145): de dónde sale el `CMISPropertyId` cuando no hay `MetadatosCM.csv`
 - [`../../reference/config-schema.md`](../../reference/config-schema.md) — sección `metadata.*`
 - `src/cmcourier/services/metadata.py` — `MetadataService.resolve()` y `_fetch_from_source`
 - `src/cmcourier/services/mapping.py` — cómo se arma `CMMapping.cmis_property_ids` desde `MetadatosCM.csv`

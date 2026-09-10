@@ -196,7 +196,7 @@ La sub-key `columns` mapea nombres lógicos a físicos. Los defaults son los nom
 
 ## `mapping` — RVI → Content Manager
 
-S2 traduce el código de tipo RVI a la clase documental de Content Manager (carpeta destino, tipo de objeto, columnas obligatorias). Hay dos modos — elegís uno.
+S2 traduce el código de tipo RVI a la clase documental de Content Manager (carpeta destino, tipo de objeto, columnas obligatorias). Hay tres modos — elegís uno.
 
 ```yaml
 # Modo consolidado (un solo CSV, formato viejo, usado en tests)
@@ -205,13 +205,24 @@ mapping:
 ```
 
 ```yaml
-# Modo split (dos CSVs, formato de producción desde 035)
+# Modo manifest (145, RECOMENDADO para instalaciones nuevas) — MapeoRVI_CM.csv
+# reducido a IDSistema,IDRVI,IDCM + un manifest JSON descargado del servidor.
+mapping:
+  rvi_cm_csv_path: /data/MapeoRVI_CM.csv
+  type_manifest_path: /data/cm-type-manifest.json
+```
+
+```yaml
+# Modo split (dos CSVs, formato de producción desde 035 — DEPRECADO por 145,
+# sigue funcionando pero no es el recomendado para instalaciones nuevas)
 mapping:
   rvi_cm_csv_path: /data/MapeoRVI_CM.csv
   metadatos_csv_path: /data/MetadatosCM.csv
 ```
 
-El modo split separa el mapeo (`MapeoRVI_CM.csv`: código RVI → CMIS folder + type) del catálogo de metadatos por clase (`MetadatosCM.csv`: por clase CM, qué propiedades existen, cuáles son obligatorias, tipos). Los samples viven en [`reference-data/csv/`](../../reference-data/csv/).
+**Modo manifest (145, recomendado).** `MapeoRVI_CM.csv` sólo aporta lo que Content Manager NO sabe — qué código RVI (por sistema; `IDSistema` es opcional, vacío = comodín) va a qué clase (`IDCM`). Todo lo demás — tipo CMIS, carpeta, qué propiedades existen y cuáles son obligatorias — sale de un manifest JSON que bajás del servidor con `cmcourier types discover` y mantenés al día con `types diff` / `types update`. Nadie copia a mano lo que `getTypeDefinition` ya publica. Guía completa: [`../how-to/cm-type-manifest.md`](../how-to/cm-type-manifest.md).
+
+**Modo split (035, deprecado).** Separa el mapeo (`MapeoRVI_CM.csv`: código RVI → CMIS folder + type) de un catálogo de metadatos por clase, `MetadatosCM.csv` — **no** de "tipos": esa tabla lista qué propiedades existen para cada `IDCorto`, cuáles son obligatorias (`Requerido`) y su `CMISPropertyId` a nivel wire; no declara el tipo CMIS del objeto. El catálogo se mantiene a mano y, en instalaciones reales, se desincroniza del servidor con el tiempo — la razón de ser del modo manifest. Los samples viven en [`reference-data/csv/`](../../reference-data/csv/).
 
 ---
 

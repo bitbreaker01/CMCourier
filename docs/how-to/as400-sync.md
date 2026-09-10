@@ -80,8 +80,8 @@ asegurate de que tus fixtures matcheen:
 | ``CTECIF VARCHAR(30)`` | ← | ``trigger.shortname`` | El campo "shortname" del banco |
 | ``CTENUM DECIMAL(9,0)`` | ← | ``int(trigger.cif or 0)`` | CIF como numérico |
 | ``STSCOD CHAR(1)`` | ← | derivado | ``N`` / ``I`` / ``O`` / ``F`` |
-| ``IDNBAC VARCHAR(10)`` | ← | ``mapping.id_corto`` | ID de CM, ej ``CN01`` |
-| ``TIPIDN VARCHAR(128)`` | ← | ``mapping.cmis_type`` | Desde ``MapeoRVI_CM.CMISType`` en modo split (035); ``""`` en modo consolidado si está ausente |
+| ``IDNBAC VARCHAR(10)`` | ← | ``mapping.id_corto`` | ID de CM, ej ``CN01`` — sale de ``MapeoRVI_CM.IDCM`` en los tres modos |
+| ``TIPIDN VARCHAR(128)`` | ← | ``mapping.cmis_type`` | 145: en modo **manifest** sale del `type_id` del manifest JSON (`cmcourier types discover`), no de una columna del CSV. En modo split (035, deprecado) sale de ``MapeoRVI_CM.CMISType``; ``""`` en modo consolidado si está ausente |
 | ``OBJIDN VARCHAR(128)`` | ← | ``record.cm_object_id`` (post-S5) | El object id CMIS |
 | ``NUMREI INTEGER`` | ← | ``record.retry_count`` | Contador de retry |
 | ``PMRREI TIMESTAMP`` | ← | tiempo de claim | ``CURRENT_TIMESTAMP`` en INSERT |
@@ -314,6 +314,10 @@ propagan como ``As400CoordinationError`` inmediatamente.
 * Split de CSV de mapping: cambio 035 (``MapeoRVI_CM.csv`` +
   ``MetadatosCM.csv`` + columna ``CMISType`` —
   ver ``specs/035-mapping-csv-split/`` y ``MappingConfig``
-  en ``docs/configuration-guide.md``).
+  en ``docs/configuration-guide.md``), **deprecado por 145**.
+* Manifest de tipos CM: cambio 145 — ``MapeoRVI_CM.csv`` reducido a
+  ``IDSistema,IDRVI,IDCM`` + manifest JSON; ``IDNBAC``/``TIPIDN`` salen
+  de ahí en vez de columnas del CSV. Ver
+  [`cm-type-manifest.md`](cm-type-manifest.md).
 * Relacionados: cambio 014 (fuente trigger AS400 — mismo patrón pyodbc),
   cambio 028 (multi-batch — el claim ocurre adentro de ``_upload_one``).

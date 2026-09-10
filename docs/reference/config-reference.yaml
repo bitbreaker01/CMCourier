@@ -161,18 +161,29 @@ indexing:
 
 # -----------------------------------------------------------------------------
 # mapping  (REQUIRED)  — S2: the "Modelo Documental" (RVI → CM class map).
-# TWO mutually-exclusive modes — provide EXACTLY ONE:
-#   * consolidated: a single `csv_path` with all columns inline.
-#   * split:        `rvi_cm_csv_path` + `metadatos_csv_path` (the bank format).
+# THREE mutually-exclusive modes — provide EXACTLY ONE:
+#   * consolidated: a single `csv_path` with all columns inline (legacy / fixtures).
+#   * split:        `rvi_cm_csv_path` + `metadatos_csv_path` (035 — DEPRECATED by 145).
+#   * manifest:     `rvi_cm_csv_path` + `type_manifest_path` (145 — RECOMMENDED for
+#                   new installs). See docs/how-to/cm-type-manifest.md.
 # -----------------------------------------------------------------------------
 mapping:
   # --- consolidated mode --- one CSV, comma-separated METADATOS cell.
-  csv_path: /path/to/modelo_documental.csv # one of: consolidated XOR split
+  csv_path: /path/to/modelo_documental.csv # one of: consolidated XOR split XOR manifest
 
-  # ---- OR ---- split mode (035 / production bank format) — two CSVs joined
-  # by IDCM ↔ IDCorto. Set BOTH and leave `csv_path` unset.
+  # ---- OR ---- split mode (035 / production bank format, DEPRECATED by 145)
+  # — two CSVs joined by IDCM ↔ IDCorto. Set BOTH and leave `csv_path` /
+  # `type_manifest_path` unset.
   # rvi_cm_csv_path: /path/to/MapeoRVI_CM.csv      # one row per IDRVI
   # metadatos_csv_path: /path/to/MetadatosCM.csv   # multiple rows per IDCorto
+
+  # ---- OR ---- manifest mode (145, RECOMMENDED) — MapeoRVI_CM.csv reduced to
+  # IDSistema,IDRVI,IDCM + a JSON manifest downloaded with `cmcourier types
+  # discover`. Nothing about the CM type (CMIS type, folder, properties) is
+  # hand-maintained anymore. Set BOTH and leave `csv_path` / `metadatos_csv_path`
+  # unset.
+  # rvi_cm_csv_path: /path/to/MapeoRVI_CM.csv          # IDSistema,IDRVI,IDCM
+  # type_manifest_path: /path/to/cm-type-manifest.json # `cmcourier types discover` output
 
   # --- column names: consolidated-mode CSV ---
   id_rvi_column: "ID RVI"                          # (default: "ID RVI")
@@ -182,20 +193,26 @@ mapping:
   metadata_list_column: "METADATOS"                # (default: "METADATOS")
   cmis_type_column: "CMISType"                     # (default: "CMISType")
 
-  # --- column names: split-mode MapeoRVI_CM.csv ---
+  # --- column names: MapeoRVI_CM.csv (split AND manifest modes) ---
   rvi_cm_id_rvi_column: "IDRVI"                    # (default: "IDRVI")
   rvi_cm_id_cm_column: "IDCM"                      # (default: "IDCM")
+  # 145: system id of the RVI code. Manifest mode ONLY — optional; a missing
+  # column means every row falls to the wildcard system ("").
+  rvi_cm_id_sistema_column: "IDSistema"            # (default: "IDSistema")
+
+  # --- column names: split-mode-ONLY MapeoRVI_CM.csv extras (DEPRECATED) ---
   rvi_cm_clase_id_column: "IDClaseDocumental"      # (default: "IDClaseDocumental")
   rvi_cm_cmis_type_column: "CMISType"              # (default: "CMISType")
   rvi_cm_cmis_folder_column: "CMISFolder"          # (default: "CMISFolder")
 
-  # --- column names: split-mode MetadatosCM.csv ---
+  # --- column names: split-mode MetadatosCM.csv (DEPRECATED — manifest mode
+  # gets all of this from the JSON manifest instead) ---
   metadatos_id_corto_column: "IDCorto"             # (default: "IDCorto")
   metadatos_metadata_column: "Metadato"            # (default: "Metadato")
   metadatos_required_column: "Requerido"           # (default: "Requerido")
   metadatos_cmis_property_id_column: "CMISPropertyId"  # (default: "CMISPropertyId")
 
-  # --- value that marks a metadata field as required in MetadatosCM ---
+  # --- value that marks a metadata field as required in MetadatosCM (split mode) ---
   required_marker: "Yes"                           # (default: "Yes")
 
 

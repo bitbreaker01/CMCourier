@@ -6,6 +6,15 @@
 > el grupo `cm-targets`, las columnas `CMISFolder` / `CMISPropertyId` de
 > los CSVs de mapping split, los eventos de trace de payload de upload,
 > y la perilla de debug `unmask_pii`.
+>
+> **145 — sólo aplica a `mapping` en modo split.** Las columnas
+> `CMISFolder` / `CMISPropertyId` de este runbook son del modo split
+> (`rvi_cm_csv_path` + `metadatos_csv_path`, deprecado). En modo
+> **manifest** (`rvi_cm_csv_path` + `type_manifest_path`, recomendado) la
+> carpeta y los ids de propiedad CMIS salen del manifest JSON — no hay
+> columnas que llenar y el check equivalente es `cm_manifest` /
+> `types check`. Ver [`cm-type-manifest.md`](cm-type-manifest.md). El
+> modo consolidado (`csv_path`) tampoco tiene estas columnas.
 
 Antes de cualquier batch productivo querés que te respondan: **¿mi
 destino CMIS realmente acepta lo que CMCourier está por mandar?** Errores
@@ -35,7 +44,7 @@ Querés tres PASSes verdes:
 Si alguno es FAIL, arreglalo en tu config o en CMIS antes de correr la
 pipeline. El doctor sale non-zero así cualquier wrapper de CI / cron aborta.
 
-## §1 — Las dos columnas nuevas del CSV
+## §1 — Las dos columnas nuevas del CSV (modo split)
 
 ### `MapeoRVI_CM.CMISFolder`
 

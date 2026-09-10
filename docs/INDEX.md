@@ -55,6 +55,7 @@ Orientados a **problemas específicos**. Recetas: pre-requisitos → pasos → v
 | [`how-to/operator/interpret-the-tui-tabs.md`](how-to/operator/interpret-the-tui-tabs.md) | Atlas visual de las 5 tabs de la TUI de corrida |
 | [`how-to/probar-la-consola.md`](how-to/probar-la-consola.md) | La consola de operación paso a paso contra un Alfresco local (incluye SQL Server) |
 | [`how-to/as400-sync.md`](how-to/as400-sync.md) | Habilitar y operar el sync NIARVILOG (`claim` vs `periodic`) |
+| [`how-to/cm-type-manifest.md`](how-to/cm-type-manifest.md) | Descubrir/revisar/verificar el manifest de tipos CM, reemplazo de `MetadatosCM.csv` (145) |
 | [`how-to/build-offline-installer.md`](how-to/build-offline-installer.md) | Armar el bundle air-gapped para la estación del banco (101, 142) |
 
 Índice: [`how-to/operator/README.md`](how-to/operator/README.md).

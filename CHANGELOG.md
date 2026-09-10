@@ -32,6 +32,20 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
   en lugar de `corriendo`, y `completada` recién cuando todo quedó
   escrito.
 
+- **Manifest de tipos CM: adiós `MetadatosCM.csv` a mano (145).** Nuevo
+  modo `manifest` de `MappingConfig` (`rvi_cm_csv_path` +
+  `type_manifest_path`): un JSON versionable con lo que Content Manager
+  publica en `typeDescendants` — tipo, carpeta y propiedades escribibles
+  por clase — reemplaza el catálogo `MetadatosCM.csv` mantenido a mano.
+  Grupo `cmcourier types` nuevo (`discover`, `show`, `diff`, `update`,
+  `review`; `check` en camino) para descubrir el manifest, revisar qué
+  propiedades van al wire (`usar`/`omitir`) y mantenerlo sincronizado sin
+  perder decisiones ya tomadas. Pestaña `M·MODELO` en la consola
+  (`Descubrir`/`Comparar`/`Actualizar`/`Verificar YAML`) y check
+  `cm_manifest` en `doctor` (grupo `mapping`, SKIP fuera de modo
+  manifest) completan el flujo. Ver
+  [`docs/how-to/cm-type-manifest.md`](docs/how-to/cm-type-manifest.md).
+
 ### Changed
 
 - **`sync recover` y la pasada final del reconciliador dejan de ser un
@@ -53,6 +67,26 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
   pseudo-tabla "canónica" se rechazaba con `PWS9801 - Function rejected
   by user exit program`. Una prueba fija no sirve cuando el permiso se
   da tabla por tabla: ahora se toca la tabla que el pipeline va a usar.
+- **`MapeoRVI_CM.csv` en modo manifest baja a tres columnas
+  (145).** `IDSistema,IDRVI,IDCM` — se van `IDClaseDocumental`,
+  `CMISType`, `CMISFolder` (ese trío queda del lado del modo split,
+  deprecado; en manifest sale todo del JSON). `IDSistema` es opcional
+  (ausente ≡ comodín) y la clave del mapeo pasa de `IDRVI` a `(sistema,
+  IDRVI)`: la misma fila `IDRVI` puede resolver a un `IDCM` distinto
+  según el sistema del trigger, con la fila de `IDSistema` vacío como
+  comodín cuando no hay una específica. `inspect mapping <id_rvi>` gana
+  `--system` para probar esa resolución desde la CLI.
+
+### Deprecated
+
+- **`mapping.metadatos_csv_path` / modo split (145).** El modo split
+  (`rvi_cm_csv_path` + `metadatos_csv_path`, 035) sigue funcionando sin
+  cambios, pero el modo recomendado para instalaciones nuevas pasa a ser
+  **manifest** (`rvi_cm_csv_path` + `type_manifest_path`): nadie debería
+  seguir copiando a mano lo que `cmcourier types discover` baja del
+  servidor. `_build_metadatos_index` y el modo split no se borran en
+  este cambio — se retiran en uno posterior, cuando el operador termine
+  de migrar. Ver [`docs/how-to/cm-type-manifest.md`](docs/how-to/cm-type-manifest.md).
 
 ### Fixed
 

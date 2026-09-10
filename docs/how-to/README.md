@@ -57,7 +57,8 @@ Guías más densas, cada una atada a una feature concreta del sistema.
 | [`document-cache.md`](document-cache.md) | Cache cross-batch de metadatos (037, POST-MVP §9) |
 | [`log-analysis.md`](log-analysis.md) | Análisis offline con `cmcourier analyze` (027) |
 | [`mock-rvabrep-generator.md`](mock-rvabrep-generator.md) | Generar CSV RVABREP sintético (039) |
-| [`cmis-target-preflight.md`](cmis-target-preflight.md) | Pre-flight CMIS folders + properties (038) |
+| [`cm-type-manifest.md`](cm-type-manifest.md) | Manifest de tipos CM: `types discover`/`review`/`check`/`update`, reemplazo de `MetadatosCM.csv` (145) |
+| [`cmis-target-preflight.md`](cmis-target-preflight.md) | Pre-flight CMIS folders + properties (038, modo split) |
 | [`staging-dry-run.md`](staging-dry-run.md) | Dry-run con datos reales |
 | [`local-staging-simulation.md`](local-staging-simulation.md) | Alfresco + Docker para simular CMIS |
 | [`probar-la-consola.md`](probar-la-consola.md) | Probar la consola interactiva `cmcourier console` en local (123-125) |

@@ -260,6 +260,7 @@ Checks individuales (`CHECK_NAMES`, en orden de ejecución):
 | `tracking_openable` | connections | La SQLite de tracking abre en WAL. |
 | `as400_sync` | connections | Conexión + tabla NIARVILOG cuando `tracking.as400_sync.enabled`. SKIP si está off. |
 | `mapping_completeness` | mapping | El Modelo Documental tiene ≥1 fila. |
+| `cm_manifest` | mapping | (145) Cruza manifest ↔ YAML ↔ `MapeoRVI_CM.csv` y reporta sólo los CRITICAL (mismo motor que `types check`, ver [`how-to/cm-type-manifest.md`](../how-to/cm-type-manifest.md)). SKIP si `mapping` no está en modo manifest. |
 | `metadata_sources` | metadata | Cada fuente de `metadata.sources` (csv / as400 / mssql) devuelve ≥1 fila. |
 | `cm_type_alignment` | cm-types, cm-targets | Cada `cm_object_type` resuelve por `getTypeDefinition`. |
 | `cmis_folders_exist` | cm-targets | Cada `CMISFolder` declarado en MapeoRVI_CM existe en el repositorio. |
@@ -269,6 +270,169 @@ Checks individuales (`CHECK_NAMES`, en orden de ejecución):
 Exit codes: `0` si todos los checks pasan, `1` si alguno falla, `2` si la config no carga, `3` si el doctor crashea.
 
 Source: `cli/app.py:429-468`, `cli/doctor.py`.
+
+---
+
+## `types` — manifest de tipos CM (145)
+
+Group: `cli/commands/types.py`. El manifest es la foto de lo que Content
+Manager publica en `typeDescendants` — ver la guía completa en
+[`how-to/cm-type-manifest.md`](../how-to/cm-type-manifest.md). Path del
+manifest por default: `mapping.type_manifest_path` del YAML; override con
+`--manifest PATH` en cualquier subcomando. Los comandos que hablan con el
+servidor (`discover`, `diff`, `update`, `show --live`) necesitan
+`CMIS_USERNAME` / `CMIS_PASSWORD`; `show` y `review` sobre el manifest
+local corren offline, sin `--config`. El progreso va a **stderr** (144).
+
+```
+$ cmcourier types --help
+Usage: cmcourier types [OPTIONS] COMMAND [ARGS]...
+
+  Manifest de tipos CM: descubrir, comparar, revisar (145).
+
+Options:
+  --help  Show this message and exit.
+
+Commands:
+  diff      Compara el manifest local contra lo que hoy publica el servidor.
+  discover  Descubre los tipos del servidor y escribe el manifest desde...
+  review    Edita las decisiones de un tipo y lo firma.
+  show      Muestra la ficha de un tipo: propiedades, límites y decisiones.
+  update    Trae los cambios del servidor conservando tus decisiones.
+```
+
+### `types discover`
+
+```
+Usage: cmcourier types discover [OPTIONS]
+
+  Descubre los tipos del servidor y escribe el manifest desde cero.
+
+  Ojo: pisa las decisiones que ya hayas tomado. Si el manifest tiene tipos
+  revisados, el comando se planta salvo que le pases ``--force``; lo que
+  querés casi siempre es ``types update``.
+
+Options:
+  -c, --config FILE    YAML del pipeline (sección `cmis` +
+                       `mapping.type_manifest_path`).  [required]
+  --manifest FILE      Manifest JSON a usar. Default:
+                       `mapping.type_manifest_path` del YAML.
+  --no-verify-folders  No chequea contra el server que cada carpeta derivada
+                       exista (más rápido).
+  --force              Descubre de cero aunque el manifest tenga tipos ya
+                       revisados.
+  --help               Show this message and exit.
+```
+
+### `types show <IDCM>`
+
+```
+Usage: cmcourier types show [OPTIONS] IDCM
+
+  Muestra la ficha de un tipo: propiedades, límites y decisiones.
+
+Options:
+  -c, --config FILE  YAML del pipeline. Opcional si pasás --manifest: se
+                     trabaja offline.
+  --manifest FILE    Manifest JSON a usar. Default:
+                     `mapping.type_manifest_path` del YAML.
+  --live             Lee el tipo del servidor en vez del manifest (requiere
+                     --config).
+  --help             Show this message and exit.
+```
+
+### `types diff`
+
+```
+Usage: cmcourier types diff [OPTIONS]
+
+  Compara el manifest local contra lo que hoy publica el servidor.
+
+  Exit 1 si hay diferencias (sirve en un cron o un pre-flight), 0 si el
+  manifest está al día.
+
+Options:
+  -c, --config FILE  YAML del pipeline (sección `cmis` +
+                     `mapping.type_manifest_path`).  [required]
+  --manifest FILE    Manifest JSON a usar. Default:
+                     `mapping.type_manifest_path` del YAML.
+  --help             Show this message and exit.
+```
+
+### `types update`
+
+```
+Usage: cmcourier types update [OPTIONS]
+
+  Trae los cambios del servidor conservando tus decisiones.
+
+  Las propiedades que sobreviven mantienen su ``usar``/``omitir``, las nuevas
+  entran con la decisión sugerida y el tipo vuelve a ``reviewed=False`` con la
+  lista de cambios para que la mires.
+
+Options:
+  -c, --config FILE  YAML del pipeline (sección `cmis` +
+                     `mapping.type_manifest_path`).  [required]
+  --manifest FILE    Manifest JSON a usar. Default:
+                     `mapping.type_manifest_path` del YAML.
+  --only IDCM        Acota el merge a estos ID cortos. Repetible. Default:
+                     todos.
+  --help             Show this message and exit.
+```
+
+### `types review <IDCM>`
+
+```
+Usage: cmcourier types review [OPTIONS] IDCM
+
+  Edita las decisiones de un tipo y lo firma. Corre offline.
+
+Options:
+  -c, --config FILE  YAML del pipeline. Opcional si pasás --manifest: se
+                     trabaja offline.
+  --manifest FILE    Manifest JSON a usar. Default:
+                     `mapping.type_manifest_path` del YAML.
+  --use PROP         Manda esta propiedad al wire. Acepta id completo o nombre
+                     canónico. Repetible.
+  --omit PROP        No manda esta propiedad (gana el default del servidor).
+                     Repetible.
+  --folder PATH      Fija la carpeta destino a mano; deja de derivarse del
+                     localName.
+  --done             Marca el tipo como revisado y limpia sus cambios
+                     pendientes.
+  --help             Show this message and exit.
+```
+
+### `types check`
+
+```text
+Usage: cmcourier types check [OPTIONS]
+
+  Cruza el manifest con el YAML y con ``MapeoRVI_CM.csv`` (145 REQ-005).
+
+  Corre offline: no hace falta ni red ni credenciales `cmis`. Exit 1 si hay
+  algún CRITICAL — lo que rompería el upload en producción; los WARNING e INFO
+  se listan igual pero no cambian el exit code.
+
+Options:
+  -c, --config FILE  YAML del pipeline (sección `cmis` +
+                     `mapping.type_manifest_path`).  [required]
+  --manifest FILE    Manifest JSON a usar. Default:
+                     `mapping.type_manifest_path` del YAML.
+  --json             Emite el reporte como JSON en vez de texto agrupado por
+                     severidad.
+```
+
+Se niega (exit 1) si `mapping` no está en modo manifest; exit 2 si el YAML
+o el manifest no se pueden leer. `--manifest` gobierna los DOS extremos del
+cruce (el `MappingService` que produce `missing_cm_codes` y el manifest
+contra el que se verifica), así que nunca mezcla dos manifests. El motor
+(`services/manifest_check.py:run_manifest_check`) es el mismo que corre el
+check `cm_manifest` de `doctor` — ver
+[`how-to/cm-type-manifest.md`](../how-to/cm-type-manifest.md#3-verificar-la-alineación-types-check)
+para las reglas exactas de cada severidad.
+
+Source: `cli/commands/types.py`.
 
 ---
 
@@ -333,9 +497,10 @@ Imprime las filas RVABREP que S1 produciría para el trigger.
 
 Imprime el mapping de CM (folder, type, fields requeridos) para un ID RVI.
 
-| Flag | Type | Default |
-|------|------|---------|
-| `--config` / `-c` | Path (required) | — |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--config` / `-c` | Path (required) | — | — |
+| `--system` | str | `None` | (145) Sistema de origen (`IDSistema`) — primero busca `(sistema, id_rvi)`, si no matchea cae al comodín. Sin él, va directo al comodín. Sólo tiene efecto en modo manifest; los modos consolidado y split lo ignoran (todo vive bajo el comodín). |
 
 ### `inspect mapping-stats`
 

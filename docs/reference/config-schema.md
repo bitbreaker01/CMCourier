@@ -198,35 +198,45 @@ Mapeo lógico → físico para RVABREP. Todos `str`. Defaults coinciden con la n
 
 ## Mapping (`mapping`)
 
-Dos modos mutuamente excluyentes. Validator `_exactly_one_mode` lo hace explotar si se mezclan.
+Tres modos mutuamente excluyentes. Validator `_exactly_one_mode` lo hace explotar si se mezclan.
+
+- **Consolidado** (`csv_path`): un único CSV, formato legacy usado en fixtures de test.
+- **Split** (`rvi_cm_csv_path` + `metadatos_csv_path`, 035): **DEPRECADO por 145**. Sigue funcionando, pero el modo recomendado para instalaciones nuevas es manifest.
+- **Manifest** (`rvi_cm_csv_path` + `type_manifest_path`, 145, el modo nuevo): `MapeoRVI_CM.csv` reducido a `IDSistema,IDRVI,IDCM` más el manifest JSON de tipos CM que bajó `cmcourier types discover`. Todo lo que el servidor ya sabe (tipo, carpeta, propiedades) sale del manifest — nadie mantiene `MetadatosCM.csv` a mano. Ver la guía completa: [`how-to/cm-type-manifest.md`](../how-to/cm-type-manifest.md).
 
 ### `MappingConfig`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `csv_path` | `FilePath \| None` | `None` | Modo consolidado (legacy / fixtures). |
-| `rvi_cm_csv_path` | `FilePath \| None` | `None` | Modo split — `MapeoRVI_CM.csv`. |
-| `metadatos_csv_path` | `FilePath \| None` | `None` | Modo split — `MetadatosCM.csv`. |
+| `rvi_cm_csv_path` | `FilePath \| None` | `None` | Modos split y manifest — `MapeoRVI_CM.csv`. |
+| `metadatos_csv_path` | `FilePath \| None` | `None` | Modo split (**deprecado**, 145) — `MetadatosCM.csv`. |
+| `type_manifest_path` | `FilePath \| None` | `None` | Modo manifest (145) — JSON de `cmcourier types discover`. |
 | `id_rvi_column` | str | `"ID RVI"` | Consolidado. |
 | `clase_id_column` | str | `"ID CLASE DOCUMENTAL"` | Consolidado. |
 | `id_corto_column` | str | `"ID Corto"` | Consolidado. |
 | `clase_name_column` | str | `"CLASE DOCUMENTAL"` | Consolidado. |
 | `metadata_list_column` | str | `"METADATOS"` | Consolidado. |
 | `cmis_type_column` | str | `"CMISType"` | Consolidado. |
-| `rvi_cm_id_rvi_column` | str | `"IDRVI"` | Split — MapeoRVI_CM. |
-| `rvi_cm_id_cm_column` | str | `"IDCM"` | Split — MapeoRVI_CM. |
-| `rvi_cm_clase_id_column` | str | `"IDClaseDocumental"` | Split — MapeoRVI_CM. |
-| `rvi_cm_cmis_type_column` | str | `"CMISType"` | Split — MapeoRVI_CM. |
-| `rvi_cm_cmis_folder_column` | str | `"CMISFolder"` | Split — MapeoRVI_CM. |
-| `metadatos_id_corto_column` | str | `"IDCorto"` | Split — MetadatosCM. |
-| `metadatos_metadata_column` | str | `"Metadato"` | Split — MetadatosCM. |
-| `metadatos_required_column` | str | `"Requerido"` | Split — MetadatosCM. |
-| `metadatos_cmis_property_id_column` | str | `"CMISPropertyId"` | Split — MetadatosCM. |
-| `required_marker` | str | `"Yes"` | Valor que marca campo obligatorio. |
+| `rvi_cm_id_rvi_column` | str | `"IDRVI"` | Split y manifest — MapeoRVI_CM. |
+| `rvi_cm_id_cm_column` | str | `"IDCM"` | Split y manifest — MapeoRVI_CM. |
+| `rvi_cm_id_sistema_column` | str | `"IDSistema"` | Manifest (145). Sistema de origen del código RVI. **Opcional** en modo manifest: columna ausente ≡ todas las filas al comodín (`""`). No aplica al modo split. |
+| `rvi_cm_clase_id_column` | str | `"IDClaseDocumental"` | Split (deprecado) — MapeoRVI_CM. No se lee en modo manifest. |
+| `rvi_cm_cmis_type_column` | str | `"CMISType"` | Split (deprecado) — MapeoRVI_CM. No se lee en modo manifest (el tipo sale del manifest). |
+| `rvi_cm_cmis_folder_column` | str | `"CMISFolder"` | Split (deprecado) — MapeoRVI_CM. No se lee en modo manifest (la carpeta sale del manifest). |
+| `metadatos_id_corto_column` | str | `"IDCorto"` | Split (deprecado) — MetadatosCM. |
+| `metadatos_metadata_column` | str | `"Metadato"` | Split (deprecado) — MetadatosCM. |
+| `metadatos_required_column` | str | `"Requerido"` | Split (deprecado) — MetadatosCM. |
+| `metadatos_cmis_property_id_column` | str | `"CMISPropertyId"` | Split (deprecado) — MetadatosCM. |
+| `required_marker` | str | `"Yes"` | Valor que marca campo obligatorio (consolidado y split). |
 
-Reglas:
-- Consolidado: setear `csv_path`, dejar los del modo split en `None`.
-- Split: setear `rvi_cm_csv_path` Y `metadatos_csv_path`, dejar `csv_path` en `None`.
+Reglas (validator `_exactly_one_mode`):
+- Consolidado: setear `csv_path`, dejar los demás en `None`.
+- Split (**deprecado**): setear `rvi_cm_csv_path` Y `metadatos_csv_path`, dejar `csv_path` y `type_manifest_path` en `None`.
+- Manifest (145, recomendado): setear `rvi_cm_csv_path` Y `type_manifest_path`, dejar `csv_path` y `metadatos_csv_path` en `None`.
+- `rvi_cm_csv_path` exige EXACTAMENTE uno de `metadatos_csv_path` / `type_manifest_path` — nunca los dos, nunca ninguno.
+
+En modo manifest, las columnas requeridas de `MapeoRVI_CM.csv` son sólo `IDRVI` e `IDCM` (`rvi_cm_id_rvi_column` / `rvi_cm_id_cm_column`); `IDSistema` es opcional. La clave del mapeo pasa a ser `(sistema, IDRVI)` — ver [`MappingService.get_mapping`](../how-to/cm-type-manifest.md) — mientras que los modos consolidado y split siguen indexando sólo por `IDRVI` (todo bajo el comodín).
 
 ---
 
@@ -511,3 +521,4 @@ dos mitades (un usuario sin password NO cuenta como credencial).
 - [Explanation: architecture overview](../explanation/architecture-overview.md) — el por qué detrás de los defaults de `AutoTuneConfig`.
 - [How-to: heavy/light lanes](../how-to/heavy-light-lanes.md) — tunear `HeavyLightLanesConfig`.
 - [How-to: document cache](../how-to/document-cache.md) — habilitar `metadata.cache`.
+- [How-to: manifest de tipos CM](../how-to/cm-type-manifest.md) — modo `mapping` recomendado (145), reemplaza `metadatos_csv_path`.
