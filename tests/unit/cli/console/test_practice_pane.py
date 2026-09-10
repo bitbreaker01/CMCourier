@@ -188,7 +188,8 @@ class TestE9Shell:
     def test_tab_is_last_and_has_keys(self) -> None:
         from cmcourier.cli.console.app import _TABS
 
-        assert _TABS[-1] == "prueba"
+        # 145 agregó `modelo` después: PRUEBA sigue siendo la última numerada.
+        assert _TABS[-2] == "prueba"
         keys = {binding.key for binding in ConsoleApp.BINDINGS}  # type: ignore[attr-defined]
         assert "0" in keys
         assert "f10" in keys
@@ -199,8 +200,9 @@ class TestE9Shell:
         assert "validar código" in help_text
         assert "generar y subir" in help_text
         assert "borrar el último subido" in help_text
-        assert "F1–F10" in help_text
-        assert "1-9,0 / F1-F10" in help_text
+        # 145 sumó la pestaña `m` (F11): la leyenda global cubre hasta F11.
+        assert "F1–F11" in help_text
+        assert "1-9,0,m / F1-F11" in help_text
 
     def test_key_zero_and_f10_switch_to_the_tab(self, tmp_path: Path) -> None:
         async def _run() -> None:

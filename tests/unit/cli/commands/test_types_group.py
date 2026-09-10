@@ -8,6 +8,7 @@ config mínima con la sección `cmis` y ``mapping.type_manifest_path``.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,6 +24,10 @@ from cmcourier.domain.cm_types import DECISION_OMIT, DECISION_USE
 from cmcourier.services.type_manifest import build_manifest
 
 pytestmark = pytest.mark.unit
+
+_TESTS_ROOT = Path(__file__).parents[3]
+_PIPE = _TESTS_ROOT / "fixtures" / "pipeline"
+_ASM = _TESTS_ROOT / "fixtures" / "assembly"
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +427,168 @@ class TestTypesReview145:
 
         assert result.exit_code == 1
         assert "ZZ99" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# check (145 REQ-005)
+# ---------------------------------------------------------------------------
+
+
+def _rvi_cm_csv(path: Path, rows: list[tuple[str, str, str]]) -> Path:
+    """145 REQ-001: ``MapeoRVI_CM.csv`` reducido a ``IDSistema,IDRVI,IDCM``."""
+    lines = ["IDSistema,IDRVI,IDCM"]
+    lines.extend(f"{sistema},{id_rvi},{id_cm}" for sistema, id_rvi, id_cm in rows)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+_DEFAULT_FIELD_SOURCES = """    BAC_CIF:
+      sources:
+        - source_type: trigger
+          lookup_value_column: cif
+"""
+
+
+def _check_yaml(
+    tmp_path: Path,
+    *,
+    rvi_cm_csv: Path,
+    manifest_json: Path | None,
+    field_sources: str = _DEFAULT_FIELD_SOURCES,
+) -> Path:
+    """YAML REAL en modo manifest — ``check`` corre contra la config posta."""
+    triggers = tmp_path / "triggers.csv"
+    triggers.write_text("ShortName,CIF,SystemID\nTESTCLIENT01,123456,1\n", encoding="utf-8")
+    mapping = (
+        f"  rvi_cm_csv_path: {rvi_cm_csv}\n  type_manifest_path: {manifest_json}\n"
+        if manifest_json is not None
+        else f"  csv_path: {_TESTS_ROOT / 'fixtures' / 'services' / 'modelo_documental.csv'}\n"
+    )
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text(
+        f"""trigger:
+  csv_path: {triggers}
+indexing:
+  source:
+    kind: csv
+    csv_path: {_PIPE / "rvabrep.csv"}
+mapping:
+{mapping}metadata:
+  field_sources:
+{field_sources}assembly:
+  source_root: {_ASM}
+  temp_dir: {tmp_path / "stg"}
+cmis:
+  base_url: http://cm/services
+  repo_id: REPO
+tracking:
+  db_path: {tmp_path / "tracking.db"}
+observability:
+  log_dir: {tmp_path / "logs"}
+""",
+        encoding="utf-8",
+    )
+    return yaml_path
+
+
+def _check(args: list[str]) -> Any:
+    """``types check`` sin dobles: config real, manifest real, cero red."""
+    return CliRunner().invoke(types_group, args)
+
+
+class TestTypesCheck145:
+    def test_exit_0_and_groups_findings_by_severity(self, tmp_path: Path) -> None:
+        manifest = tmp_path / "types.json"
+        _seed(manifest)
+        yaml_path = _check_yaml(
+            tmp_path,
+            rvi_cm_csv=_rvi_cm_csv(tmp_path / "MapeoRVI_CM.csv", [("", "FB01", "DC01")]),
+            manifest_json=manifest,
+        )
+
+        result = _check(["check", "--config", str(yaml_path)])
+
+        assert result.exit_code == 0, result.output
+        assert "CRITICAL" not in result.stdout
+        # DC01 todavía no fue revisado por el operador
+        assert "WARNING" in result.stdout
+        assert "DC01" in result.stdout
+
+    def test_exit_1_when_a_used_property_has_no_field_source(self, tmp_path: Path) -> None:
+        manifest = tmp_path / "types.json"
+        _seed(manifest)
+        yaml_path = _check_yaml(
+            tmp_path,
+            rvi_cm_csv=_rvi_cm_csv(tmp_path / "MapeoRVI_CM.csv", [("", "FB01", "DC01")]),
+            manifest_json=manifest,
+            field_sources=_DEFAULT_FIELD_SOURCES.replace("BAC_CIF", "BAC_Otro"),
+        )
+
+        result = _check(["check", "--config", str(yaml_path)])
+
+        assert result.exit_code == 1
+        assert "CRITICAL" in result.stdout
+        assert "field_sources.BAC_CIF" in result.stdout
+
+    def test_exit_1_when_the_csv_points_at_a_code_outside_the_manifest(
+        self, tmp_path: Path
+    ) -> None:
+        manifest = tmp_path / "types.json"
+        _seed(manifest)
+        yaml_path = _check_yaml(
+            tmp_path,
+            rvi_cm_csv=_rvi_cm_csv(tmp_path / "MapeoRVI_CM.csv", [("", "FB01", "ZZ99")]),
+            manifest_json=manifest,
+        )
+
+        result = _check(["check", "--config", str(yaml_path)])
+
+        assert result.exit_code == 1
+        assert "ZZ99" in result.stdout
+
+    def test_json_flag_prints_the_machine_readable_report(self, tmp_path: Path) -> None:
+        manifest = tmp_path / "types.json"
+        _seed(manifest)
+        yaml_path = _check_yaml(
+            tmp_path,
+            rvi_cm_csv=_rvi_cm_csv(tmp_path / "MapeoRVI_CM.csv", [("", "FB01", "DC01")]),
+            manifest_json=manifest,
+        )
+
+        result = _check(["check", "--config", str(yaml_path), "--json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["has_critical"] is False
+        assert payload["counts"]["WARNING"] >= 1
+        assert all("severity" in f for f in payload["findings"])
+
+    def test_manifest_override_wins_over_the_yaml(self, tmp_path: Path) -> None:
+        """``--manifest`` gobierna las DOS puntas: mapping y manifest leído."""
+        configured = tmp_path / "types.json"
+        _seed(configured)
+        override = tmp_path / "otro.json"
+        _seed(override, [_type_node("ZZ99", [_prop("clbNonGroup.BAC_CIF", required=True)])])
+        yaml_path = _check_yaml(
+            tmp_path,
+            rvi_cm_csv=_rvi_cm_csv(tmp_path / "MapeoRVI_CM.csv", [("", "FB01", "ZZ99")]),
+            manifest_json=configured,
+        )
+
+        result = _check(["check", "--config", str(yaml_path), "--manifest", str(override)])
+
+        assert result.exit_code == 0, result.output
+        assert "no existe en el manifest" not in result.stdout
+
+    def test_errors_outside_manifest_mode(self, tmp_path: Path) -> None:
+        yaml_path = _check_yaml(
+            tmp_path, rvi_cm_csv=tmp_path / "nada.csv", manifest_json=None, field_sources="    {}\n"
+        )
+
+        result = _check(["check", "--config", str(yaml_path)])
+
+        assert result.exit_code != 0
+        assert "manifest" in result.stderr
 
 
 # ---------------------------------------------------------------------------

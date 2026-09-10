@@ -447,7 +447,8 @@ class TestShell:
                 assert app.query_one(YamlPane).rows
                 await pilot.press("question_mark")
                 assert await wait_for(pilot, lambda: isinstance(app.screen, HelpScreen))
-                # 141: la cabecera pasó a F1–F10 al sumarse la pestaña [0].
-                assert "[9]" in HelpScreen.HELP and "F1–F10" in HelpScreen.HELP
+                # 141 sumó [0] (F10) y 145 la pestaña `m` (F11): la cabecera
+                # de la ayuda tiene que seguir el conteo real de pestañas.
+                assert "[9]" in HelpScreen.HELP and "F1–F11" in HelpScreen.HELP
 
         asyncio.run(_run())

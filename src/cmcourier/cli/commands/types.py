@@ -9,6 +9,7 @@ grupo es la cara operativa de esa idea:
 * ``types diff``: qué cambió el servidor desde el último manifest.
 * ``types update``: mergea esos cambios conservando lo que decidiste.
 * ``types review <IDCM>``: marcá qué propiedades van al wire y firmá.
+* ``types check``: cruza el manifest con el YAML y con ``MapeoRVI_CM.csv``.
 
 El path del manifest sale de ``mapping.type_manifest_path`` del YAML;
 ``--manifest PATH`` lo pisa. Los comandos que hablan con el servidor
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 __all__ = ["types_group"]
 
+import json
 import sys
 from pathlib import Path
 
@@ -33,7 +35,9 @@ from cmcourier.adapters.manifest.json_store import JsonTypeManifestStore
 from cmcourier.cli.commands._formatting import render_table, truncate
 from cmcourier.cli.doctor import build_uploader
 from cmcourier.config.loader import Secrets, load_config, load_secrets
+from cmcourier.config.schema import MappingConfig as MappingConfigModel
 from cmcourier.config.schema import PipelineConfig
+from cmcourier.config.wiring import build_mapping_service, build_metadata_config
 from cmcourier.domain.cm_types import (
     DECISION_OMIT,
     DECISION_USE,
@@ -43,6 +47,7 @@ from cmcourier.domain.cm_types import (
     canonical_name,
 )
 from cmcourier.domain.exceptions import ConfigurationError
+from cmcourier.services.manifest_check import CheckReport, run_manifest_check
 from cmcourier.services.sync_progress import SyncProgress
 from cmcourier.services.type_discovery import TypeDiscoveryService
 from cmcourier.services.type_manifest import (
@@ -487,4 +492,71 @@ def review_command(
     click.echo(render_table(["PROPIEDAD", "DECISION"], rows))
 
 
-# 145 REQ-005: `check` lo agrega el paquete 4
+# ---------------------------------------------------------------------------
+# types check
+# ---------------------------------------------------------------------------
+
+
+def _require_config(config_path: Path) -> PipelineConfig:
+    """El YAML de ``check``: obligatorio, pero SIN credenciales — es offline."""
+    config = _config_or_none(config_path)
+    assert config is not None  # noqa: S101 — --config es required=True
+    return config
+
+
+def _manifest_mapping(config: PipelineConfig, override: Path | None) -> MappingConfigModel:
+    """La sección ``mapping`` que gobierna el check, con ``--manifest`` pisado.
+
+    El override tiene que valer para las DOS puntas (el manifest que se
+    lee y el que resuelve el CSV), si no ``missing_cm_codes`` saldría de
+    un manifest y los tipos de otro.
+    """
+    mapping = config.mapping
+    if override is not None:
+        mapping = mapping.model_copy(update={"type_manifest_path": override})
+    if mapping.type_manifest_path is None or mapping.rvi_cm_csv_path is None:
+        raise click.ClickException(
+            "types check necesita el modo manifest: mapping.rvi_cm_csv_path + "
+            "mapping.type_manifest_path (o --manifest) en el YAML"
+        )
+    return mapping
+
+
+def _check_report(config: PipelineConfig, mapping_cfg: MappingConfigModel) -> CheckReport:
+    """Cruza manifest ↔ YAML ↔ CSV. Un archivo ilegible sale con 2."""
+    try:
+        mapping = build_mapping_service(mapping_cfg)
+    except ConfigurationError as exc:
+        click.echo(f"ConfigurationError: {exc}", err=True)
+        sys.exit(2)
+    assert mapping_cfg.type_manifest_path is not None  # noqa: S101 — lo garantiza _manifest_mapping
+    manifest = _read(JsonTypeManifestStore(mapping_cfg.type_manifest_path))
+    field_sources = build_metadata_config(config.metadata).field_sources
+    return run_manifest_check(mapping, manifest, field_sources)
+
+
+@types_group.command(name="check")
+@_CONFIG_OPTION
+@_MANIFEST_OPTION
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emite el reporte como JSON en vez de texto agrupado por severidad.",
+)
+def check_command(config_path: Path, manifest_path: Path | None, as_json: bool) -> None:
+    """Cruza el manifest con el YAML y con ``MapeoRVI_CM.csv`` (145 REQ-005).
+
+    Corre offline: no hace falta ni red ni credenciales `cmis`. Exit 1 si
+    hay algún CRITICAL — lo que rompería el upload en producción; los
+    WARNING e INFO se listan igual pero no cambian el exit code.
+    """
+    config = _require_config(config_path)
+    report = _check_report(config, _manifest_mapping(config, manifest_path))
+    if as_json:
+        click.echo(json.dumps(report.to_json_dict(), ensure_ascii=False, indent=2))
+    else:
+        click.echo(report.render())
+    if report.has_critical:
+        sys.exit(1)

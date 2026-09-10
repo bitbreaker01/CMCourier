@@ -33,6 +33,7 @@ from cmcourier.cli.console.batches_pane import BatchesPane
 from cmcourier.cli.console.config_pane import ConfigPane
 from cmcourier.cli.console.creds_pane import CredsPane, run_single_check
 from cmcourier.cli.console.doctor_pane import DoctorPane
+from cmcourier.cli.console.modelo_pane import ModeloPane
 from cmcourier.cli.console.monitor_pane import MonitorPane
 from cmcourier.cli.console.overrides import apply_overrides
 from cmcourier.cli.console.persist import PersistError, persist_overrides
@@ -67,9 +68,13 @@ _TABS = [
     # 141: la pestaña del tiro de prueba va AL FINAL — los ids existentes
     # no se mueven, así que ninguna tecla vieja cambia de destino.
     "prueba",
+    # 145 REQ-006: el manifest de tipos CM, también al final y por la misma
+    # razón. Ya no quedan dígitos: la tecla es `m` (y F11).
+    "modelo",
 ]
-# La décima pantalla no puede ser la tecla "10": usa el 0 (y F10).
-_TAB_KEYS = [*(str(i + 1) for i in range(9)), "0"]
+# La décima pantalla no puede ser la tecla "10": usa el 0 (y F10); la
+# undécima no tiene dígito y usa la inicial de MODELO.
+_TAB_KEYS = [*(str(i + 1) for i in range(9)), "0", "m"]
 _log = logging.getLogger(__name__)
 
 
@@ -150,8 +155,8 @@ class HelpScreen(ModalScreen[None]):
         Binding("question_mark", "dismiss", "cerrar"),
     ]
 
-    HELP = """[b $accent]TECLAS GLOBALES[/] (F1–F10 funcionan aun con foco en un campo)
-  1-9,0 / F1-F10   cambiar de pantalla     ?   esta ayuda
+    HELP = """[b $accent]TECLAS GLOBALES[/] (F1–F11 funcionan aun con foco en un campo)
+  1-9,0,m / F1-F11  cambiar de pantalla    ?   esta ayuda
   q             salir (confirma si hay corrida)   Esc  cerrar modal / soltar foco
 
 [b $accent]POR PANTALLA[/]
@@ -164,6 +169,8 @@ class HelpScreen(ModalScreen[None]):
   [8] s estado del sync · simular antes de aplicar (recover) · resolver por txn
   [9] v validar · w escribir (backup) · u descartar · connections se edita en [2]
   [0] ↵ validar código · s generar y subir · d borrar el último subido
+  [m] espacio usar/omitir · ↵ marcar el tipo revisado · f editar la carpeta
+      botones: Descubrir · Comparar · Actualizar · Verificar YAML (offline)
 
 [b $accent]STAGES S0–S7[/]
   S0/S1 adquirir triggers · indexar RVABREP     S2/S3 mapear tipo CM · resolver metadata
@@ -276,6 +283,8 @@ class ConsoleApp(App[None]):
                 yield YamlPane(self)
             with TabPane("0·PRUEBA", id="prueba"):
                 yield PracticePane(self)
+            with TabPane("M·MODELO", id="modelo"):
+                yield ModeloPane(self)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -332,6 +341,9 @@ class ConsoleApp(App[None]):
         elif active == "yaml":
             # 139: refleja escrituras de [2]/[3]; con cambios pendientes no pisa.
             self.call_later(self.q("YamlPane", YamlPane).reload_if_clean)
+        elif active == "modelo":
+            # 145: el manifest pudo cambiar por CLI (`cmcourier types …`).
+            self.q("ModeloPane", ModeloPane).reload()
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
