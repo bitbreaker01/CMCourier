@@ -258,6 +258,7 @@ En modo manifest, las columnas requeridas de `MapeoRVI_CM.csv` son sólo `IDRVI`
 |-------|------|---------|------------|-------------|
 | `sources` | `list[FieldSourceItem]` (required) | — | `min_length=1` | Cadena de fallback. |
 | `default_value` | `str \| None` | `None` | — | Si todas las sources fallan. |
+| `format` | `ValueFormatModel \| None` | `None` | — | (146) Formato POR CAMPO: corre sobre el valor ganador **y sobre `default_value`**, justo antes del wire. |
 
 ### `FieldSourceItem`
 
@@ -267,12 +268,46 @@ En modo manifest, las columnas requeridas de `MapeoRVI_CM.csv` son sólo `IDRVI`
 | `lookup_value_column` | str (required) | — | Columna a leer. |
 | `lookup_key_column` | `str \| None` | `None` | Columna pivot. |
 | `validation` | `ValidationModel \| None` | `None` | — |
+| `format` | `ValueFormatModel \| None` | `None` | (146) Formato POR FUENTE: corre **entre el fetch y `validation`**. |
 
 ### `ValidationModel`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `allowed_pattern` | `str \| None` | `None` | Regex que el valor debe matchear. |
+
+### `ValueFormatModel` (146)
+
+El mismo modelo en dos ubicaciones — `FieldSourceItem.format` (por fuente, antes de validar) y `FieldConfig.format` (por campo, antes del wire) —, las dos opcionales e independientes. Ausente en las dos ⇒ comportamiento byte-idéntico al pre-146. Un `format:` sin ninguna clave seteada es válido y es un no-op.
+
+Las transformaciones se aplican **siempre en este orden fijo**. No es una lista de pasos configurable: un orden libre vuelve el YAML imposible de leer y de auditar.
+
+| # | Field | Type | Default | Constraint | Qué hace |
+|---|-------|------|---------|------------|----------|
+| 1 | `trim` | bool | `False` | — | `value.strip()`. |
+| 2 | `case` | `Literal["upper","lower"] \| None` | `None` | — | `upper()` / `lower()`. |
+| 3 | `strip_leading_zeros` | bool | `False` | — | Saca los ceros de la izquierda. |
+| 4 | `pad_left` | `PadLeftModel \| None` | `None` | — | Rellena a la izquierda hasta `width`. |
+| 5 | `pad_right` | `PadRightModel \| None` | `None` | — | Rellena a la derecha hasta `width`. |
+| 6 | `truncate` | `int \| None` | `None` | `> 0` | Se queda con los PRIMEROS `N` caracteres. |
+
+Reglas de borde:
+
+- **`strip_leading_zeros` nunca devuelve vacío**: `"00000"` → `"0"`. Un vacío significa "esta fuente no dio" y borraría un valor legítimo.
+- **`pad_*` nunca recorta**: un valor ya más largo que `width` vuelve intacto. Para recortar está `truncate`, que es explícito.
+- **El resultado vacío corta la fuente**: si después de formatear el valor queda `""` (el `CHAR(n)` de AS400 todo espacios con `trim: true`), la fuente se trata como "no dio" y se pasa a la siguiente.
+- **El `default_value` se formatea y DESPUÉS se valida** (contra el patrón de la PRIMERA fuente). Un `default_value: "0"` con `format: {pad_left: {width: 9}}` llega como `"000000000"` y pasa un `^\d{9}$`.
+- El `format` por campo corre DESPUÉS de la validación de la fuente: si rompe el patrón, es decisión del operador y `types check` lo avisa (nunca el resolver).
+- **Validador de schema** (`_truncate_not_below_pad`): `truncate` menor que `pad_left.width` o que `pad_right.width` falla al CARGAR el YAML — rellenar para después cortar no tiene lectura sensata.
+
+`types check` cruza este bloque con el manifest: el largo que declara el `format` (`truncate`, si no el mayor de los `pad_*`) contra el `max_length` de CM — y ese largo REEMPLAZA al deducido del `allowed_pattern`, nunca los dos warnings para la misma propiedad. Un `case: upper` contra `choices` donde ninguna opción está en mayúsculas también avisa.
+
+#### `PadLeftModel` / `PadRightModel`
+
+| Field | Type | Default | Constraint | Description |
+|-------|------|---------|------------|-------------|
+| `width` | int (required) | — | `> 0` | Largo objetivo. |
+| `char` | str | `"0"` (left) / `" "` (right) | exactamente 1 carácter | Relleno. Los defaults son los casos reales: ceros a la izquierda en cuentas, espacios a la derecha en `CHAR(n)` de DB2. |
 
 ### `MetadataSourceConfig` (discriminated by `kind`)
 

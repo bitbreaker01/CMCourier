@@ -18,14 +18,18 @@ __all__ = [
     "MetadataConfig",
     "MetadataResolution",
     "MetadataService",
+    "PadConfig",
     "SourceConfig",
     "ValidationConfig",
+    "ValueFormat",
+    "apply_format",
 ]
 
 import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 from cmcourier.config.schema import split_lookup_source_type
 from cmcourier.domain.exceptions import (
@@ -81,6 +85,37 @@ class ValidationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PadConfig:
+    """146: relleno hasta ``width`` con ``char`` (un solo carácter).
+
+    El default ``"0"`` sirve al caso de ``pad_left`` (cuentas de largo
+    fijo); para ``pad_right`` el YAML declara ``" "``, que es cómo DB2
+    entrega una columna ``CHAR(n)``. El schema (:mod:`config.schema`)
+    modela ese default por campo; acá la dataclass es una sola.
+    """
+
+    width: int
+    char: str = "0"
+
+
+@dataclass(frozen=True, slots=True)
+class ValueFormat:
+    """146: normalización declarativa del valor de un metadato.
+
+    Espejo en el dominio del servicio de ``ValueFormatModel``. Se aplica
+    con :func:`apply_format` SIEMPRE en el mismo orden fijo — ver el
+    docstring de esa función.
+    """
+
+    trim: bool = False
+    case: Literal["upper", "lower"] | None = None
+    strip_leading_zeros: bool = False
+    pad_left: PadConfig | None = None
+    pad_right: PadConfig | None = None
+    truncate: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SourceConfig:
     """Un paso de la cadena de fallback de un campo.
 
@@ -101,6 +136,8 @@ class SourceConfig:
     lookup_key_column: str | None = None
     validation: ValidationConfig | None = None
     lookup_value_source: str = "trigger.cif"
+    # 146: corre ENTRE el fetch y `validation`.
+    format: ValueFormat | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +147,9 @@ class FieldSourceConfig:
 
     sources: tuple[SourceConfig, ...]
     default_value: str | None = None
+    # 146: corre sobre el valor ganador y sobre `default_value`, justo
+    # antes de devolverlo.
+    format: ValueFormat | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +187,49 @@ class MetadataResolution:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _pad(value: str, pad: PadConfig | None, *, left: bool) -> str:
+    """Rellena hasta ``pad.width``. NUNCA recorta: un valor más largo
+    vuelve intacto (para recortar está ``truncate``, que es explícito)."""
+    if pad is None or len(value) >= pad.width:
+        return value
+    return value.rjust(pad.width, pad.char) if left else value.ljust(pad.width, pad.char)
+
+
+def apply_format(value: str, fmt: ValueFormat | None) -> str:
+    """146: normaliza *value* según *fmt*. Pura y sin efectos.
+
+    El orden es FIJO y no configurable — un orden libre vuelve el YAML
+    imposible de leer y de auditar:
+
+    1. ``trim`` — ``value.strip()``
+    2. ``case`` — ``upper()`` / ``lower()``
+    3. ``strip_leading_zeros`` — saca los ceros de la izquierda
+    4. ``pad_left`` — rellena a la izquierda hasta ``width``
+    5. ``pad_right`` — rellena a la derecha hasta ``width``
+    6. ``truncate`` — se queda con los primeros ``N`` caracteres
+
+    Reglas de borde: ``strip_leading_zeros`` nunca devuelve vacío
+    (``"00000"`` → ``"0"``, porque un vacío significa "esta fuente no
+    dio" y borraría un valor legítimo) y ``pad_*`` nunca recorta.
+    ``fmt`` en ``None`` devuelve *value* sin tocar.
+    """
+    if fmt is None:
+        return value
+    if fmt.trim:
+        value = value.strip()
+    if fmt.case == "upper":
+        value = value.upper()
+    elif fmt.case == "lower":
+        value = value.lower()
+    if fmt.strip_leading_zeros and value:
+        value = value.lstrip("0") or "0"
+    value = _pad(value, fmt.pad_left, left=True)
+    value = _pad(value, fmt.pad_right, left=False)
+    if fmt.truncate is not None:
+        value = value[: fmt.truncate]
+    return value
 
 
 def _validates(value: str, validation: ValidationConfig | None) -> bool:
@@ -306,11 +389,17 @@ class MetadataService:
                 field=canonical_field,
             )
         fsc = self._config.field_sources[canonical_field]
-        first_validation = fsc.sources[0].validation if fsc.sources else None
 
         for sc in fsc.sources:
-            value = self._fetch_from_source(sc, trigger, document, cif_override=cif_override)
-            if value is None or value == "":
+            raw = self._fetch_from_source(sc, trigger, document, cif_override=cif_override)
+            if raw is None:
+                continue
+            # 146 (a): el formato por fuente corre ANTES de validar —
+            # normaliza la vestimenta para que el patrón pueda ser estricto.
+            value = apply_format(raw, sc.format)
+            if value == "":
+                # Vacío después de formatear = esta fuente no dio (el
+                # caso `CHAR(n)` de AS400 todo espacios con `trim`).
                 continue
             if not _validates(value, sc.validation):
                 _logger.debug(
@@ -319,21 +408,36 @@ class MetadataService:
                     sc.source_type,
                 )
                 continue
-            return value
+            # 146 (b): el formato por campo es la garantía de salida.
+            return apply_format(value, fsc.format)
 
         # Todas las fuentes fallaron. Intentar el `default` si existe.
+        return self._resolve_default(canonical_field, fsc)
+
+    @staticmethod
+    def _resolve_default(canonical_field: str, fsc: FieldSourceConfig) -> str:
+        """El `default` del campo, ya formateado (146).
+
+        El orden es formatear y DESPUÉS validar, y es deliberado: el
+        default se valida contra el patrón de la PRIMERA fuente, así que
+        un ``default_value: "0"`` con un ``format`` de campo
+        ``pad_left: {width: 9}`` llega como ``"000000000"`` y pasa un
+        ``^\\d{9}$`` que crudo lo mataría.
+        """
         if fsc.default_value is None:
             _logger.warning(
                 "all sources failed for field=%s (no default configured)",
                 canonical_field,
             )
             raise SourceFailedError(field_name=canonical_field, source=_ALL_SOURCES_SENTINEL)
-        if not _validates(fsc.default_value, first_validation):
+        default = apply_format(fsc.default_value, fsc.format)
+        first_validation = fsc.sources[0].validation if fsc.sources else None
+        if not _validates(default, first_validation):
             raise DefaultValidationFailedError(
                 field_name=canonical_field,
-                default_value=fsc.default_value,
+                default_value=default,
             )
-        return fsc.default_value
+        return default
 
     # --- normalización de nombres de campo -----------------------------
 

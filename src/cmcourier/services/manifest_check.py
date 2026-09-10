@@ -28,7 +28,7 @@ from typing import Any, Literal
 
 from cmcourier.domain.cm_types import CmPropertyDef, CmTypeEntry, CmTypeManifest, canonical_name
 from cmcourier.services.mapping import MappingService
-from cmcourier.services.metadata import FieldSourceConfig
+from cmcourier.services.metadata import FieldSourceConfig, ValueFormat
 
 Severity = Literal["CRITICAL", "WARNING", "INFO"]
 
@@ -161,6 +161,47 @@ def _declared_length(fsc: FieldSourceConfig) -> int | None:
     return max(lengths) if lengths else None
 
 
+def _format_length(fmt: ValueFormat | None) -> int | None:
+    """146: el largo que DECLARA un ``format``, o ``None`` si no declara.
+
+    ``truncate`` manda — es un TOPE explícito; si no, el mayor de los
+    ``pad_*``, que es un largo EXACTO (el valor sale con ese largo o más).
+    Un ``format`` que sólo hace ``trim`` / ``case`` no declara nada.
+    """
+    if fmt is None:
+        return None
+    if fmt.truncate is not None:
+        return fmt.truncate
+    widths = [pad.width for pad in (fmt.pad_left, fmt.pad_right) if pad is not None]
+    return max(widths) if widths else None
+
+
+def _declared_format_length(fsc: FieldSourceConfig) -> int | None:
+    """146: el largo que el `format` del campo declara para la SALIDA.
+
+    El `format` por campo corre último sobre cualquier valor ganador, así
+    que si declara un largo, ese es el largo que llega al wire. Sin él,
+    manda lo que declare cada fuente y el peor caso es el mayor.
+    """
+    field_length = _format_length(fsc.format)
+    if field_length is not None:
+        return field_length
+    lengths = [n for src in fsc.sources if (n := _format_length(src.format)) is not None]
+    return max(lengths) if lengths else None
+
+
+def _formats_to_upper(fsc: FieldSourceConfig) -> bool:
+    """146: ``True`` sii el valor llega a CM en mayúsculas.
+
+    El `format` por campo corre último: si define ``case``, pisa lo que
+    haya dicho la fuente. Si no, alcanza con que UNA fuente suba a
+    mayúsculas para que un valor en mayúsculas pueda llegar al wire.
+    """
+    if fsc.format is not None and fsc.format.case is not None:
+        return fsc.format.case == "upper"
+    return any(src.format is not None and src.format.case == "upper" for src in fsc.sources)
+
+
 def _parses(value: str, property_type: str) -> bool:
     """``True`` sii *value* es un literal válido para ese tipo `cmis`."""
     text = value.strip()
@@ -227,6 +268,59 @@ def _unresolved_finding(
     )
 
 
+def _length_findings(
+    entry: CmTypeEntry, prop: CmPropertyDef, key: str, fsc: FieldSourceConfig
+) -> list[CheckFinding]:
+    """El WARNING de largo contra el ``max_length`` de CM.
+
+    146: cuando hay un ``format`` que declara largo, ese largo REEMPLAZA
+    al deducido del ``allowed_pattern`` — el patrón juzga lo que ENTRA, el
+    formato decide lo que SALE. Nunca los dos warnings para la misma
+    propiedad: serían dos líneas sobre el mismo problema y sólo una es la
+    que el operador tiene que arreglar.
+    """
+    if prop.max_length is None:
+        return []
+    formatted = _declared_format_length(fsc)
+    declared = formatted if formatted is not None else _declared_length(fsc)
+    if declared is None or declared <= prop.max_length:
+        return []
+    verb = "formatea a" if formatted is not None else "declara largo"
+    return [
+        CheckFinding(
+            "WARNING",
+            entry.id_corto,
+            prop.id,
+            f"field_sources.{key} {verb} {declared} y el max_length de CM es {prop.max_length}",
+        )
+    ]
+
+
+def _upper_choices_findings(
+    entry: CmTypeEntry, prop: CmPropertyDef, key: str, fsc: FieldSourceConfig
+) -> list[CheckFinding]:
+    """146: ``case: upper`` contra una lista de opciones sin mayúsculas.
+
+    Si CM sólo acepta ``Factura`` / ``Recibo``, un valor forzado a
+    mayúsculas NUNCA va a matchear una opción válida. Alcanza con que UNA
+    opción esté en mayúsculas (o no tenga letras, como ``"01"``) para que
+    el formato siga teniendo sentido.
+    """
+    if not prop.choices or not _formats_to_upper(fsc):
+        return []
+    if any(choice == choice.upper() for choice in prop.choices):
+        return []
+    return [
+        CheckFinding(
+            "WARNING",
+            entry.id_corto,
+            prop.id,
+            f"field_sources.{key} formatea a mayúsculas y ninguna de las "
+            f"{len(prop.choices)} opciones de CM está en mayúsculas",
+        )
+    ]
+
+
 def _check_used_property(
     entry: CmTypeEntry,
     prop: CmPropertyDef,
@@ -244,17 +338,8 @@ def _check_used_property(
         return [_unresolved_finding(entry, prop, name, aliases_lower)]
     key, fsc = resolved
     out: list[CheckFinding] = []
-    declared = _declared_length(fsc)
-    if prop.max_length is not None and declared is not None and declared > prop.max_length:
-        out.append(
-            CheckFinding(
-                "WARNING",
-                entry.id_corto,
-                prop.id,
-                f"field_sources.{key} declara largo {declared} y el max_length "
-                f"de CM es {prop.max_length}",
-            )
-        )
+    out.extend(_length_findings(entry, prop, key, fsc))
+    out.extend(_upper_choices_findings(entry, prop, key, fsc))
     fixed = _fixed_value(fsc)
     typed = prop.property_type in _TYPED
     if fixed is not None and typed and not _parses(fixed, prop.property_type):

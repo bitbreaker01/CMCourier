@@ -58,6 +58,7 @@ Guías más densas, cada una atada a una feature concreta del sistema.
 | [`log-analysis.md`](log-analysis.md) | Análisis offline con `cmcourier analyze` (027) |
 | [`mock-rvabrep-generator.md`](mock-rvabrep-generator.md) | Generar CSV RVABREP sintético (039) |
 | [`cm-type-manifest.md`](cm-type-manifest.md) | Manifest de tipos CM: `types discover`/`review`/`check`/`update`, reemplazo de `MetadatosCM.csv` (145) |
+| [`metadata-format.md`](metadata-format.md) | Normalizar el valor de un metadato con `format` — ceros a la izquierda, `CHAR(n)` de AS400 (146) |
 | [`cmis-target-preflight.md`](cmis-target-preflight.md) | Pre-flight CMIS folders + properties (038, modo split) |
 | [`staging-dry-run.md`](staging-dry-run.md) | Dry-run con datos reales |
 | [`local-staging-simulation.md`](local-staging-simulation.md) | Alfresco + Docker para simular CMIS |

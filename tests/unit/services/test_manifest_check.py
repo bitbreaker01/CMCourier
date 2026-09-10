@@ -25,7 +25,13 @@ from cmcourier.domain.cm_types import (
 )
 from cmcourier.services.manifest_check import CheckReport, Scope, run_manifest_check
 from cmcourier.services.mapping import MappingService
-from cmcourier.services.metadata import FieldSourceConfig, SourceConfig, ValidationConfig
+from cmcourier.services.metadata import (
+    FieldSourceConfig,
+    PadConfig,
+    SourceConfig,
+    ValidationConfig,
+    ValueFormat,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -48,6 +54,7 @@ def _prop(
     default_value: str | None = None,
     property_type: str = "string",
     max_length: int | None = None,
+    choices: tuple[str, ...] = (),
 ) -> CmPropertyDef:
     return CmPropertyDef(
         id=pid,
@@ -59,7 +66,7 @@ def _prop(
         max_length=max_length,
         default_value=default_value,
         inherited=False,
-        choices=(),
+        choices=choices,
     )
 
 
@@ -686,3 +693,213 @@ class TestDeterminism:
         first = run_manifest_check(_mapping(manifest, "DC02", "DC01"), manifest, field_sources)
         second = run_manifest_check(_mapping(manifest, "DC01", "DC02"), manifest, field_sources)
         assert first.findings == second.findings
+
+
+# ---------------------------------------------------------------------------
+# 146 — el `format` declarativo cruzado con lo que declara CM
+# ---------------------------------------------------------------------------
+
+
+def _fmt_field(
+    fmt: ValueFormat | None = None,
+    *,
+    source_fmt: ValueFormat | None = None,
+    pattern: str | None = None,
+) -> FieldSourceConfig:
+    """Un campo con una fuente, con `format` por campo y/o por fuente."""
+    source = SourceConfig(
+        source_type="trigger",
+        lookup_value_column="cif",
+        validation=ValidationConfig(allowed_pattern=pattern) if pattern else None,
+        format=source_fmt,
+    )
+    return FieldSourceConfig(sources=(source,), format=fmt)
+
+
+def _check(prop: CmPropertyDef, fsc: FieldSourceConfig) -> CheckReport:
+    manifest = _manifest(_entry("DC01", props=(prop,)))
+    name = prop.id.split(".")[-1]
+    return run_manifest_check(_mapping(manifest, "DC01"), manifest, {name: fsc})
+
+
+class TestWarningFormatLength:
+    """El largo que DECLARA el formato contra el `max_length` de CM."""
+
+    def test_pad_left_mas_largo_que_max_length_avisa(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_CIF", max_length=6),
+            _fmt_field(ValueFormat(pad_left=PadConfig(width=9, char="0"))),
+        )
+        assert _severities(report, "max_length") == ["WARNING"]
+        assert "field_sources.BAC_CIF formatea a 9 y el max_length de CM es 6" in (
+            report.warnings[0].message
+        )
+
+    def test_pad_right_mas_largo_que_max_length_avisa(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_CIF", max_length=10),
+            _fmt_field(ValueFormat(pad_right=PadConfig(width=20, char=" "))),
+        )
+        assert "formatea a 20" in report.warnings[0].message
+
+    def test_toma_el_mayor_de_los_dos_pads(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_CIF", max_length=10),
+            _fmt_field(
+                ValueFormat(
+                    pad_left=PadConfig(width=12, char="0"),
+                    pad_right=PadConfig(width=20, char=" "),
+                )
+            ),
+        )
+        assert "formatea a 20" in report.warnings[0].message
+
+    def test_truncate_gana_sobre_los_pads(self) -> None:
+        # Con `truncate` el largo es un TOPE, y ese tope es el que manda.
+        report = _check(
+            _prop("clbNonGroup.BAC_CIF", max_length=10),
+            _fmt_field(ValueFormat(pad_left=PadConfig(width=9, char="0"), truncate=30)),
+        )
+        assert "formatea a 30" in report.warnings[0].message
+
+    def test_formato_que_entra_en_max_length_no_avisa(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_CIF", max_length=9),
+            _fmt_field(ValueFormat(pad_left=PadConfig(width=9, char="0"))),
+        )
+        assert report.findings == ()
+
+    def test_formato_sin_largo_declarado_no_avisa(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_CIF", max_length=3),
+            _fmt_field(ValueFormat(trim=True, case="lower")),
+        )
+        assert report.findings == ()
+
+    def test_propiedad_sin_max_length_no_avisa(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_CIF"),
+            _fmt_field(ValueFormat(pad_left=PadConfig(width=99, char="0"))),
+        )
+        assert report.findings == ()
+
+    def test_el_formato_por_fuente_tambien_declara_largo(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_CIF", max_length=6),
+            _fmt_field(source_fmt=ValueFormat(pad_left=PadConfig(width=9, char="0"))),
+        )
+        assert "formatea a 9" in report.warnings[0].message
+
+    def test_el_formato_por_campo_manda_sobre_el_de_la_fuente(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_CIF", max_length=6),
+            _fmt_field(
+                ValueFormat(truncate=8),
+                source_fmt=ValueFormat(pad_left=PadConfig(width=20, char="0")),
+            ),
+        )
+        assert _severities(report, "max_length") == ["WARNING"]
+        assert "formatea a 8" in report.warnings[0].message
+
+    def test_el_warning_nombra_la_llave_resuelta_por_alias(self) -> None:
+        prop = _prop("clbNonGroup.BAC_Shortname", max_length=3)
+        manifest = _manifest(_entry("DC01", props=(prop,)))
+        report = run_manifest_check(
+            _mapping(manifest, "DC01"),
+            manifest,
+            {"BAC_Short_Name": _fmt_field(ValueFormat(pad_right=PadConfig(width=9, char=" ")))},
+            field_aliases={"BAC_Shortname": "BAC_Short_Name"},
+        )
+        assert "field_sources.BAC_Short_Name formatea a 9" in report.warnings[0].message
+
+
+class TestFormatReemplazaAlPatron:
+    """Cuando el `format` declara un largo, el patrón ya no manda sobre el
+    largo de salida: nunca los dos warnings para la misma propiedad."""
+
+    def test_solo_sale_el_warning_del_formato(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_CIF", max_length=6),
+            _fmt_field(ValueFormat(pad_left=PadConfig(width=9, char="0")), pattern=r"^\d{20}$"),
+        )
+        assert _severities(report, "max_length") == ["WARNING"]
+        assert "formatea a 9" in report.warnings[0].message
+        assert "declara largo" not in report.warnings[0].message
+
+    def test_el_formato_corto_calla_al_patron_largo(self) -> None:
+        # El patrón admite 20 pero el formato recorta a 6: no hay hallazgo.
+        report = _check(
+            _prop("clbNonGroup.BAC_CIF", max_length=6),
+            _fmt_field(ValueFormat(truncate=6), pattern=r"^\d{20}$"),
+        )
+        assert report.findings == ()
+
+    def test_sin_format_el_patron_sigue_mandando(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_CIF", max_length=6),
+            _fmt_field(pattern=r"^\d{20}$"),
+        )
+        assert "field_sources.BAC_CIF declara largo 20" in report.warnings[0].message
+
+
+class TestWarningCaseUpperContraChoices:
+    def test_upper_sin_ninguna_opcion_en_mayusculas_avisa(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_Tipo", choices=("Factura", "Recibo")),
+            _fmt_field(ValueFormat(case="upper")),
+        )
+        assert [f.severity for f in report.findings] == ["WARNING"]
+        assert "field_sources.BAC_Tipo" in report.warnings[0].message
+        assert "mayúsculas" in report.warnings[0].message
+
+    def test_una_sola_opcion_en_mayusculas_alcanza(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_Tipo", choices=("Factura", "RECIBO")),
+            _fmt_field(ValueFormat(case="upper")),
+        )
+        assert report.findings == ()
+
+    def test_una_opcion_sin_letras_cuenta_como_mayuscula(self) -> None:
+        # "01" == "01".upper(): un valor en mayúsculas todavía puede matchear.
+        report = _check(
+            _prop("clbNonGroup.BAC_Tipo", choices=("01", "Factura")),
+            _fmt_field(ValueFormat(case="upper")),
+        )
+        assert report.findings == ()
+
+    def test_sin_choices_no_avisa(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_Tipo", choices=()),
+            _fmt_field(ValueFormat(case="upper")),
+        )
+        assert report.findings == ()
+
+    def test_case_lower_no_avisa(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_Tipo", choices=("Factura", "Recibo")),
+            _fmt_field(ValueFormat(case="lower")),
+        )
+        assert report.findings == ()
+
+    def test_el_upper_por_fuente_tambien_cuenta(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_Tipo", choices=("Factura", "Recibo")),
+            _fmt_field(source_fmt=ValueFormat(case="upper")),
+        )
+        assert [f.severity for f in report.findings] == ["WARNING"]
+
+    def test_el_case_por_campo_pisa_al_de_la_fuente(self) -> None:
+        # La fuente sube a mayúsculas pero el campo baja a minúsculas: lo
+        # que llega a CM es minúscula, no hay nada que avisar.
+        report = _check(
+            _prop("clbNonGroup.BAC_Tipo", choices=("Factura", "Recibo")),
+            _fmt_field(ValueFormat(case="lower"), source_fmt=ValueFormat(case="upper")),
+        )
+        assert report.findings == ()
+
+    def test_sin_format_no_avisa(self) -> None:
+        report = _check(
+            _prop("clbNonGroup.BAC_Tipo", choices=("Factura", "Recibo")),
+            _fmt_field(),
+        )
+        assert report.findings == ()

@@ -261,6 +261,44 @@ metadata:
           validation:                           # (default: null) optional value check
             allowed_pattern: "^[A-Za-z0-9 ]+$"  # (default: null) regex the value must match
       default_value: "UNKNOWN_CLIENT"
+    # format (146) — declarative normalisation of the VALUE. Same model, two
+    # placements, two different moments:
+    #   (a) per source — runs BETWEEN the fetch and `validation`, so the
+    #       pattern can be strict without losing otherwise-good values;
+    #   (b) per field  — runs on the WINNING value and on `default_value`,
+    #       right before it goes to CM. Whichever source wins, CM gets the
+    #       same shape.
+    # Both are optional and independent. Absent ⇒ pre-146 behaviour.
+    # Keys ALWAYS apply in this fixed order (not configurable):
+    #   1 trim → 2 case → 3 strip_leading_zeros → 4 pad_left → 5 pad_right
+    #   → 6 truncate
+    # Edge rules: `strip_leading_zeros` never returns "" ("00000" → "0");
+    # `pad_*` never cuts (a longer value comes back untouched — use
+    # `truncate` for that); a value that ends up "" after formatting means
+    # "this source gave nothing" and the chain moves on to the next source.
+    # `truncate` smaller than a `pad_*.width` fails at LOAD time.
+    BAC_Num_Cuenta:
+      sources:
+        - source_type: rvabrep
+          lookup_value_column: index2
+          format:                               # (a) PER SOURCE (default: null)
+            trim: true                          # (default: false) value.strip()
+            case: null                          # (default: null) "upper" | "lower"
+            strip_leading_zeros: true           # (default: false) "000001000" → "1000"
+            pad_left:                           # (default: null)
+              width: 9                          # (REQUIRED) > 0
+              char: "0"                         # (default: "0") exactly 1 char
+            # pad_right:                        # (default: null)
+            #   width: 20                       # (REQUIRED) > 0
+            #   char: " "                       # (default: " ") exactly 1 char
+            # truncate: 9                       # (default: null) first N chars, > 0
+          validation:
+            allowed_pattern: '^\d{9}$'          # strict: the format already normalised it
+      default_value: "0"
+      format:                                   # (b) PER FIELD (default: null)
+        pad_left:                               # the default is formatted, THEN validated:
+          width: 9                              # "0" → "000000000" passes ^\d{9}$
+          char: "0"
     BAC_Short_Name:
       sources:
         - source_type: "as400:branch_lookup"

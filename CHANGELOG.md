@@ -12,6 +12,27 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- **Formato declarativo del valor de un metadato (146).** Bloque
+  `format:` nuevo en `metadata.field_sources`, en dos ubicaciones y dos
+  momentos: **por fuente** corre entre buscar el valor y validarlo, y
+  **por campo** corre sobre el valor ganador y sobre `default_value`,
+  justo antes del wire. Seis claves en orden FIJO — `trim`, `case`,
+  `strip_leading_zeros`, `pad_left`, `pad_right`, `truncate` — porque un
+  orden configurable vuelve el YAML imposible de auditar. Esto arregla
+  dos cosas que el operador ya tenía en producción: la cuenta de 9
+  dígitos que llega como `1000` o como `000001000` (ahora se normaliza
+  ANTES del patrón, así que `^\d{9}$` puede ser estricto en vez de
+  aflojarse a `^\d{1,9}$`) y las columnas `CHAR(n)` de AS400 que vienen
+  rellenas con espacios (con `trim`, un valor que queda vacío significa
+  "esta fuente no dio" y la cadena sigue, en vez de subir 16 espacios a
+  Content Manager). El `default_value` se formatea y DESPUÉS se valida,
+  lo que de paso destraba la trampa vieja de un `default_value: "0"`
+  contra el patrón de la primera fuente. `types check` cruza el largo que
+  declara el `format` (`truncate`, si no el mayor de los `pad_*`) con el
+  `max_length` de CM y reemplaza al warning deducido del patrón, y avisa
+  cuando un `case: upper` no puede matchear ninguna opción de `choices`.
+  Sin `format`, el comportamiento es byte-idéntico al pre-146.
+
 - **Prueba de conexión configurable o derivada del sitio (143).** Las
   conexiones `as400` y `mssql` del registro aceptan `probe_query`
   (opcional; también desde `[2] editar` y `[9] YAML`). Sin ella, el

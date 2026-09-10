@@ -52,6 +52,8 @@ __all__ = [
     "MssqlMetadataSourceConfig",
     "NiarvilogColumnsModel",
     "ObservabilityConfig",
+    "PadLeftModel",
+    "PadRightModel",
     "PipelineConfig",
     "RESERVED_CONNECTION_ALIASES",
     "RvabrepFiltersModel",
@@ -65,6 +67,7 @@ __all__ = [
     "TriggerConfigUnion",
     "TriggerCsvConfig",
     "ValidationModel",
+    "ValueFormatModel",
     "as400_probe_sql",
     "credential_env_vars",
     "mssql_probe_sql",
@@ -549,6 +552,67 @@ class ValidationModel(BaseModel):
     allowed_pattern: str | None = None
 
 
+class PadLeftModel(BaseModel):
+    """146: relleno a la IZQUIERDA hasta ``width`` (default ``"0"``, que es
+    el caso real: cuentas de largo fijo con ceros adelante)."""
+
+    model_config = _STRICT
+    width: int = Field(gt=0)
+    char: str = Field(default="0", min_length=1, max_length=1)
+
+
+class PadRightModel(BaseModel):
+    """146: relleno a la DERECHA hasta ``width`` (default ``" "``, que es
+    cómo DB2 entrega una columna ``CHAR(n)``)."""
+
+    model_config = _STRICT
+    width: int = Field(gt=0)
+    char: str = Field(default=" ", min_length=1, max_length=1)
+
+
+class ValueFormatModel(BaseModel):
+    """146: normalización declarativa del valor de un metadato.
+
+    Vive en dos lugares con el mismo modelo y dos momentos distintos:
+    ``FieldSourceItem.format`` corre entre buscar el valor y validarlo
+    (normaliza la vestimenta ANTES del patrón, que es lo que permite
+    escribir patrones estrictos sin perder valores buenos), y
+    ``FieldConfig.format`` corre sobre el valor ganador y sobre
+    ``default_value``, justo antes de devolverlo (la garantía de salida).
+
+    Las transformaciones se aplican SIEMPRE en el mismo orden fijo —
+    ``trim`` → ``case`` → ``strip_leading_zeros`` → ``pad_left`` →
+    ``pad_right`` → ``truncate``. No es una lista de pasos configurable:
+    un orden libre vuelve el YAML imposible de leer y de auditar.
+
+    Todos los campos son opcionales; un ``format:`` sin ninguna clave
+    seteada es válido y es un no-op.
+    """
+
+    model_config = _STRICT
+    trim: bool = False
+    case: Literal["upper", "lower"] | None = None
+    strip_leading_zeros: bool = False
+    pad_left: PadLeftModel | None = None
+    pad_right: PadRightModel | None = None
+    truncate: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _truncate_not_below_pad(self) -> ValueFormatModel:
+        """Rellenar hasta ``width`` para después cortar a menos que eso no
+        tiene lectura sensata: es un error de config, y explota al cargar
+        el YAML en vez de recortar valores en silencio en runtime."""
+        if self.truncate is None:
+            return self
+        for label, pad in (("pad_left", self.pad_left), ("pad_right", self.pad_right)):
+            if pad is not None and self.truncate < pad.width:
+                raise ValueError(
+                    f"truncate ({self.truncate}) is smaller than {label}.width ({pad.width}): "
+                    "padding and then cutting back has no sensible reading"
+                )
+        return self
+
+
 class FieldSourceItem(BaseModel):
     """084: ``lookup_value_source`` permite especificar de dónde sale
     el valor de búsqueda para sources con prefijo ``csv:`` / ``as400:``.
@@ -568,6 +632,9 @@ class FieldSourceItem(BaseModel):
     lookup_key_column: str | None = None
     validation: ValidationModel | None = None
     lookup_value_source: str = "trigger.cif"
+    # 146: corre ENTRE el fetch y `validation` — normaliza la vestimenta
+    # antes de que el patrón la juzgue.
+    format: ValueFormatModel | None = None
 
     @field_validator("source_type")
     @classmethod
@@ -600,6 +667,10 @@ class FieldConfig(BaseModel):
     model_config = _STRICT
     sources: list[FieldSourceItem] = Field(default_factory=list)
     default_value: str | None = None
+    # 146: corre sobre el valor GANADOR y sobre `default_value`, justo
+    # antes de devolverlo. Gane la fuente que gane, a CM llega el mismo
+    # formato.
+    format: ValueFormatModel | None = None
 
     @model_validator(mode="after")
     def _at_least_one_resolution_path(self) -> FieldConfig:

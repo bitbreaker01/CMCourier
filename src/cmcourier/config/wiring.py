@@ -44,6 +44,7 @@ from cmcourier.config.schema import (
     PipelineConfig,
     RvabrepTriggerConfig,
     SingleDocTriggerConfig,
+    ValueFormatModel,
 )
 from cmcourier.config.schema import (
     MappingConfig as MappingConfigModel,
@@ -63,8 +64,10 @@ from cmcourier.services.metadata import (
     FieldSourceConfig,
     MetadataConfig,
     MetadataService,
+    PadConfig,
     SourceConfig,
     ValidationConfig,
+    ValueFormat,
 )
 from cmcourier.services.mock.sizing import parse_size
 from cmcourier.services.mock.synthetic_content import (
@@ -636,6 +639,34 @@ def build_mapping_service(model: MappingConfigModel) -> MappingService:
         metadatos_src.close()
 
 
+def _value_format_from_schema(model: ValueFormatModel | None) -> ValueFormat | None:
+    """146: ``ValueFormatModel`` → ``ValueFormat``, el espejo del servicio.
+
+    Los dos ``pad_*`` del schema son modelos distintos sólo por su
+    ``char`` default (``"0"`` a la izquierda, ``" "`` a la derecha); del
+    lado del dominio son un único :class:`PadConfig` con el valor ya
+    resuelto.
+    """
+    if model is None:
+        return None
+    return ValueFormat(
+        trim=model.trim,
+        case=model.case,
+        strip_leading_zeros=model.strip_leading_zeros,
+        pad_left=(
+            PadConfig(width=model.pad_left.width, char=model.pad_left.char)
+            if model.pad_left is not None
+            else None
+        ),
+        pad_right=(
+            PadConfig(width=model.pad_right.width, char=model.pad_right.char)
+            if model.pad_right is not None
+            else None
+        ),
+        truncate=model.truncate,
+    )
+
+
 def _metadata_config_from_schema(model: MetadataConfigModel) -> MetadataConfig:
     field_sources: dict[str, FieldSourceConfig] = {}
     for canonical, fc in model.field_sources.items():
@@ -651,10 +682,12 @@ def _metadata_config_from_schema(model: MetadataConfigModel) -> MetadataConfig:
                         else None
                     ),
                     lookup_value_source=src.lookup_value_source,
+                    format=_value_format_from_schema(src.format),
                 )
                 for src in fc.sources
             ),
             default_value=fc.default_value,
+            format=_value_format_from_schema(fc.format),
         )
     return MetadataConfig(
         field_aliases=dict(model.field_aliases),
