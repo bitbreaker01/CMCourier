@@ -85,6 +85,7 @@ class TestIUploaderContract:
                 "upload",
                 "test_connection",
                 "get_type_definition",
+                "get_type_descendants",  # 145
                 "set_credentials",  # 132
             }
         )

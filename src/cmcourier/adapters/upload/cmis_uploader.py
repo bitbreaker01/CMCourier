@@ -46,7 +46,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import IO, Any
@@ -423,6 +423,47 @@ class CmisUploader(IUploader):
         except ValueError:
             return {}
         return data if isinstance(data, dict) else {}
+
+    def get_type_descendants(
+        self, include_property_definitions: bool = True
+    ) -> Sequence[Mapping[str, Any]]:
+        """145: GET cmisselector=typeDescendants&depth=-1. Sin loop de `retry`.
+
+        Devuelve la lista de nodos del árbol de tipos tal cual la manda
+        el server; una respuesta que no sea una lista JSON se trata como
+        árbol vacío (el caller decide si eso es un problema)."""
+        with self._warm_lock:
+            need_warmup = not self._warm
+        if need_warmup:
+            self._warmup_session()
+        url = self._service_url()
+        t0 = time.monotonic()
+        resp = self._client.get(
+            url,
+            params={
+                "cmisselector": "typeDescendants",
+                "depth": "-1",
+                "includePropertyDefinitions": "true" if include_property_definitions else "false",
+            },
+            timeout=self._request_timeout(),
+        )
+        _network_log.info(
+            "cmis_get",
+            extra={
+                "kind": "cmis_get",
+                "duration_ms": round((time.monotonic() - t0) * 1000.0, 3),
+                "status": resp.status_code,
+                "url_prefix": url[:80],
+                "worker": threading.current_thread().name,
+            },
+        )
+        if resp.status_code >= 400:
+            raise _http_error(resp)
+        try:
+            data = resp.json()
+        except ValueError:
+            return []
+        return data if isinstance(data, list) else []
 
     def verify_folder_exists(self, folder_path: str) -> bool:
         """Devuelve ``True`` si y solo si *folder_path* existe en el server CM

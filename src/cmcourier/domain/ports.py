@@ -27,7 +27,7 @@ __all__ = [
 ]
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Protocol
@@ -381,6 +381,28 @@ class IUploader(ABC):
 
         Lanza:
             CMISClientError: 4xx (típicamente 404 para tipos faltantes).
+            CMISServerError: 5xx.
+        """
+
+    @abstractmethod
+    def get_type_descendants(
+        self, include_property_definitions: bool = True
+    ) -> Sequence[Mapping[str, Any]]:
+        """145: devuelve el árbol completo de tipos del `repository`.
+
+        Es el ``cmisselector=typeDescendants`` con ``depth=-1``: la lista
+        de nodos ``{"type": {...}, "children": [...]}`` con la que
+        ``types discover`` (145 REQ-003) arma el manifest de clases
+        documentales. Con ``include_property_definitions=False`` el
+        server manda sólo la cabecera de cada tipo — mucho más liviano
+        cuando alcanza con saber qué tipos existen.
+
+        Como ``get_type_definition``, pasa por encima de cualquier
+        política de `retry`: descubrir es una operación de operador, no
+        del `pipeline`.
+
+        Lanza:
+            CMISClientError: 4xx.
             CMISServerError: 5xx.
         """
 
