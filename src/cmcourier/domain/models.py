@@ -14,6 +14,7 @@ acoplados a la semántica de los modelos.
 from __future__ import annotations
 
 __all__ = [
+    "REASON_BUCKETS",
     "RawResponse",
     "BatchDetails",
     "BatchInfo",
@@ -23,6 +24,9 @@ __all__ = [
     "FailedRecord",
     "LocalScanTrigger",
     "MigrationRecord",
+    "ReasonBucket",
+    "ReasonCode",
+    "ReasonCount",
     "ResolvedMetadata",
     "RVABREPDocument",
     "RvabrepRowTrigger",
@@ -138,6 +142,122 @@ class StageStatus(StrEnum):
         if not 1 <= stage <= 5:
             raise ValueError(f"stage must be in [1, 5], got {stage!r}")
         return (cls[f"S{stage}_DONE"], cls[f"S{stage}_FAILED"])
+
+
+# ---------------------------------------------------------------------------
+# 148 — Taxonomía de razones (REQ-002). Eje ORTOGONAL a StageStatus (REQ-003).
+# ---------------------------------------------------------------------------
+
+
+class ReasonBucket(StrEnum):
+    """148 REQ-002: quién resuelve un documento que no se subió.
+
+    El balde es lo que importa: cada uno se resuelve de una manera
+    distinta y **por una persona distinta**.
+
+    * ``EXCLUIDO`` — decisión del operador, o el origen dice que no; no
+      lo resuelve nadie, está bien así.
+    * ``BLOQUEADO`` — falta configuración; lo resuelve el operador
+      editando YAML / CSV / manifest.
+    * ``FALLO`` — se rompió en ejecución; reintento o investigación.
+    """
+
+    EXCLUIDO = "EXCLUIDO"
+    BLOQUEADO = "BLOQUEADO"
+    FALLO = "FALLO"
+
+
+class ReasonCode(StrEnum):
+    """148 REQ-002: taxonomía CERRADA del por qué un documento no se subió.
+
+    Eje **ortogonal** a :class:`StageStatus` (REQ-003): ``status`` dice
+    dónde paró, ``reason_code`` dice por qué, y el balde
+    (:class:`ReasonBucket`) dice quién lo arregla. Cero estados nuevos
+    que propagar por la máquina de recovery, la consola y los docs.
+
+    Igual que ``StageStatus``, hereda de :class:`enum.StrEnum`: cada
+    miembro es su propio literal, y la columna ``migration_log.reason_code``
+    guarda directamente el valor string.
+
+    El mapeo código → balde es TOTAL: ver :data:`REASON_BUCKETS`. Agregar
+    un miembro acá sin mapearlo rompe la suite a propósito.
+    """
+
+    # --- EXCLUIDO ---------------------------------------------------
+    EXCLUDED_BY_FILTER = "EXCLUDED_BY_FILTER"  # el código no está en filters.document_types
+    DELETED_AT_SOURCE = "DELETED_AT_SOURCE"  # código de borrado en RVABREP
+    ALREADY_UPLOADED = "ALREADY_UPLOADED"  # ya S5_DONE en un batch previo
+    OUT_OF_SCOPE_RESUME = "OUT_OF_SCOPE_RESUME"  # fuera del alcance del resume
+
+    # --- BLOQUEADO --------------------------------------------------
+    CODE_NOT_MAPPED = "CODE_NOT_MAPPED"  # IDRVI sin fila en MapeoRVI_CM.csv
+    TYPE_NOT_IN_MANIFEST = "TYPE_NOT_IN_MANIFEST"  # el IDCM no existe en el manifest (145)
+    IDENTITY_UNRESOLVED = "IDENTITY_UNRESOLVED"  # no se resolvió CIF/shortname (147)
+    METADATA_UNRESOLVED = "METADATA_UNRESOLVED"  # un field_source no dio y no hay default
+    SOURCE_ROW_INCOMPLETE = "SOURCE_ROW_INCOMPLETE"  # la fila RVABREP no trae shortname/sistema
+
+    # --- FALLO ------------------------------------------------------
+    SOURCE_FILE_MISSING = "SOURCE_FILE_MISSING"  # el archivo no está en disco
+    ASSEMBLY_FAILED = "ASSEMBLY_FAILED"  # el PDF no se pudo armar
+    CM_REJECTED_4XX = "CM_REJECTED_4XX"  # Content Manager lo rechazó
+    CM_ERROR_5XX = "CM_ERROR_5XX"
+    CM_TIMEOUT = "CM_TIMEOUT"
+    CM_TRANSPORT = "CM_TRANSPORT"
+    CLAIM_LOST = "CLAIM_LOST"  # otro proceso se llevó el claim
+    CRASHED = "CRASHED"  # excepción no contemplada
+    CANCELLED = "CANCELLED"  # se canceló la corrida
+    INDEXING_FAILED = "INDEXING_FAILED"  # la query de indexado explotó
+    SOURCE_ROW_NOT_FOUND = "SOURCE_ROW_NOT_FOUND"  # el trigger no matcheó ninguna fila
+
+    @property
+    def bucket(self) -> ReasonBucket:
+        """El balde de este código. Total por construcción."""
+        return REASON_BUCKETS[self]
+
+    @classmethod
+    def bucket_of(cls, value: str | ReasonCode | None) -> ReasonBucket | None:
+        """El balde de *value*, o ``None`` si no es un código conocido.
+
+        Versión defensiva de :attr:`bucket` para strings que vienen de la
+        base: una fila legacy o editada a mano con un código que ya no
+        existe no debe hacer explotar una proyección de lectura.
+        """
+        if not value:
+            return None
+        try:
+            return REASON_BUCKETS[cls(value)]
+        except ValueError:
+            return None
+
+
+# Mapeo TOTAL código → balde (REQ-002). ``MappingProxyType`` para que nadie
+# lo mute en runtime. El test ``test_every_code_has_a_bucket`` itera
+# ``ReasonCode`` y exige que cada miembro esté acá: si alguien agrega un
+# código y se olvida del balde, la suite se pone roja.
+REASON_BUCKETS: Mapping[ReasonCode, ReasonBucket] = MappingProxyType(
+    {
+        ReasonCode.EXCLUDED_BY_FILTER: ReasonBucket.EXCLUIDO,
+        ReasonCode.DELETED_AT_SOURCE: ReasonBucket.EXCLUIDO,
+        ReasonCode.ALREADY_UPLOADED: ReasonBucket.EXCLUIDO,
+        ReasonCode.OUT_OF_SCOPE_RESUME: ReasonBucket.EXCLUIDO,
+        ReasonCode.CODE_NOT_MAPPED: ReasonBucket.BLOQUEADO,
+        ReasonCode.TYPE_NOT_IN_MANIFEST: ReasonBucket.BLOQUEADO,
+        ReasonCode.IDENTITY_UNRESOLVED: ReasonBucket.BLOQUEADO,
+        ReasonCode.METADATA_UNRESOLVED: ReasonBucket.BLOQUEADO,
+        ReasonCode.SOURCE_ROW_INCOMPLETE: ReasonBucket.BLOQUEADO,
+        ReasonCode.SOURCE_FILE_MISSING: ReasonBucket.FALLO,
+        ReasonCode.ASSEMBLY_FAILED: ReasonBucket.FALLO,
+        ReasonCode.CM_REJECTED_4XX: ReasonBucket.FALLO,
+        ReasonCode.CM_ERROR_5XX: ReasonBucket.FALLO,
+        ReasonCode.CM_TIMEOUT: ReasonBucket.FALLO,
+        ReasonCode.CM_TRANSPORT: ReasonBucket.FALLO,
+        ReasonCode.CLAIM_LOST: ReasonBucket.FALLO,
+        ReasonCode.CRASHED: ReasonBucket.FALLO,
+        ReasonCode.CANCELLED: ReasonBucket.FALLO,
+        ReasonCode.INDEXING_FAILED: ReasonBucket.FALLO,
+        ReasonCode.SOURCE_ROW_NOT_FOUND: ReasonBucket.FALLO,
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +656,17 @@ class MigrationRecord:
     completed_at: datetime | None = None
     retry_count: int = 0
 
+    # 148 REQ-004 — el censo. Ambos con default para que cada sitio de
+    # construcción pre-148 siga compilando.
+    #
+    # ``reason_code`` es ``None`` para los documentos que subieron bien:
+    # no hay nada que explicar. ``id_rvi`` se llena SIEMPRE (no sólo en
+    # las exclusiones) — es la única forma de agrupar el censo por
+    # código RVI, que es exactamente la pregunta del operador, y hoy ese
+    # código no se guarda en ninguna parte de la base.
+    reason_code: ReasonCode | None = None
+    id_rvi: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # Resúmenes de `batch` (superficie de CLI para el operador, cambio 021)
@@ -566,11 +697,36 @@ class FailedRecord:
     """Una fila ``*_FAILED`` de ``migration_log``.
 
     La usa ``batch show`` para exponer qué bloqueó la progresión.
+
+    ``reason_code`` (148) es el valor crudo de la columna homónima, o
+    ``""`` cuando la fila no dejó razón (filas pre-148, o un camino que
+    todavía no la escribe). Crudo y no :class:`ReasonCode` a propósito:
+    una proyección de lectura no debe explotar ante un código
+    desconocido — usá :meth:`ReasonCode.bucket_of` para interpretarlo.
     """
 
     txn_num: str
     status: str
     error_message: str
+    reason_code: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ReasonCount:
+    """148 REQ-006: una celda del censo — balde → razón → código RVI → conteo.
+
+    Es la forma tabular del desglose que ``batch show`` y
+    ``batch export-report`` tienen que rendir. ``bucket`` es ``""``
+    cuando el ``reason_code`` persistido no pertenece a la taxonomía
+    vigente (fila legacy o editada a mano); el conteo igual se reporta,
+    porque un documento que el censo no sabe clasificar tiene que verse,
+    no desaparecer.
+    """
+
+    bucket: str
+    reason_code: str
+    id_rvi: str
+    count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,14 +735,22 @@ class BatchDetails:
 
     ``stage_counts`` siempre contiene las claves ``S0..S5``; el dict
     interno tiene las claves ``DONE / FAILED / PENDING`` con conteos
-    enteros (cero para combos faltantes). La forma predecible le
-    permite a la CLI renderizar una tabla estable sin importar el
-    progreso del `batch`.
+    enteros (cero para combos faltantes). 148 REQ-006: además de esas
+    tres, lleva **toda** salida que exista en los datos del `batch`
+    (``FILTERED``, ``SKIPPED``, …) — antes se descartaban en silencio y
+    los números no sumaban. Las tres históricas van primero y en orden,
+    y la forma sigue siendo rectangular (cada etapa expone las mismas
+    claves) para que el renderer tenga celdas predecibles.
+
+    ``reason_counts`` (148) es el censo del `batch`: por qué no se subió
+    cada documento que no se subió. Vacío cuando no hay nada que
+    explicar.
     """
 
     info: BatchInfo
     stage_counts: Mapping[str, Mapping[str, int]]
     failed_records: tuple[FailedRecord, ...]
+    reason_counts: tuple[ReasonCount, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -606,3 +770,9 @@ class DocDetail:
     status: str
     error_message: str
     file_size_bytes: int
+    # 148 REQ-004: el censo, en crudo. ``""`` cuando la columna es NULL
+    # (fila pre-148, o un documento que subió bien y no tiene nada que
+    # explicar). Crudo y no ``ReasonCode`` por la misma razón que en
+    # ``FailedRecord``: leer no puede fallar por un código desconocido.
+    reason_code: str = ""
+    id_rvi: str = ""

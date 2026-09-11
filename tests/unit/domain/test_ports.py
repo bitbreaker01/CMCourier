@@ -64,12 +64,24 @@ class TestITrackingStoreContract:
                 "retry_failed",
                 "start_batch",
                 "complete_batch",
+                "increment_source_total",  # 148 REQ-005
+                "set_source_total",  # 148 REQ-005
                 "list_txn_nums_for_batch",
                 "list_docs_for_batch",
                 "flush",
                 "close",
             }
         )
+
+    def test_reason_code_is_an_optional_keyword_on_the_failure_paths(self) -> None:
+        """148 REQ-004: WP2 tiene que poder dejar una razón sin romper a
+        ningún caller existente — el parámetro es keyword-only y opcional."""
+        import inspect
+
+        for name in ("mark_stage_failed", "mark_stage_terminal"):
+            param = inspect.signature(getattr(ITrackingStore, name)).parameters["reason_code"]
+            assert param.kind is inspect.Parameter.KEYWORD_ONLY
+            assert param.default is None
 
 
 class TestIAssemblerContract:

@@ -14,8 +14,11 @@ from pathlib import Path
 import pytest
 
 from cmcourier.domain.models import (
+    REASON_BUCKETS,
     CMMapping,
     MigrationRecord,
+    ReasonBucket,
+    ReasonCode,
     ResolvedMetadata,
     RVABREPDocument,
     StagedFile,
@@ -388,3 +391,121 @@ class TestMigrationRecord:
         r = self._build()
         with pytest.raises(dataclasses.FrozenInstanceError):
             r.retry_count = 99  # type: ignore[misc]
+
+    # 148 REQ-004: the census columns default to "not said anything yet".
+    def test_census_fields_default_to_none(self) -> None:
+        r = self._build()
+        assert r.reason_code is None
+        assert r.id_rvi is None
+
+    def test_census_fields_round_trip(self) -> None:
+        r = self._build(reason_code=ReasonCode.CODE_NOT_MAPPED, id_rvi="0123")
+        assert r.reason_code is ReasonCode.CODE_NOT_MAPPED
+        assert r.id_rvi == "0123"
+
+
+# ---------------------------------------------------------------------------
+# 148 — Reason taxonomy (REQ-002) and its orthogonality to StageStatus (REQ-003)
+# ---------------------------------------------------------------------------
+
+
+# The spec's REQ-002 table, transcribed. Kept as a literal here on purpose:
+# if production code and this table ever disagree, the test is the contract.
+_SPEC_TABLE: dict[str, tuple[str, ...]] = {
+    "EXCLUIDO": (
+        "EXCLUDED_BY_FILTER",
+        "DELETED_AT_SOURCE",
+        "ALREADY_UPLOADED",
+        "OUT_OF_SCOPE_RESUME",
+    ),
+    "BLOQUEADO": (
+        "CODE_NOT_MAPPED",
+        "TYPE_NOT_IN_MANIFEST",
+        "IDENTITY_UNRESOLVED",
+        "METADATA_UNRESOLVED",
+        "SOURCE_ROW_INCOMPLETE",
+    ),
+    "FALLO": (
+        "SOURCE_FILE_MISSING",
+        "ASSEMBLY_FAILED",
+        "CM_REJECTED_4XX",
+        "CM_ERROR_5XX",
+        "CM_TIMEOUT",
+        "CM_TRANSPORT",
+        "CLAIM_LOST",
+        "CRASHED",
+        "CANCELLED",
+        "INDEXING_FAILED",
+        "SOURCE_ROW_NOT_FOUND",
+    ),
+}
+
+
+class TestReasonBucket148:
+    def test_exactly_three_buckets(self) -> None:
+        assert {b.value for b in ReasonBucket} == set(_SPEC_TABLE)
+
+    def test_value_equals_name(self) -> None:
+        for bucket in ReasonBucket:
+            assert bucket.value == bucket.name
+            assert bucket == bucket.name
+
+
+class TestReasonCode148:
+    def test_membership_matches_the_spec_table(self) -> None:
+        expected = {code for codes in _SPEC_TABLE.values() for code in codes}
+        assert {c.value for c in ReasonCode} == expected
+
+    def test_value_equals_name(self) -> None:
+        for code in ReasonCode:
+            assert code.value == code.name
+            assert code == code.name
+
+    def test_every_code_has_a_bucket(self) -> None:
+        """The guard: adding a code without mapping it must break the suite."""
+        for code in ReasonCode:
+            assert isinstance(REASON_BUCKETS[code], ReasonBucket)
+        assert set(REASON_BUCKETS) == set(ReasonCode)
+
+    def test_bucket_property_matches_the_spec_table(self) -> None:
+        for bucket_name, codes in _SPEC_TABLE.items():
+            for code in codes:
+                assert ReasonCode(code).bucket == ReasonBucket(bucket_name)
+
+    def test_bucket_of_accepts_raw_strings(self) -> None:
+        assert ReasonCode.bucket_of("CRASHED") is ReasonBucket.FALLO
+        assert ReasonCode.bucket_of(ReasonCode.ALREADY_UPLOADED) is ReasonBucket.EXCLUIDO
+
+    def test_bucket_of_returns_none_for_unknown(self) -> None:
+        """Legacy / hand-edited rows must not blow up a read projection."""
+        assert ReasonCode.bucket_of("NOT_A_REAL_CODE") is None
+        assert ReasonCode.bucket_of("") is None
+
+
+class TestReasonCodeIsOrthogonal148:
+    def test_no_reason_code_leaked_into_stage_status(self) -> None:
+        """REQ-003: the taxonomy adds ZERO members to ``StageStatus``."""
+        status_names = {s.name for s in StageStatus}
+        assert status_names.isdisjoint({c.name for c in ReasonCode})
+
+    def test_stage_status_membership_is_unchanged(self) -> None:
+        assert {s.value for s in StageStatus} == {
+            "S1_PENDING",
+            "S1_DONE",
+            "S1_FAILED",
+            "S1_FILTERED",
+            "S1_SKIPPED",
+            "S2_PENDING",
+            "S2_DONE",
+            "S2_FAILED",
+            "S3_PENDING",
+            "S3_DONE",
+            "S3_FAILED",
+            "S4_PENDING",
+            "S4_DONE",
+            "S4_FAILED",
+            "S5_PENDING",
+            "S5_DONE",
+            "S5_FAILED",
+            "SKIPPED",
+        }

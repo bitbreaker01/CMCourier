@@ -18,7 +18,7 @@ import pytest
 
 from cmcourier.adapters.tracking import SQLiteTrackingStore
 from cmcourier.domain.exceptions import TrackingError
-from cmcourier.domain.models import MigrationRecord, StageStatus
+from cmcourier.domain.models import MigrationRecord, ReasonCode, StageStatus
 
 pytestmark = pytest.mark.integration
 
@@ -790,3 +790,413 @@ class TestUploadedRecords:
         assert [r.txn_num for r in store.uploaded_records(batch_id=b1)] == ["TXN_B1"]
         assert {r.txn_num for r in store.uploaded_records()} == {"TXN_B1", "TXN_B2"}
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# 148 — Censo del origen: reason_code + id_rvi, denominador real, pivot completo
+# ---------------------------------------------------------------------------
+
+
+_LEGACY_MIGRATION_LOG = """
+CREATE TABLE migration_log (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    trigger_shortname   TEXT    NOT NULL,
+    trigger_cif         TEXT    NOT NULL,
+    trigger_system_id   TEXT    NOT NULL,
+    rvabrep_txn_num     TEXT    NOT NULL,
+    rvabrep_file_name   TEXT    NOT NULL,
+    batch_id            TEXT    NOT NULL,
+    status              TEXT    NOT NULL,
+    created_at          TEXT    NOT NULL,
+    cm_object_id        TEXT,
+    cm_folder           TEXT,
+    cm_object_type      TEXT,
+    error_message       TEXT,
+    source_file_path    TEXT,
+    page_count          INTEGER,
+    file_size_bytes     INTEGER,
+    started_at          TEXT,
+    completed_at        TEXT,
+    retry_count         INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+_LEGACY_ROW = """
+INSERT INTO migration_log (
+    trigger_shortname, trigger_cif, trigger_system_id, rvabrep_txn_num,
+    rvabrep_file_name, batch_id, status, created_at
+) VALUES ('OLDUSER', '000000', '1', 'TXN_LEGACY', 'OLD.001',
+          'batch-legacy', 'S5_DONE', '2026-01-01T00:00:00')
+"""
+
+
+def _log_columns(db_path: Path) -> set[str]:
+    conn = sqlite3.connect(db_path)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(migration_log)")}
+    conn.close()
+    return cols
+
+
+class TestCensusSchema148:
+    """REQ-004: dos columnas nuevas, con migración aditiva in-place."""
+
+    def test_fresh_db_has_both_columns(self, store: SQLiteTrackingStore, tmp_path: Path) -> None:
+        store.close()
+        cols = _log_columns(tmp_path / "tracking.db")
+        assert "reason_code" in cols
+        assert "id_rvi" in cols
+
+    def test_legacy_db_upgrades_in_place_and_stays_readable(self, tmp_path: Path) -> None:
+        """Una base creada SIN las columnas se actualiza al abrirla, y la fila
+        vieja sigue ahí y se sigue leyendo."""
+        db = tmp_path / "legacy.db"
+        conn = sqlite3.connect(db)
+        conn.execute(_LEGACY_MIGRATION_LOG)
+        conn.execute(_LEGACY_ROW)
+        conn.commit()
+        conn.close()
+
+        store = SQLiteTrackingStore(db)
+        docs = store.list_docs_for_batch("batch-legacy")
+        store.close()
+
+        assert {"reason_code", "id_rvi"} <= _log_columns(db)
+        assert [d.txn_num for d in docs] == ["TXN_LEGACY"]
+        assert docs[0].status == "S5_DONE"
+        assert docs[0].reason_code == ""  # columna recién agregada ⇒ NULL ⇒ ""
+        assert docs[0].id_rvi == ""
+
+    def test_upgrade_is_idempotent(self, tmp_path: Path) -> None:
+        db = tmp_path / "twice.db"
+        SQLiteTrackingStore(db).close()
+        SQLiteTrackingStore(db).close()  # si re-agregara la columna, ALTER TABLE explota
+        assert {"reason_code", "id_rvi"} <= _log_columns(db)
+
+
+class TestCensusColumnsRoundTrip148:
+    """REQ-004: todo camino de escritura puede dejar su razón y su código RVI."""
+
+    def _row(self, tmp_path: Path, txn: str) -> tuple[str | None, str | None]:
+        conn = sqlite3.connect(tmp_path / "tracking.db")
+        row = conn.execute(
+            "SELECT reason_code, id_rvi FROM migration_log WHERE rvabrep_txn_num = ?",
+            (txn,),
+        ).fetchone()
+        conn.close()
+        return (row[0], row[1])
+
+    def test_mark_stage_pending_persists_both(
+        self, store: SQLiteTrackingStore, tmp_path: Path
+    ) -> None:
+        batch_id = store.start_batch(total_records=1)
+        record = _make_record(
+            batch_id,
+            "TXN_CENSUS_1",
+            reason_code=ReasonCode.EXCLUDED_BY_FILTER,
+            id_rvi="0042",
+        )
+        store.mark_stage_pending(record, StageStatus.S1_PENDING)
+        store.flush()
+        store.close()
+        assert self._row(tmp_path, "TXN_CENSUS_1") == ("EXCLUDED_BY_FILTER", "0042")
+
+    def test_normal_upload_leaves_reason_code_null(
+        self, store: SQLiteTrackingStore, tmp_path: Path
+    ) -> None:
+        """El que subió bien no tiene nada que explicar — pero sí tiene id_rvi."""
+        batch_id = store.start_batch(total_records=1)
+        store.mark_stage_pending(
+            _make_record(batch_id, "TXN_CENSUS_OK", id_rvi="0007"),
+            StageStatus.S5_PENDING,
+        )
+        store.mark_stage_done("TXN_CENSUS_OK", batch_id, StageStatus.S5_DONE, cm_object_id="cm-x")
+        store.flush()
+        store.close()
+        assert self._row(tmp_path, "TXN_CENSUS_OK") == (None, "0007")
+
+    def test_mark_stage_failed_records_reason_code(
+        self, store: SQLiteTrackingStore, tmp_path: Path
+    ) -> None:
+        batch_id = store.start_batch(total_records=1)
+        store.mark_stage_pending(_make_record(batch_id, "TXN_CENSUS_F"), StageStatus.S2_PENDING)
+        store.mark_stage_failed(
+            "TXN_CENSUS_F",
+            batch_id,
+            StageStatus.S2_FAILED,
+            "IDRVI 0099 sin fila en MapeoRVI_CM.csv",
+            reason_code=ReasonCode.CODE_NOT_MAPPED,
+        )
+        store.flush()
+        store.close()
+        assert self._row(tmp_path, "TXN_CENSUS_F")[0] == "CODE_NOT_MAPPED"
+
+    def test_mark_stage_failed_without_reason_leaves_column_untouched(
+        self, store: SQLiteTrackingStore, tmp_path: Path
+    ) -> None:
+        """Los callers pre-148 no pisan una razón ya escrita."""
+        batch_id = store.start_batch(total_records=1)
+        store.mark_stage_pending(
+            _make_record(batch_id, "TXN_CENSUS_K", reason_code=ReasonCode.CRASHED),
+            StageStatus.S2_PENDING,
+        )
+        store.mark_stage_failed("TXN_CENSUS_K", batch_id, StageStatus.S2_FAILED, "boom")
+        store.flush()
+        store.close()
+        assert self._row(tmp_path, "TXN_CENSUS_K")[0] == "CRASHED"
+
+    def test_mark_stage_terminal_records_reason_code(
+        self, store: SQLiteTrackingStore, tmp_path: Path
+    ) -> None:
+        batch_id = store.start_batch(total_records=1)
+        store.mark_stage_pending(_make_record(batch_id, "TXN_CENSUS_T"), StageStatus.S1_PENDING)
+        store.mark_stage_terminal(
+            "TXN_CENSUS_T",
+            batch_id,
+            StageStatus.S1_FILTERED,
+            "deleted_at_source",
+            reason_code=ReasonCode.DELETED_AT_SOURCE,
+        )
+        store.flush()
+        conn = sqlite3.connect(tmp_path / "tracking.db")
+        row = conn.execute(
+            "SELECT reason_code, retry_count FROM migration_log WHERE rvabrep_txn_num = ?",
+            ("TXN_CENSUS_T",),
+        ).fetchone()
+        conn.close()
+        store.close()
+        assert row[0] == "DELETED_AT_SOURCE"
+        assert row[1] == 0  # sigue sin ser una falla
+
+    def test_record_external_upload_accepts_id_rvi(
+        self, store: SQLiteTrackingStore, tmp_path: Path
+    ) -> None:
+        store.record_external_upload(
+            txn_num="TXN_EXT_148",
+            file_name="EXT.001",
+            shortname="EXTUSER",
+            cif="000000",
+            system_id="1",
+            cm_object_id="cm-ext",
+            id_rvi="0055",
+        )
+        store.flush()
+        store.close()
+        assert self._row(tmp_path, "TXN_EXT_148") == (None, "0055")
+
+
+class TestCensusReadProjections148:
+    """REQ-004: las proyecciones de lectura cargan los campos nuevos."""
+
+    def test_list_docs_for_batch_carries_reason_and_id_rvi(
+        self, store: SQLiteTrackingStore
+    ) -> None:
+        batch_id = store.start_batch(total_records=2)
+        store.mark_stage_pending(
+            _make_record(batch_id, "TXN_P1", id_rvi="0001"), StageStatus.S5_PENDING
+        )
+        store.mark_stage_done("TXN_P1", batch_id, StageStatus.S5_DONE)
+        store.mark_stage_pending(
+            _make_record(batch_id, "TXN_P2", id_rvi="0002"), StageStatus.S1_PENDING
+        )
+        store.mark_stage_terminal(
+            "TXN_P2",
+            batch_id,
+            StageStatus.S1_FILTERED,
+            "excluido por filtro",
+            reason_code=ReasonCode.EXCLUDED_BY_FILTER,
+        )
+        store.flush()
+        docs = {d.txn_num: d for d in store.list_docs_for_batch(batch_id)}
+        store.close()
+        assert docs["TXN_P1"].reason_code == ""
+        assert docs["TXN_P1"].id_rvi == "0001"
+        assert docs["TXN_P2"].reason_code == "EXCLUDED_BY_FILTER"
+        assert docs["TXN_P2"].id_rvi == "0002"
+
+    def test_failed_records_carry_reason_code(self, store: SQLiteTrackingStore) -> None:
+        batch_id = store.start_batch(total_records=1)
+        store.mark_stage_pending(_make_record(batch_id, "TXN_FR"), StageStatus.S5_PENDING)
+        store.mark_stage_failed(
+            "TXN_FR",
+            batch_id,
+            StageStatus.S5_FAILED,
+            "cmis 500",
+            reason_code=ReasonCode.CM_ERROR_5XX,
+        )
+        store.flush()
+        details = store.get_batch_details(batch_id)
+        store.close()
+        assert details is not None
+        assert details.failed_records[0].reason_code == "CM_ERROR_5XX"
+
+    def test_reason_counts_group_by_bucket_reason_and_id_rvi(
+        self, store: SQLiteTrackingStore
+    ) -> None:
+        """El desglose balde → reason_code → id_rvi que pide REQ-006."""
+        batch_id = store.start_batch(total_records=4)
+        plan = (
+            ("TXN_C1", "0010", ReasonCode.EXCLUDED_BY_FILTER),
+            ("TXN_C2", "0010", ReasonCode.EXCLUDED_BY_FILTER),
+            ("TXN_C3", "0020", ReasonCode.EXCLUDED_BY_FILTER),
+            ("TXN_C4", "0030", ReasonCode.CODE_NOT_MAPPED),
+        )
+        for txn, id_rvi, reason in plan:
+            store.mark_stage_pending(
+                _make_record(batch_id, txn, id_rvi=id_rvi, reason_code=reason),
+                StageStatus.S1_PENDING,
+            )
+        # Un doc que subió bien NO entra en el censo de razones.
+        store.mark_stage_pending(
+            _make_record(batch_id, "TXN_C5", id_rvi="0010"), StageStatus.S5_PENDING
+        )
+        store.mark_stage_done("TXN_C5", batch_id, StageStatus.S5_DONE)
+        store.flush()
+        details = store.get_batch_details(batch_id)
+        store.close()
+        assert details is not None
+        got = {(r.bucket, r.reason_code, r.id_rvi): r.count for r in details.reason_counts}
+        assert got == {
+            ("EXCLUIDO", "EXCLUDED_BY_FILTER", "0010"): 2,
+            ("EXCLUIDO", "EXCLUDED_BY_FILTER", "0020"): 1,
+            ("BLOQUEADO", "CODE_NOT_MAPPED", "0030"): 1,
+        }
+
+    def test_reason_counts_empty_when_nothing_to_explain(self, store: SQLiteTrackingStore) -> None:
+        batch_id = store.start_batch(total_records=1)
+        store.mark_stage_pending(_make_record(batch_id, "TXN_CLEAN"), StageStatus.S5_PENDING)
+        store.mark_stage_done("TXN_CLEAN", batch_id, StageStatus.S5_DONE)
+        store.flush()
+        details = store.get_batch_details(batch_id)
+        store.close()
+        assert details is not None
+        assert details.reason_counts == ()
+
+    def test_retry_failed_clears_the_reason_together_with_the_error(
+        self, store: SQLiteTrackingStore
+    ) -> None:
+        """La razón muere con la falla que la produjo.
+
+        ``retry_failed`` ya limpiaba ``error_message``; si la razón
+        sobreviviera, un doc reintentado con éxito quedaría contado en el
+        censo Y en los subidos, y los números dejarían de sumar.
+        """
+        batch_id = store.start_batch(total_records=1)
+        store.mark_stage_pending(_make_record(batch_id, "TXN_RETRY"), StageStatus.S5_PENDING)
+        store.mark_stage_failed(
+            "TXN_RETRY",
+            batch_id,
+            StageStatus.S5_FAILED,
+            "cmis 500",
+            reason_code=ReasonCode.CM_ERROR_5XX,
+        )
+        store.flush()
+        assert store.retry_failed(batch_id) == 1
+        details = store.get_batch_details(batch_id)
+        store.close()
+        assert details is not None
+        assert details.reason_counts == ()
+
+
+class TestSourceTotal148:
+    """REQ-005: el denominador real, no el batch_size configurado."""
+
+    def test_increment_accumulates_as_s1_sees_documents(self, store: SQLiteTrackingStore) -> None:
+        batch_id = store.start_batch(total_records=0)  # streaming no sabe el total
+        store.increment_source_total(batch_id, 500)
+        store.increment_source_total(batch_id, 500)
+        store.increment_source_total(batch_id, 37)
+        store.flush()
+        details = store.get_batch_details(batch_id)
+        store.close()
+        assert details is not None
+        assert details.info.total_records == 1037
+
+    def test_set_overrides_the_seed_written_by_start_batch(
+        self, store: SQLiteTrackingStore
+    ) -> None:
+        """staged siembra el batch_size configurado: no es un conteo del origen."""
+        batch_id = store.start_batch(total_records=1000)
+        store.set_source_total(batch_id, 0)
+        store.increment_source_total(batch_id, 12)
+        store.flush()
+        assert [b.total_records for b in store.list_batches() if b.batch_id == batch_id] == [12]
+        store.close()
+
+    def test_increment_is_visible_to_list_batches(self, store: SQLiteTrackingStore) -> None:
+        batch_id = store.start_batch(total_records=0)
+        store.increment_source_total(batch_id, 3)
+        store.flush()
+        infos = {b.batch_id: b for b in store.list_batches()}
+        store.close()
+        assert infos[batch_id].total_records == 3
+
+    def test_increment_on_unknown_batch_is_a_noop(self, store: SQLiteTrackingStore) -> None:
+        store.increment_source_total("ghost-789", 10)
+        store.flush()
+        assert store.list_batches() == []
+        store.close()
+
+
+class TestPivotRendersEveryOutcome148:
+    """REQ-006: S1_FILTERED y S1_SKIPPED dejan de caerse de los agregados."""
+
+    def _seed(self, store: SQLiteTrackingStore) -> str:
+        batch_id = store.start_batch(total_records=4)
+        store.mark_stage_pending(_make_record(batch_id, "TXN_D"), StageStatus.S5_PENDING)
+        store.mark_stage_done("TXN_D", batch_id, StageStatus.S5_DONE)
+        store.mark_stage_pending(_make_record(batch_id, "TXN_F1"), StageStatus.S1_PENDING)
+        store.mark_stage_terminal("TXN_F1", batch_id, StageStatus.S1_FILTERED, "borrado")
+        store.mark_stage_pending(_make_record(batch_id, "TXN_F2"), StageStatus.S1_PENDING)
+        store.mark_stage_terminal("TXN_F2", batch_id, StageStatus.S1_FILTERED, "borrado")
+        store.mark_stage_pending(_make_record(batch_id, "TXN_S1"), StageStatus.S1_PENDING)
+        store.mark_stage_terminal("TXN_S1", batch_id, StageStatus.S1_SKIPPED, "ya subido")
+        store.flush()
+        return batch_id
+
+    def test_filtered_and_skipped_are_reported(self, store: SQLiteTrackingStore) -> None:
+        batch_id = self._seed(store)
+        details = store.get_batch_details(batch_id)
+        store.close()
+        assert details is not None
+        assert details.stage_counts["S1"]["FILTERED"] == 2
+        assert details.stage_counts["S1"]["SKIPPED"] == 1
+        assert details.stage_counts["S5"]["DONE"] == 1
+
+    def test_numbers_add_up_to_the_row_count(self, store: SQLiteTrackingStore) -> None:
+        """Antes de 148, DONE+FAILED+PENDING no sumaba el total y nadie avisaba."""
+        batch_id = self._seed(store)
+        details = store.get_batch_details(batch_id)
+        store.close()
+        assert details is not None
+        total = sum(n for states in details.stage_counts.values() for n in states.values())
+        assert total == 4
+
+    def test_legacy_outcomes_come_first_and_in_order(self, store: SQLiteTrackingStore) -> None:
+        """La salida actual no se reordena: DONE, FAILED, PENDING y después el resto."""
+        batch_id = self._seed(store)
+        details = store.get_batch_details(batch_id)
+        store.close()
+        assert details is not None
+        for states in details.stage_counts.values():
+            assert list(states)[:3] == ["DONE", "FAILED", "PENDING"]
+
+    def test_shape_stays_rectangular_across_stages(self, store: SQLiteTrackingStore) -> None:
+        """Todas las etapas exponen las mismas claves — el renderer no adivina."""
+        batch_id = self._seed(store)
+        details = store.get_batch_details(batch_id)
+        store.close()
+        assert details is not None
+        shapes = {tuple(states) for states in details.stage_counts.values()}
+        assert len(shapes) == 1
+        assert set(shapes.pop()) == {"DONE", "FAILED", "PENDING", "FILTERED", "SKIPPED"}
+
+    def test_clean_batch_keeps_the_three_legacy_outcomes(self, store: SQLiteTrackingStore) -> None:
+        batch_id = store.start_batch(total_records=1)
+        store.mark_stage_pending(_make_record(batch_id, "TXN_ONLY"), StageStatus.S1_PENDING)
+        store.mark_stage_done("TXN_ONLY", batch_id, StageStatus.S1_DONE)
+        store.flush()
+        details = store.get_batch_details(batch_id)
+        store.close()
+        assert details is not None
+        for stage in ("S0", "S1", "S2", "S3", "S4", "S5"):
+            assert list(details.stage_counts[stage]) == ["DONE", "FAILED", "PENDING"]

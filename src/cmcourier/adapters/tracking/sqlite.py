@@ -47,6 +47,8 @@ from cmcourier.domain.models import (
     DocDetail,
     FailedRecord,
     MigrationRecord,
+    ReasonCode,
+    ReasonCount,
     StageStatus,
 )
 from cmcourier.domain.ports import ITrackingStore
@@ -79,9 +81,24 @@ CREATE TABLE IF NOT EXISTS migration_log (
     file_size_bytes     INTEGER,
     started_at          TEXT,
     completed_at        TEXT,
-    retry_count         INTEGER NOT NULL DEFAULT 0
+    retry_count         INTEGER NOT NULL DEFAULT 0,
+    reason_code         TEXT,
+    id_rvi              TEXT
 )
 """
+
+# 148 REQ-004: las dos columnas del censo. Nullable y con migración
+# aditiva idempotente (mismo patrón que ``_AUDIT_COLUMNS`` de la 124) para
+# que las bases existentes se actualicen en el lugar:
+#
+# * ``reason_code`` — el enum ``ReasonCode`` (REQ-002), NULL para los
+#   documentos que subieron bien: no hay nada que explicar.
+# * ``id_rvi`` — el código RVI del documento. Se llena SIEMPRE, no sólo
+#   en las exclusiones: sin él no se puede agrupar el censo por código,
+#   que es exactamente la pregunta del operador, y hasta 148 ese código
+#   no se guardaba en ninguna parte de la base (sólo vivía en
+#   ``RVABREPDocument.index7``, en memoria).
+_CENSUS_COLUMNS: tuple[str, ...] = ("reason_code", "id_rvi")
 
 # 096: batch_id sintético bajo el que el As400Reconciler importa docs
 # que otro sistema subió (no choca con UUIDs de corridas reales).
@@ -332,10 +349,11 @@ class SQLiteTrackingStore(ITrackingStore):
         conn.execute(_CREATE_DOCUMENT_CACHE)
         conn.execute(_CREATE_IDX_DOCUMENT_CACHE_AGE)
         # 124: migración idempotente de las columnas de auditoría.
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(migration_batch)")}
-        for col in _AUDIT_COLUMNS:
-            if col not in existing:
-                conn.execute(f"ALTER TABLE migration_batch ADD COLUMN {col} TEXT")
+        _add_missing_columns(conn, "migration_batch", _AUDIT_COLUMNS)
+        # 148: ídem para las dos columnas del censo. ``CREATE TABLE IF NOT
+        # EXISTS`` no toca una tabla que ya existe, así que las bases
+        # abiertas antes de 148 se actualizan sólo por acá.
+        _add_missing_columns(conn, "migration_log", _CENSUS_COLUMNS)
         conn.commit()
 
     def _open_read_connection(self) -> sqlite3.Connection:
@@ -497,6 +515,42 @@ class SQLiteTrackingStore(ITrackingStore):
             (datetime.now().isoformat(), batch_id),
         )
 
+    def increment_source_total(self, batch_id: str, delta: int) -> None:
+        """148 REQ-005: suma *delta* documentos del origen al denominador.
+
+        ``migration_batch.total_records`` se escribía una sola vez en
+        ``start_batch`` y no era un conteo del origen: streaming pasa
+        ``0`` y staged pasa el ``batch_size`` configurado. Este es el
+        camino normal para corregirlo, porque **el total no se conoce de
+        antemano**: S1 ve los documentos de a chunks y streaming nunca
+        sabe cuántos hay. Se llama a medida que se ven.
+
+        El ``+ delta`` se hace en SQL, no en Python, así que no hay
+        read-modify-write: el thread writer serializa todas las
+        escrituras encoladas, con lo cual N incrementos concurrentes
+        desde N workers suman exacto.
+
+        Un ``batch_id`` desconocido es un no-op (``UPDATE`` sin filas),
+        no un error: el tracking nunca debe frenar el pipeline.
+        """
+        self._enqueue(
+            "UPDATE migration_batch SET total_records = total_records + ? WHERE batch_id = ?",
+            (int(delta), batch_id),
+        )
+
+    def set_source_total(self, batch_id: str, total: int) -> None:
+        """148 REQ-005: fija el denominador en un valor absoluto.
+
+        Dos usos: sembrar en ``0`` un `batch` cuyo ``start_batch`` escribió
+        un valor que no es un conteo (staged pasa el ``batch_size``), y
+        los caminos donde el total del origen SÍ se conoce exacto de una
+        (un CSV de triggers ya leído, un ``COUNT(*)``).
+        """
+        self._enqueue(
+            "UPDATE migration_batch SET total_records = ? WHERE batch_id = ?",
+            (int(total), batch_id),
+        )
+
     def mark_stage_pending(self, record: MigrationRecord, stage: StageStatus) -> None:
         _require_state(stage, "PENDING")
         # INSERT OR IGNORE vuelve esto idempotente dentro de un `batch` (índice
@@ -507,8 +561,9 @@ class SQLiteTrackingStore(ITrackingStore):
             "rvabrep_txn_num, rvabrep_file_name, batch_id, status, created_at, "
             "cm_object_id, cm_folder, cm_object_type, error_message, "
             "source_file_path, page_count, file_size_bytes, "
-            "started_at, completed_at, retry_count"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "started_at, completed_at, retry_count, "
+            "reason_code, id_rvi"  # 148
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         self._enqueue(sql, _record_to_params(record, stage))
 
@@ -552,6 +607,7 @@ class SQLiteTrackingStore(ITrackingStore):
         cif: str,
         system_id: str,
         cm_object_id: str,
+        id_rvi: str | None = None,
     ) -> None:
         """096: importa a ``migration_log`` un doc que otro sistema subió.
 
@@ -559,14 +615,18 @@ class SQLiteTrackingStore(ITrackingStore):
         ``STSCOD='O'`` que el tracking local no conoce. La fila se inserta
         bajo el ``batch_id`` sintético ``__as400_import__`` para no
         colisionar con corridas reales; ``INSERT OR IGNORE`` la vuelve
-        idempotente entre pasadas."""
+        idempotente entre pasadas.
+
+        148: ``id_rvi`` es opcional porque el reconciliador no siempre
+        tiene la fila RVABREP a mano. ``reason_code`` queda NULL — este
+        documento SÍ se subió."""
         now = datetime.now().isoformat()
         self._enqueue(
             "INSERT OR IGNORE INTO migration_log ("
             "trigger_shortname, trigger_cif, trigger_system_id, "
             "rvabrep_txn_num, rvabrep_file_name, batch_id, status, created_at, "
-            "cm_object_id, completed_at"
-            ") VALUES (?, ?, ?, ?, ?, ?, 'S5_DONE', ?, ?, ?)",
+            "cm_object_id, completed_at, id_rvi"
+            ") VALUES (?, ?, ?, ?, ?, ?, 'S5_DONE', ?, ?, ?, ?)",
             (
                 shortname,
                 cif,
@@ -577,18 +637,29 @@ class SQLiteTrackingStore(ITrackingStore):
                 now,
                 cm_object_id,
                 now,
+                id_rvi,
             ),
         )
 
     def mark_stage_failed(
-        self, txn_num: str, batch_id: str, stage: StageStatus, error: str
+        self,
+        txn_num: str,
+        batch_id: str,
+        stage: StageStatus,
+        error: str,
+        *,
+        reason_code: ReasonCode | None = None,
     ) -> None:
         _require_state(stage, "FAILED")
+        # 148 REQ-004: ``reason_code`` es opcional — cuando es ``None`` la
+        # columna no se toca, así una razón escrita antes sobrevive (mismo
+        # criterio que ``cm_object_id`` en ``mark_stage_done``).
+        clause, extra = _reason_code_assignment(reason_code)
         self._enqueue(
             "UPDATE migration_log "
-            "SET status = ?, error_message = ?, retry_count = retry_count + 1 "
+            f"SET status = ?, error_message = ?, retry_count = retry_count + 1{clause} "
             "WHERE rvabrep_txn_num = ? AND batch_id = ?",
-            (stage.value, error, txn_num, batch_id),
+            (stage.value, error, *extra, txn_num, batch_id),
         )
 
     def mark_stage_terminal(
@@ -597,6 +668,8 @@ class SQLiteTrackingStore(ITrackingStore):
         batch_id: str,
         stage: StageStatus,
         error_message: str,
+        *,
+        reason_code: ReasonCode | None = None,
     ) -> None:
         # 062: transición terminal que NO es una falla — se usa para
         # ``S1_FILTERED`` (borrado en origen) y ``S1_SKIPPED`` (ya subido en
@@ -605,11 +678,12 @@ class SQLiteTrackingStore(ITrackingStore):
         # recorrido acá por un motivo que no es de error.
         _require_terminal_state(stage)
         completed_at = datetime.now().isoformat()
+        clause, extra = _reason_code_assignment(reason_code)
         self._enqueue(
             "UPDATE migration_log "
-            "SET status = ?, error_message = ?, completed_at = ? "
+            f"SET status = ?, error_message = ?, completed_at = ?{clause} "
             "WHERE rvabrep_txn_num = ? AND batch_id = ?",
-            (stage.value, error_message, completed_at, txn_num, batch_id),
+            (stage.value, error_message, completed_at, *extra, txn_num, batch_id),
         )
 
     def record_staged_file_metadata(
@@ -734,8 +808,18 @@ class SQLiteTrackingStore(ITrackingStore):
                 (batch_id,),
             ).fetchall()
             failed_rows = conn.execute(
-                "SELECT rvabrep_txn_num, status, COALESCE(error_message, '') "
+                "SELECT rvabrep_txn_num, status, COALESCE(error_message, ''), "
+                "COALESCE(reason_code, '') "
                 "FROM migration_log WHERE batch_id = ? AND status LIKE '%_FAILED'",
+                (batch_id,),
+            ).fetchall()
+            # 148 REQ-006: el censo — por qué no se subió cada doc que no
+            # se subió, agrupado por razón y código RVI. El balde lo pone
+            # el dominio; la base sólo guarda el código.
+            reason_rows = conn.execute(
+                "SELECT reason_code, COALESCE(id_rvi, ''), COUNT(*) FROM migration_log "
+                "WHERE batch_id = ? AND reason_code IS NOT NULL AND reason_code != '' "
+                "GROUP BY reason_code, id_rvi ORDER BY reason_code, id_rvi",
                 (batch_id,),
             ).fetchall()
         except sqlite3.Error as exc:
@@ -744,8 +828,10 @@ class SQLiteTrackingStore(ITrackingStore):
             info=_row_to_batch_info(batch_row),
             stage_counts=_pivot_status_counts(status_rows),
             failed_records=tuple(
-                FailedRecord(txn_num=r[0], status=r[1], error_message=r[2]) for r in failed_rows
+                FailedRecord(txn_num=r[0], status=r[1], error_message=r[2], reason_code=r[3])
+                for r in failed_rows
             ),
+            reason_counts=tuple(_row_to_reason_count(r) for r in reason_rows),
         )
 
     def list_docs_for_batch(self, batch_id: str) -> list[DocDetail]:
@@ -755,7 +841,8 @@ class SQLiteTrackingStore(ITrackingStore):
                 self._read_pool.acquire()
                 .execute(
                     "SELECT rvabrep_txn_num, COALESCE(rvabrep_file_name, ''), status, "
-                    "COALESCE(error_message, ''), COALESCE(file_size_bytes, 0) "
+                    "COALESCE(error_message, ''), COALESCE(file_size_bytes, 0), "
+                    "COALESCE(reason_code, ''), COALESCE(id_rvi, '') "  # 148
                     "FROM migration_log WHERE batch_id = ? ORDER BY rvabrep_txn_num",
                     (batch_id,),
                 )
@@ -770,6 +857,8 @@ class SQLiteTrackingStore(ITrackingStore):
                 status=str(r[2]),
                 error_message=str(r[3]),
                 file_size_bytes=int(r[4] or 0),
+                reason_code=str(r[5]),
+                id_rvi=str(r[6]),
             )
             for r in rows
         ]
@@ -793,7 +882,8 @@ class SQLiteTrackingStore(ITrackingStore):
                     cursor = self._sync_conn.execute(
                         "UPDATE migration_log "
                         "SET status = REPLACE(status, '_FAILED', '_PENDING'), "
-                        "    error_message = NULL "
+                        "    error_message = NULL, "
+                        "    reason_code = NULL "  # 148: la razón muere con la falla
                         "WHERE batch_id = ? AND status LIKE '%_FAILED'",
                         (batch_id,),
                     )
@@ -801,7 +891,8 @@ class SQLiteTrackingStore(ITrackingStore):
                     cursor = self._sync_conn.execute(
                         "UPDATE migration_log "
                         "SET status = REPLACE(status, '_FAILED', '_PENDING'), "
-                        "    error_message = NULL "
+                        "    error_message = NULL, "
+                        "    reason_code = NULL "  # 148: la razón muere con la falla
                         "WHERE batch_id = ? AND status = ?",
                         (batch_id, stage.value),
                     )
@@ -858,34 +949,92 @@ def _row_to_batch_info(row: tuple[Any, ...]) -> BatchInfo:
     )
 
 
+def _row_to_reason_count(row: tuple[Any, ...]) -> ReasonCount:
+    """148: mapea ``(reason_code, id_rvi, count)`` resolviendo el balde.
+
+    ``bucket_of`` devuelve ``None`` ante un código que no pertenece a la
+    taxonomía vigente (fila legacy o editada a mano): en ese caso el
+    balde queda en ``""`` y el conteo se reporta igual. Un documento que
+    el censo no sabe clasificar tiene que verse, no desaparecer.
+    """
+    bucket = ReasonCode.bucket_of(str(row[0]))
+    return ReasonCount(
+        bucket=bucket.value if bucket is not None else "",
+        reason_code=str(row[0]),
+        id_rvi=str(row[1]),
+        count=int(row[2]),
+    )
+
+
+def _add_missing_columns(conn: sqlite3.Connection, table: str, columns: tuple[str, ...]) -> None:
+    """Migración aditiva idempotente: ``ALTER TABLE ADD COLUMN`` sólo lo que falta.
+
+    ``CREATE TABLE IF NOT EXISTS`` no toca una tabla que ya existe, así
+    que esta es la única vía por la que una base vieja se pone al día.
+    Nunca borra ni reescribe: las filas existentes quedan con ``NULL`` en
+    la columna nueva y se siguen leyendo igual.
+    """
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for col in columns:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+
+
+def _reason_code_assignment(reason_code: ReasonCode | None) -> tuple[str, tuple[Any, ...]]:
+    """148: el fragmento ``SET`` del reason_code, o nada si no vino.
+
+    Devolver ``("", ())`` cuando es ``None`` deja la columna intacta, así
+    los callers pre-148 no pisan con NULL una razón ya escrita.
+    """
+    if reason_code is None:
+        return ("", ())
+    return (", reason_code = ?", (reason_code.value,))
+
+
 # Stages que la tabla ``batch show`` del CLI siempre renderiza, en orden fijo.
 _DISPLAY_STAGES: tuple[str, ...] = ("S0", "S1", "S2", "S3", "S4", "S5")
+# Las tres salidas históricas. 148 REQ-006: ya NO son la lista completa —
+# son sólo las que van primero y en ese orden, para que la salida actual
+# no se reordene. Toda otra salida que exista en los datos se agrega
+# detrás (ver ``_pivot_status_counts``).
 _DISPLAY_OUTCOMES: tuple[str, ...] = ("DONE", "FAILED", "PENDING")
 
 
 def _pivot_status_counts(
     rows: list[tuple[Any, ...]],
 ) -> dict[str, dict[str, int]]:
-    """Agrupa filas ``(status, count)`` en ``{Sn: {DONE: x, FAILED: y, PENDING: z}}``.
+    """Agrupa filas ``(status, count)`` en ``{Sn: {salida: conteo}}``.
 
-    Siempre emite la forma completa ``S0..S5`` × ``DONE / FAILED / PENDING``
-    para que el renderer tenga celdas predecibles.
+    148 REQ-006: rinde **toda** salida que exista en los datos, no sólo
+    ``DONE / FAILED / PENDING``. Hasta 148 el pivot descartaba en
+    silencio ``S1_FILTERED`` y ``S1_SKIPPED``, con lo cual en
+    ``batch show`` la suma de las columnas no daba el total y nadie
+    avisaba. Un reporte que no cuadra y no avisa es peor que no tener
+    reporte.
+
+    La forma sigue siendo predecible para el renderer: ``S0..S5``
+    completo, las tres salidas históricas primero y en orden, y el mismo
+    juego de claves en cada etapa (cero para los combos que no existen).
     """
-    pivot: dict[str, dict[str, int]] = {
-        stage: dict.fromkeys(_DISPLAY_OUTCOMES, 0) for stage in _DISPLAY_STAGES
-    }
+    outcomes = list(_DISPLAY_OUTCOMES)
+    parsed: list[tuple[str, str, int]] = []
     for status_value, count in rows:
-        parts = str(status_value).split("_", 1)
-        if len(parts) != 2:
+        stage, _, outcome = str(status_value).partition("_")
+        if not outcome or stage not in _DISPLAY_STAGES:
             continue
-        stage, outcome = parts[0], parts[1]
-        if stage in pivot and outcome in pivot[stage]:
-            pivot[stage][outcome] = int(count)
+        parsed.append((stage, outcome, int(count)))
+        if outcome not in outcomes:
+            outcomes.append(outcome)
+    pivot: dict[str, dict[str, int]] = {
+        stage: dict.fromkeys(outcomes, 0) for stage in _DISPLAY_STAGES
+    }
+    for stage, outcome, count in parsed:
+        pivot[stage][outcome] = count
     return pivot
 
 
 def _record_to_params(record: MigrationRecord, stage: StageStatus) -> tuple[Any, ...]:
-    """Aplana un :class:`MigrationRecord` en la tupla de 18 elementos para INSERT."""
+    """Aplana un :class:`MigrationRecord` en la tupla de 20 elementos para INSERT."""
     return (
         record.trigger_shortname,
         record.trigger_cif,
@@ -905,4 +1054,7 @@ def _record_to_params(record: MigrationRecord, stage: StageStatus) -> tuple[Any,
         record.started_at.isoformat() if record.started_at else None,
         record.completed_at.isoformat() if record.completed_at else None,
         record.retry_count,
+        # 148: el enum va como string; ``None`` ⇒ NULL (subió bien).
+        record.reason_code.value if record.reason_code is not None else None,
+        record.id_rvi,
     )

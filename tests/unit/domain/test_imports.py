@@ -13,6 +13,8 @@ def test_models_importable() -> None:
     from cmcourier.domain import (
         CMMapping,
         MigrationRecord,
+        ReasonBucket,
+        ReasonCode,
         ResolvedMetadata,
         RVABREPDocument,
         StagedFile,
@@ -30,6 +32,8 @@ def test_models_importable() -> None:
         for x in (
             CMMapping,
             MigrationRecord,
+            ReasonBucket,
+            ReasonCode,
             ResolvedMetadata,
             RVABREPDocument,
             StagedFile,
@@ -139,6 +143,8 @@ def test_dunder_all_is_complete() -> None:
         # Modelos + helpers
         "CMMapping",
         "MigrationRecord",
+        "ReasonBucket",
+        "ReasonCode",
         "ResolvedMetadata",
         "RVABREPDocument",
         "StageStatus",

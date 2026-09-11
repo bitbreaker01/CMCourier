@@ -38,6 +38,7 @@ from cmcourier.domain.models import (
     DocDetail,
     MigrationRecord,
     RawResponse,
+    ReasonCode,
     RVABREPDocument,
     StagedFile,
     StageStatus,
@@ -161,9 +162,18 @@ class ITrackingStore(ABC):
         batch_id: str,
         stage: StageStatus,
         error: str,
+        *,
+        reason_code: ReasonCode | None = None,
     ) -> None:
         """Transiciona la fila de *txn_num* en *batch_id* a ``Sn_FAILED`` y
-        guarda el mensaje de error legible."""
+        guarda el mensaje de error legible.
+
+        148 REQ-004: ``reason_code`` es el eje ORTOGONAL al status — el
+        status dice dónde paró, el código dice por qué, y el balde
+        (:class:`ReasonBucket`) dice quién lo arregla. Opcional: cuando
+        es ``None`` la implementación NO DEBE tocar la columna, para que
+        sobreviva una razón escrita antes.
+        """
 
     @abstractmethod
     def mark_stage_terminal(
@@ -172,6 +182,8 @@ class ITrackingStore(ABC):
         batch_id: str,
         stage: StageStatus,
         error_message: str,
+        *,
+        reason_code: ReasonCode | None = None,
     ) -> None:
         """062: transición terminal que NO es una falla.
 
@@ -187,6 +199,10 @@ class ITrackingStore(ABC):
         * **NO** incrementa ``retry_count`` — el doc no "falló", terminó
           su recorrido aquí por un motivo no-error.
         * Setea ``completed_at``.
+
+        148 REQ-004: acepta ``reason_code`` con la misma semántica que
+        :meth:`mark_stage_failed` — opcional, y ``None`` deja la columna
+        intacta.
         """
 
     @abstractmethod
@@ -213,11 +229,40 @@ class ITrackingStore(ABC):
 
     @abstractmethod
     def start_batch(self, total_records: int) -> str:
-        """Crea un nuevo `batch` y devuelve su identificador."""
+        """Crea un nuevo `batch` y devuelve su identificador.
+
+        148: ``total_records`` acá es apenas una SEMILLA — los callers no
+        conocen el conteo del origen en este punto (streaming pasa ``0``,
+        staged pasa el ``batch_size`` configurado). El denominador real
+        lo escriben :meth:`increment_source_total` /
+        :meth:`set_source_total` a medida que S1 ve los documentos.
+        """
 
     @abstractmethod
     def complete_batch(self, batch_id: str) -> None:
         """Marca el `batch` como cerrado (no se agregarán más filas)."""
+
+    @abstractmethod
+    def increment_source_total(self, batch_id: str, delta: int) -> None:
+        """148 REQ-005: suma *delta* documentos del origen al denominador.
+
+        Es el camino NORMAL, porque el total no se conoce de antemano: S1
+        ve los documentos de a chunks y streaming nunca sabe cuántos hay.
+        Es el número contra el que todo lo demás tiene que sumar.
+
+        Idempotente NO es: cada llamada suma. Un ``batch_id`` desconocido
+        DEBE ser un no-op, NO lanzar.
+        """
+
+    @abstractmethod
+    def set_source_total(self, batch_id: str, total: int) -> None:
+        """148 REQ-005: fija el denominador en un valor absoluto.
+
+        Para sembrar en ``0`` un `batch` cuyo ``start_batch`` escribió un
+        valor que no es un conteo, y para los caminos donde el total del
+        origen se conoce exacto de una. Un ``batch_id`` desconocido DEBE
+        ser un no-op, NO lanzar.
+        """
 
     @abstractmethod
     def list_txn_nums_for_batch(self, batch_id: str) -> set[str]:

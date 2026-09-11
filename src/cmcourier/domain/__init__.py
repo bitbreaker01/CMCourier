@@ -38,6 +38,8 @@ from cmcourier.domain.exceptions import (
 from cmcourier.domain.models import (
     CMMapping,
     MigrationRecord,
+    ReasonBucket,
+    ReasonCode,
     ResolvedMetadata,
     RVABREPDocument,
     StagedFile,
@@ -75,6 +77,8 @@ __all__ = [
     "MetadataError",
     "MigrationRecord",
     "PDFAssemblyFailedError",
+    "ReasonBucket",
+    "ReasonCode",
     "RVABREPDeletedError",
     "RVABREPDocument",
     "RVABREPDuplicateError",
