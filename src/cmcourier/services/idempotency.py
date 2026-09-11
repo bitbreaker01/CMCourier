@@ -42,6 +42,7 @@ from cmcourier.adapters.tracking.as400_niarvilog import (
 from cmcourier.domain.models import (
     CMMapping,
     MigrationRecord,
+    ReasonCode,
     RVABREPDocument,
     StageStatus,
     Trigger,
@@ -210,9 +211,21 @@ class IdempotencyCoordinator:
         trigger: Trigger,
         stage: StageStatus,
         error: str,
+        reason_code: ReasonCode | None = None,
     ) -> None:
-        """Marca <stage>_FAILED en SQLite primero y luego propaga a AS400."""
-        self._sqlite.mark_stage_failed(record.rvabrep_txn_num, record.batch_id, stage, error)
+        """Marca <stage>_FAILED en SQLite primero y luego propaga a AS400.
+
+        148 REQ-004: ``reason_code`` viaja a SQLite —es la columna del
+        censo— y NO a AS400: NIARVILOG tiene su propio ``STSCOD`` y su
+        propio mensaje de error, y no es la tabla que el censo lee.
+        """
+        self._sqlite.mark_stage_failed(
+            record.rvabrep_txn_num,
+            record.batch_id,
+            stage,
+            error,
+            reason_code=reason_code,
+        )
         if self._mode == "periodic":
             self._buffer_pending(
                 record=record,

@@ -491,6 +491,9 @@ def _build_trigger_strategy(
                 col_cif=config.indexing.columns.index2_column,
                 col_system_id=config.indexing.columns.system_id_column,
                 col_id_rvi=config.indexing.columns.index7_column,
+                # 148 REQ-004: una exclusión detectada en S0 se registra con
+                # el txn REAL de la fila, no con una clave sintética.
+                col_txn_num=config.indexing.columns.txn_num_column,
             ),
         )
     if isinstance(trigger_cfg, LocalScanTriggerConfig):

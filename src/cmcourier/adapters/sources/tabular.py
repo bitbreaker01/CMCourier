@@ -170,6 +170,30 @@ class TabularDataSource(IDataSource):
             df = df[df[key] == value]
         return [_normalize_row(row) for row in df.to_dict(orient="records")]
 
+    def stream_by_fields_in(
+        self,
+        field: str,
+        values: list[Any],
+        fixed_filters: Mapping[str, Any],
+    ) -> Iterator[dict[str, Any]]:
+        """148 REQ-001: versión lazy de :meth:`get_by_fields_in`.
+
+        Misma semántica de filtrado; lo que cambia es que las filas salen
+        de a una vía ``itertuples`` (050) en lugar de construirse todas
+        antes de emitir la primera.
+        """
+        self._ensure_open()
+        if field not in self._df.columns:
+            raise KeyError(field)
+        df = self._df[self._df[field].isin(values)] if values else self._df.iloc[0:0]
+        for key, value in fixed_filters.items():
+            if key not in df.columns:
+                raise KeyError(key)
+            df = df[df[key] == value]
+        columns = list(df.columns)
+        for row_values in df.itertuples(index=False, name=None):
+            yield _normalize_row(dict(zip(columns, row_values, strict=True)))
+
     def get_all(self) -> Iterator[dict[str, Any]]:
         self._ensure_open()
         # 050: iteramos fila por fila vía ``itertuples`` (lazy) en lugar de

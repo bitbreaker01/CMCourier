@@ -41,7 +41,7 @@ from cmcourier.domain.exceptions import (
     RVABREPDeletedError,
     RVABREPNotFoundError,
 )
-from cmcourier.domain.models import TriggerRecord
+from cmcourier.domain.models import ExcludedTrigger, TriggerRecord
 from cmcourier.domain.ports import S0Strategy
 from cmcourier.observability.setup import configure as configure_observability
 from cmcourier.services.indexing import IndexingService
@@ -215,7 +215,13 @@ def inspect_trigger_command(
 
     strategy, cleanup = _strategy_for_inspect(config, source_descriptor)
     try:
-        records = list(islice(strategy.acquire(""), limit))
+        # 148 REQ-001: el escaneo emite TAMBIÉN las filas que clasificó como
+        # no migrables (código fuera del allow-list, fila sin identidad). La
+        # pregunta de este comando es "qué va a procesar esta config", así
+        # que el preview muestra sólo las que sí van a procesarse — el
+        # desglose de las excluidas es el censo del `batch`, no esto.
+        workable = (t for t in strategy.acquire("") if not isinstance(t, ExcludedTrigger))
+        records = list(islice(workable, limit))
     finally:
         cleanup()
 

@@ -21,6 +21,7 @@ __all__ = [
     "CMMapping",
     "ClientTrigger",
     "DocDetail",
+    "ExcludedTrigger",
     "FailedRecord",
     "LocalScanTrigger",
     "MigrationRecord",
@@ -408,6 +409,40 @@ class LocalScanTrigger(Trigger):
             col_cif=self.col_cif,
             col_system_id=self.col_system_id,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ExcludedTrigger(Trigger):
+    """148 REQ-001/004: una fila del origen que S0 clasificó como NO migrable.
+
+    Es el vehículo de la decisión de capas de WP2: la estrategia (que es
+    la dueña de ``filters.document_types`` y del mapa de columnas)
+    **clasifica**; el orchestrator (que es el único dueño del
+    ``batch_id`` y del tracking store) **registra**. ``services/`` nunca
+    ve un ``ITrackingStore``.
+
+    Es un :class:`Trigger` para que el contrato de
+    :meth:`~cmcourier.domain.ports.S0Strategy.acquire` no cambie, pero
+    es un subtipo DISTINTO a propósito: el `dispatch` de S1 no lo puede
+    confundir con trabajo, así que un documento excluido nunca llega a
+    S2.
+
+    A diferencia de los otros subtipos no lleva la fila cruda sino lo que
+    ``migration_log`` necesita: ``txn_num`` (la clave real, nunca una
+    sintética — ver la colisión que arregla REQ-004), ``id_rvi`` (sin él
+    el censo no se puede agrupar por código) y la terna de audit.
+    """
+
+    reason_code: ReasonCode
+    txn_num: str
+    id_rvi: str = ""
+    file_name: str = ""
+    shortname: str | None = None
+    cif: str | None = None
+    system_id: str | None = None
+
+    def audit_row(self) -> dict[str, str | None]:
+        return {"shortname": self.shortname, "cif": self.cif, "system_id": self.system_id}
 
 
 # 046 — alias de backward-compat. Cada import pre-046 de ``TriggerRecord``

@@ -223,7 +223,9 @@ class TestCrossBatchSkip:
             conn.close()
         assert row is not None
         assert row[0] == "TXN_PIPE_001"
-        assert row[1] == "cross_batch_uploaded"
+        # 148 REQ-004: el mensaje es la razón de la taxonomía, y la columna
+        # ``reason_code`` la lleva en su forma canónica.
+        assert row[1] == "already_uploaded"
 
     @respx.mock
     def test_cross_batch_skip_logged(
@@ -238,7 +240,8 @@ class TestCrossBatchSkip:
         pipeline_harness.tracking_store.flush()
         with caplog.at_level(logging.INFO, logger="cmcourier.orchestrators.staged"):
             pipeline_harness.build_pipeline(triggers).run(source_descriptor=str(triggers))
-        assert any(r.__dict__.get("reason") == "cross_batch_uploaded" for r in caplog.records)
+        # 148: el log lleva la razón de la taxonomía, la MISMA que la columna.
+        assert any(r.__dict__.get("reason") == "already_uploaded" for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +360,56 @@ class TestResume:
                 from_stage=3,
             )
         assert second.s5_done == 1  # only the in-scope doc counts
-        assert any(r.__dict__.get("reason") == "resume_out_of_scope" for r in caplog.records)
+        # 148 REQ-004: the out-of-scope doc stops being a bare `continue` —
+        # it leaves a row with its reason, and the log carries the same
+        # machine-readable code that lands in the column.
+        assert any(r.__dict__.get("reason") == "out_of_scope_resume" for r in caplog.records)
+        pipeline_harness.tracking_store.flush()
+        conn = sqlite3.connect(pipeline_harness.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT rvabrep_txn_num FROM migration_log "
+                "WHERE batch_id = ? AND reason_code = 'OUT_OF_SCOPE_RESUME'",
+                (first.batch_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1
+
+    @respx.mock
+    def test_a_second_resume_does_not_adopt_out_of_scope_docs(
+        self,
+        pipeline_harness,  # type: ignore[no-untyped-def]
+        tmp_path: Path,
+    ) -> None:
+        """148: la fila ``OUT_OF_SCOPE_RESUME`` no puede meter al documento
+        DENTRO del alcance del resume siguiente — sería adoptar en el batch
+        algo que el primer resume decidió justamente no tocar."""
+        pipeline_harness.register_cmis_for_docs(["TXN_PIPE_001"])
+        triggers_v1 = _write_trigger_csv(tmp_path, [("TESTCLIENT01", "123456", "1")])
+        first = pipeline_harness.build_pipeline(triggers_v1).run(source_descriptor=str(triggers_v1))
+        pipeline_harness.tracking_store.flush()
+        triggers_v2 = tmp_path / "triggers_v2.csv"
+        triggers_v2.write_text(
+            "ShortName,CIF,SystemID\nTESTCLIENT01,123456,1\nTESTCLIENT02,234567,1\n"
+        )
+        for _ in range(2):
+            pipeline_harness.build_pipeline(triggers_v2).run(
+                source_descriptor=str(triggers_v2),
+                batch_id=first.batch_id,
+                from_stage=3,
+            )
+            pipeline_harness.tracking_store.flush()
+        conn = sqlite3.connect(pipeline_harness.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT status FROM migration_log "
+                "WHERE batch_id = ? AND reason_code = 'OUT_OF_SCOPE_RESUME'",
+                (first.batch_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert [r[0] for r in rows] == ["S1_FILTERED"]
 
     @respx.mock
     def test_idempotent_rerun_from_stage_1(
@@ -523,15 +575,17 @@ class TestS1FilteredOutcome051:
             r for r in caplog.records if r.__dict__.get("reason") == "deleted_at_source"
         ]
         assert len(filtered_logs) == 2
-        # 062: each filtered trigger now produces a row in migration_log with
-        # status=S1_FILTERED and a synthetic txn_num so the DETAIL tab can
-        # show it. The error_message carries the deleted_count from the
-        # exception.
+        # 062: each filtered trigger produces a row in migration_log with
+        # status=S1_FILTERED. 148 REQ-004: the key is the row's REAL txn_num
+        # — the old synthetic FILTERED__{shortname}__{system_id} collided
+        # against the unique index, collapsing N deleted docs of one client
+        # into a single row.
         pipeline._tracking_store.flush()  # noqa: SLF001
         conn = sqlite3.connect(pipeline_harness.db_path)
         try:
             rows = conn.execute(
-                "SELECT rvabrep_txn_num, error_message FROM migration_log "
+                "SELECT rvabrep_txn_num, error_message, reason_code, id_rvi "
+                "FROM migration_log "
                 "WHERE batch_id = ? AND status = 'S1_FILTERED' "
                 "ORDER BY rvabrep_txn_num",
                 (batch_id,),
@@ -539,12 +593,9 @@ class TestS1FilteredOutcome051:
         finally:
             conn.close()
         assert len(rows) == 2, f"expected 2 S1_FILTERED rows, got {rows}"
-        # Synthetic txn_num is FILTERED__{shortname}__{system_id}.
-        synthetic_txns = {r[0] for r in rows}
-        assert synthetic_txns == {"FILTERED__B__1", "FILTERED__D__1"}
-        for _, err in rows:
-            assert "deleted_at_source" in err
-            assert "deleted_count=" in err
+        assert {r[0] for r in rows} == {"TXN_B", "TXN_D"}
+        assert {r[2] for r in rows} == {"DELETED_AT_SOURCE"}
+        assert all(r[3] for r in rows), "id_rvi must be filled so the census can group by code"
 
 
 # ---------------------------------------------------------------------------

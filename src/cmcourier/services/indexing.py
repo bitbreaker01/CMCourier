@@ -6,10 +6,13 @@ Dado un :class:`TriggerRecord`, encuentra cada
 intencionalmente: el self-healing de CIF es responsabilidad del
 Stage S3 (Metadata).
 
-API pública: :meth:`enrich` (dispatch polimórfico de S1) sobre
-:meth:`find_documents` — lookup de un único trigger con semántica de
-errores tipados (:class:`RVABREPNotFoundError` /
-:class:`RVABREPDeletedError`). 121: el lookup batcheado
+API pública: :meth:`enrich_census` (dispatch polimórfico de S1) y
+:meth:`enrich` / :meth:`find_documents`, que son su vista "sólo los
+vivos" con semántica de errores tipados
+(:class:`RVABREPNotFoundError` / :class:`RVABREPDeletedError`).
+148: el `pipeline` usa ``enrich_census`` porque las filas borradas
+DEJARON de ser un descarte — cada una tiene que llegar al censo con su
+``txn_num`` real. 121: el lookup batcheado
 ``find_documents_batch`` se eliminó — era código muerto cuya semántica
 (sin distinción not-found vs all-deleted) no matcheaba el contrato de
 `S1_FILTERED` del orchestrator. 144: :meth:`find_documents_by_txns` es
@@ -25,7 +28,7 @@ libre.
 
 from __future__ import annotations
 
-__all__ = ["IndexingColumnsConfig", "IndexingService"]
+__all__ = ["EnrichOutcome", "IndexingColumnsConfig", "IndexingService"]
 
 import logging
 from collections.abc import Iterable, Mapping
@@ -39,7 +42,9 @@ from cmcourier.domain.exceptions import (
 )
 from cmcourier.domain.models import (
     ClientTrigger,
+    ExcludedTrigger,
     LocalScanTrigger,
+    ReasonCode,
     RVABREPDocument,
     RvabrepRowTrigger,
     Trigger,
@@ -49,6 +54,29 @@ from cmcourier.domain.models import (
 from cmcourier.domain.ports import IDataSource
 
 _log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class EnrichOutcome:
+    """148 REQ-004: el resultado COMPLETO de S1 para un trigger.
+
+    ``documents`` son los que siguen viaje; ``excluded`` son las filas
+    que el origen dice que no —hoy, las que traen código de borrado—,
+    cada una con su ``txn_num`` REAL y su ``reason_code``.
+
+    Existe porque pre-148 esas filas se caían en dos lugares distintos y
+    los dos eran mudos: ``_classify`` las tiraba con un ``if not
+    delete_code`` (sin contador, sin log, sin fila) y, cuando venían
+    TODAS borradas, el orquestador escribía UNA fila con clave sintética
+    por identidad de trigger — N documentos del mismo cliente colapsaban
+    en uno.
+
+    Capas: el servicio CLASIFICA y no persiste; el orquestador —el único
+    dueño del ``batch_id`` y del tracking store— escribe la fila.
+    """
+
+    documents: tuple[RVABREPDocument, ...]
+    excluded: tuple[ExcludedTrigger, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -119,21 +147,65 @@ class IndexingService:
           de RVABREP matcheada viene adjunta desde el momento del
           acquire en S0.
 
-        Lanza ``RVABREPNotFoundError`` para ``ClientTrigger`` cuando
-        no hay filas que matcheen y ``RVABREPDeletedError`` cuando
-        toda fila matcheada está marcada como borrada. Los triggers
-        basados en fila salteán esos paths de error porque la fila
-        ya fue validada en S0 (los shortnames vacíos y las filas con
-        código de borrado se filtran ahí).
+        Lanza ``RVABREPNotFoundError`` cuando no hay filas que matcheen
+        y ``RVABREPDeletedError`` cuando toda fila matcheada está
+        marcada como borrada.
+
+        148: es un envoltorio delgado sobre :meth:`enrich_census` que
+        conserva el contrato pre-148 para los callers que sólo quieren
+        los documentos vivos (el ``doctor``, el dry-run). El `pipeline`
+        usa ``enrich_census``: necesita también los que NO siguen.
+        """
+        outcome = self.enrich_census(trigger)
+        if not outcome.documents and outcome.excluded:
+            first = outcome.excluded[0]
+            raise RVABREPDeletedError(
+                shortname=first.shortname or "",
+                system_id=first.system_id or "",
+                deleted_count=len(outcome.excluded),
+            )
+        return list(outcome.documents)
+
+    def enrich_census(self, trigger: Trigger) -> EnrichOutcome:
+        """148 REQ-004: igual que :meth:`enrich`, pero sin tirar nada.
+
+        Mismo `dispatch` polimórfico; lo que cambia es que las filas con
+        código de borrado salen en :attr:`EnrichOutcome.excluded` en vez
+        de desaparecer (camino ``ClientTrigger``) o de colapsar en una
+        sola ``RVABREPDeletedError`` sin ``txn_num`` (camino fila
+        conocida). ``RVABREPNotFoundError`` e ``IndexingError`` se siguen
+        levantando: ahí no hay ninguna fila que clasificar.
         """
         if isinstance(trigger, ClientTrigger):
-            return self.find_documents(trigger)
+            rows = self._query_for_trigger(trigger)
+            if not rows:
+                raise RVABREPNotFoundError(
+                    shortname=trigger.shortname,
+                    system_id=trigger.system_id,
+                )
+            return self._classify_census(rows, trigger)
         if isinstance(trigger, (RvabrepRowTrigger, LocalScanTrigger)):
-            return self._enrich_known_row(trigger.row)
+            return self._classify_census([dict(trigger.row)], None)
         raise TypeError(
             f"unknown Trigger subtype: {type(trigger).__name__!r} — "
             f"add a dispatch branch in IndexingService.enrich"
         )
+
+    def txn_num_of(self, trigger: Trigger) -> str:
+        """148 REQ-004: el ``txn_num`` que un trigger ya conoce, o ``""``.
+
+        Lo necesita el registro de un CRASH en streaming: la excepción
+        puede llegar antes de que S1 haya derivado ningún documento, y
+        una fila del censo sin clave no se puede escribir. Un
+        ``ClientTrigger`` no conoce ninguno (se expande a N documentos
+        recién en S1), así que devuelve ``""`` y el caller cae a una
+        clave sintética.
+        """
+        if isinstance(trigger, ExcludedTrigger):
+            return trigger.txn_num
+        if isinstance(trigger, (RvabrepRowTrigger, LocalScanTrigger)):
+            return _str(trigger.row.get(self._cfg.txn_num_column))
+        return ""
 
     def find_document_by_txn(self, txn_num: str) -> RVABREPDocument | None:
         """099: busca la fila RVABREP de un ``txn_num`` y la convierte a
@@ -171,41 +243,16 @@ class IndexingService:
                 docs[txn] = self._row_to_document(dict(row))
         return docs
 
-    def _enrich_known_row(self, row: Mapping[str, Any]) -> list[RVABREPDocument]:
-        """Envuelve una fila de RVABREP ya conocida en un único
-        ``RVABREPDocument``.
-
-        Una fila con código de borrado lanza
-        :class:`RVABREPDeletedError`, consistente con
-        :meth:`find_documents`, y el orchestrator la expone como
-        outcome de primera clase "filtered at S1" (051). Antes de
-        051 esto devolvía ``[]`` silenciosamente, descartando el doc
-        sin contador, sin log y sin trazabilidad.
-        """
-        if _str(row.get(self._cfg.delete_code_column)):
-            raise RVABREPDeletedError(
-                shortname=_str(row.get(self._cfg.shortname_column)),
-                system_id=_str(row.get(self._cfg.system_id_column)),
-                deleted_count=1,
-            )
-        return [self._row_to_document(dict(row))]
-
     def find_documents(self, trigger: TriggerRecord) -> list[RVABREPDocument]:
         """Busca cada fila de RVABREP no borrada que matchee el trigger."""
-        rows = self._query_for_trigger(trigger)
-        if not rows:
-            raise RVABREPNotFoundError(
-                shortname=trigger.shortname,
-                system_id=trigger.system_id,
-            )
-        docs = self._classify(rows, trigger)
-        if not docs:
+        outcome = self.enrich_census(trigger)
+        if not outcome.documents:
             raise RVABREPDeletedError(
                 shortname=trigger.shortname,
                 system_id=trigger.system_id,
-                deleted_count=len(rows),
+                deleted_count=len(outcome.excluded),
             )
-        return docs
+        return list(outcome.documents)
 
     # ----------------------------------------------------------- internos
 
@@ -224,29 +271,55 @@ class IndexingService:
                 system_id=trigger.system_id,
             ) from exc
 
-    def _classify(
-        self, rows: list[dict[str, Any]], trigger: TriggerRecord
-    ) -> list[RVABREPDocument]:
-        active = [r for r in rows if not _str(r.get(self._cfg.delete_code_column))]
+    def _classify_census(
+        self,
+        rows: list[dict[str, Any]],
+        trigger: TriggerRecord | None,
+    ) -> EnrichOutcome:
+        """148 REQ-004: parte las filas en "siguen viaje" y "el origen dice que no".
+
+        Pre-148 la primera línea era ``active = [r for r in rows if not
+        delete_code]``: las borradas se caían sin contador, sin log y sin
+        fila. Ahora cada una sale con su ``txn_num`` real, que es lo que
+        le permite al orquestador escribir N filas y no una sola con
+        clave sintética.
+        """
+        documents: list[RVABREPDocument] = []
+        excluded: list[ExcludedTrigger] = []
         seen: set[str] = set()
-        unique: list[dict[str, Any]] = []
         duplicates = 0
-        for row in active:
+        for row in rows:
+            if _str(row.get(self._cfg.delete_code_column)):
+                excluded.append(self._excluded_from_row(row, ReasonCode.DELETED_AT_SOURCE))
+                continue
             txn = _str(row.get(self._cfg.txn_num_column))
             if txn in seen:
                 duplicates += 1
                 continue
             seen.add(txn)
-            unique.append(row)
+            documents.append(self._row_to_document(dict(row)))
         if duplicates:
             _log.warning(
                 "indexing: dropped duplicate txn_num rows",
                 extra={
-                    "shortname": trigger.shortname,
+                    "shortname": trigger.shortname if trigger is not None else "",
                     "duplicate_count": duplicates,
                 },
             )
-        return [self._row_to_document(r) for r in unique]
+        return EnrichOutcome(documents=tuple(documents), excluded=tuple(excluded))
+
+    def _excluded_from_row(self, row: Mapping[str, Any], reason: ReasonCode) -> ExcludedTrigger:
+        """Proyecta una fila rechazada a lo que ``migration_log`` necesita."""
+        cfg = self._cfg
+        return ExcludedTrigger(
+            reason_code=reason,
+            txn_num=_str(row.get(cfg.txn_num_column)),
+            id_rvi=_str(row.get(cfg.index7_column)),
+            file_name=_str(row.get(cfg.file_name_column)),
+            shortname=_str(row.get(cfg.shortname_column)) or None,
+            cif=_str(row.get(cfg.index2_column)) or None,
+            system_id=_str(row.get(cfg.system_id_column)) or None,
+        )
 
     def _row_to_document(self, row: dict[str, Any]) -> RVABREPDocument:
         cfg = self._cfg

@@ -8,6 +8,7 @@ está, en efecto, decorado con ``@abstractmethod``.
 from __future__ import annotations
 
 import abc
+import collections.abc
 
 import pytest
 
@@ -41,11 +42,25 @@ class TestIDataSourceContract:
             "query_stream",
             "get_by_fields",
             "get_by_fields_in",
+            "stream_by_fields_in",  # 148 REQ-001
             "get_all",
             "count",
             "close",
         }
         assert IDataSource.__abstractmethods__ == frozenset(expected)
+
+    def test_stream_by_fields_in_returns_an_iterator_not_a_list(self) -> None:
+        """148 REQ-001: el equivalente en stream de ``get_by_fields_in``.
+
+        Con el censo siempre activo ``filters.systems: ["1"]`` es la
+        configuración NORMAL; materializar un sistema entero en una lista
+        de Python no es aceptable. El tipo de retorno es la primera línea
+        de defensa contra que alguien lo "optimice" de vuelta a ``list``.
+        """
+        import typing
+
+        hints = typing.get_type_hints(IDataSource.stream_by_fields_in)
+        assert typing.get_origin(hints["return"]) is collections.abc.Iterator
 
 
 class TestITrackingStoreContract:

@@ -88,6 +88,28 @@ class IDataSource(ABC):
         """
 
     @abstractmethod
+    def stream_by_fields_in(
+        self,
+        field: str,
+        values: list[Any],
+        fixed_filters: Mapping[str, Any],
+    ) -> Iterator[dict[str, Any]]:
+        """148 REQ-001: igual que :meth:`get_by_fields_in`, pero LAZY.
+
+        Mismo filtro, mismo chunkeo de la lista ``IN``; lo que cambia es
+        que las filas salen de a poco en vez de materializarse enteras.
+
+        No es una optimización opcional: con el censo siempre activo,
+        ``filters.systems: ["1"]`` es la configuración NORMAL del modo
+        ``direct_rvabrep`` y trae el sistema ENTERO. Una lista de Python
+        con un sistema adentro no es aceptable, así que el escaneo de S0
+        usa este método y no el materializado.
+
+        Contrato: NO ejecuta nada hasta el primer ``next()`` (generator),
+        y una lista de *values* vacía no emite filas ni toca la fuente.
+        """
+
+    @abstractmethod
     def get_all(self) -> Iterator[dict[str, Any]]:
         """Stremea cada fila de la fuente subyacente. Lo usa el pre-fetch de metadata."""
 

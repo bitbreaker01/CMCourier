@@ -51,6 +51,11 @@ class _InMemorySource(IDataSource):
             if r.get(field) in values and all(r.get(k) == v for k, v in fixed_filters.items())
         ]
 
+    def stream_by_fields_in(  # 148 REQ-001
+        self, field: str, values: list[Any], fixed_filters: Mapping[str, Any]
+    ) -> Iterator[dict[str, Any]]:
+        yield from self.get_by_fields_in(field, values, fixed_filters)
+
     def get_all(self) -> Iterator[dict[str, Any]]:
         return iter(self._rows)
 

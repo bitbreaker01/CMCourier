@@ -264,6 +264,53 @@ class TestGetByFields:
         assert len(second_params) == 501
 
 
+class TestStreamByFieldsIn148:
+    """148 REQ-001: el equivalente en stream de ``get_by_fields_in``.
+
+    Con el censo siempre activo el filtro por sistema es la configuración
+    NORMAL y trae el sistema ENTERO: no puede terminar en un
+    ``fetchall()``.
+    """
+
+    def test_uses_fetchmany_never_fetchall(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rows = [(str(i),) for i in range(750)]
+        cursor = _FakeAs400Cursor(rows=rows, columns=("V",))
+        _patch_pyodbc_connect(monkeypatch, _FakeAs400Connection(cursor))
+        src = _make_source(table="RVABREP")
+        materialized = list(src.stream_by_fields_in("SYS", ["1"], fixed_filters={}))
+        assert len(materialized) == 750
+        assert cursor.fetchmany_calls >= 2
+
+    def test_is_lazy_no_sql_until_first_next(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cursor = _FakeAs400Cursor(rows=[("X",)], columns=("V",))
+        _patch_pyodbc_connect(monkeypatch, _FakeAs400Connection(cursor))
+        src = _make_source(table="RVABREP")
+        stream = src.stream_by_fields_in("SYS", ["1"], fixed_filters={})
+        assert cursor.executions == []  # todavía no se ejecutó nada
+        next(iter(stream))
+        assert len(cursor.executions) == 1
+
+    def test_empty_values_yields_nothing_and_never_executes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cursor = _FakeAs400Cursor()
+        _patch_pyodbc_connect(monkeypatch, _FakeAs400Connection(cursor))
+        src = _make_source()
+        assert list(src.stream_by_fields_in("SYS", [], fixed_filters={})) == []
+        assert cursor.executions == []
+
+    def test_chunks_the_in_list_at_1000(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cursor = _FakeAs400Cursor(columns=("SYS",))
+        _patch_pyodbc_connect(monkeypatch, _FakeAs400Connection(cursor))
+        src = _make_source()
+        values = [str(i) for i in range(1500)]
+        list(src.stream_by_fields_in("SYS", values, fixed_filters={"LIB": "P"}))
+        assert len(cursor.executions) == 2
+        assert len(cursor.executions[0][1]) == 1001
+        assert cursor.executions[0][1][-1] == "P"  # filtro fijo
+        assert len(cursor.executions[1][1]) == 501
+
+
 # ---------------------------------------------------------------------------
 # get_all + count
 # ---------------------------------------------------------------------------

@@ -57,6 +57,11 @@ class _FakeSource(IDataSource):
     ) -> list[dict[str, Any]]:
         return [row for row in self.rows if row.get(field) in values]
 
+    def stream_by_fields_in(  # 148 REQ-001
+        self, field: str, values: list[Any], fixed_filters: Mapping[str, Any]
+    ) -> Iterator[dict[str, Any]]:
+        yield from self.get_by_fields_in(field, values, fixed_filters)
+
     def query(self, sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
         raise NotImplementedError
 

@@ -254,9 +254,31 @@ class CsvTriggerConfig(BaseModel):
 
 
 class RvabrepFiltersModel(BaseModel):
+    """Filtros del escaneo ``kind: rvabrep``. Los dos NO son simétricos (148).
+
+    ``systems`` recorta de verdad: va al ``WHERE ... IN`` del SQL y una
+    fila de otro sistema nunca vuelve del origen.
+
+    ``document_types`` **cambió de significado en la 148**: de *"traeme
+    sólo estos"* pasó a *"de todo lo que traigas, migrá estos y contame
+    el resto"*. Ya no toca el SQL — una fila cuyo código no está en la
+    lista vuelve igual y queda registrada con ``EXCLUDED_BY_FILTER``, que
+    es lo único que le permite al operador ver cuántos documentos dejó
+    afuera su propio filtro y de qué códigos eran.
+    """
+
     model_config = _STRICT
-    systems: list[str] = Field(default_factory=list)
-    document_types: list[str] = Field(default_factory=list)
+    systems: list[str] = Field(
+        default_factory=list,
+        description="Filtra por `ABAACD`. Va al SQL: lo que no matchea no vuelve del origen.",
+    )
+    document_types: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Códigos RVI (`ABAHCD`) a MIGRAR. 148: no toca el SQL — el resto vuelve igual "
+            "y se reporta como `EXCLUDED_BY_FILTER` en el censo del batch."
+        ),
+    )
 
 
 class RvabrepTriggerConfig(BaseModel):

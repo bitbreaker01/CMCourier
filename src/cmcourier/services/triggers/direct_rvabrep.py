@@ -9,10 +9,11 @@ __all__ = [
 ]
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from typing import Any
 
-from cmcourier.domain.models import RvabrepRowTrigger, Trigger
+from cmcourier.domain.models import ExcludedTrigger, ReasonCode, RvabrepRowTrigger, Trigger
 from cmcourier.domain.ports import IDataSource, S0Strategy
 
 _logger = logging.getLogger(__name__)
@@ -27,11 +28,30 @@ class RvabrepColumnsConfig:
     col_system_id: str = "ABAACD"  # system_code
     col_id_rvi: str = "ABAHCD"  # index7 (tipo de documento)
     file_name_column: str = "ABAJCD"  # ABAJCD (file_name)
+    # 148 REQ-004: la clave real de la fila. Una exclusión detectada en S0
+    # tiene que llevarla — la clave sintética por identidad de trigger
+    # colisiona contra el índice único ``(rvabrep_txn_num, batch_id)`` y
+    # colapsa N documentos en 1 fila.
+    col_txn_num: str = "ABAANB"
 
 
 @dataclass(frozen=True, slots=True)
 class RvabrepFilters:
-    """Filtros para el escaneo de RVABREP. Tupla vacía = sin filtro."""
+    """Filtros para el escaneo de RVABREP. Tupla vacía = sin filtro.
+
+    148 REQ-001: los dos filtros NO son simétricos.
+
+    * ``systems`` es un filtro de VERDAD: va al ``WHERE ... IN`` del SQL,
+      así que una fila de otro sistema nunca vuelve del origen.
+    * ``document_types`` **ya no toca el SQL**. Cambió de significado: de
+      *"traeme sólo estos"* pasó a *"de todo lo que traigas, migrá estos
+      y contame el resto"*. Una fila cuyo código no está en la lista
+      vuelve igual del AS400 y se emite como
+      :class:`~cmcourier.domain.models.ExcludedTrigger` con
+      ``EXCLUDED_BY_FILTER`` — si el código fuera al ``IN``, el documento
+      excluido nunca volvería y el censo no lo podría contar, que es
+      exactamente el defecto que la spec 148 arregla.
+    """
 
     systems: tuple[str, ...] = ()
     document_types: tuple[str, ...] = ()
@@ -39,6 +59,10 @@ class RvabrepFilters:
 
 def _is_blank(v: object) -> bool:
     return v is None or (isinstance(v, str) and not v.strip())
+
+
+def _text(v: object) -> str:
+    return "" if v is None else str(v).strip()
 
 
 class DirectRvabrepTriggerStrategy(S0Strategy):
@@ -53,10 +77,18 @@ class DirectRvabrepTriggerStrategy(S0Strategy):
     "procesar ESTA fila, no todo el cliente". Ahora el enriquecimiento
     en S1 queda trivial porque la fila ya se conoce.
 
-    Cuando los filtros ``systems`` y ``document_types`` están ambos
-    seteados, la estrategia elige el filtro más chico para la query
-    de lista IN y rechaza el otro en Python durante la iteración.
-    Ver plan §3.5.
+    148 REQ-001: la query lleva **únicamente** ``filters.systems``, y con
+    ``systems`` seteado el escaneo va por ``stream_by_fields_in`` — con el
+    censo siempre activo un sistema entero es la carga NORMAL y no puede
+    materializarse en una lista de Python. ``filters.document_types`` se
+    aplica en memoria sobre lo que volvió, y lo que no matchea NO se
+    descarta: se emite como
+    :class:`~cmcourier.domain.models.ExcludedTrigger`.
+
+    148 REQ-004 — capas: esta estrategia **clasifica** y no persiste
+    nada. No conoce el ``batch_id`` ni el tracking store, y no tiene por
+    qué: emite el ítem clasificado y S1 —el único lugar que es dueño de
+    ambos— escribe la fila de ``migration_log``.
     """
 
     def __init__(
@@ -70,21 +102,27 @@ class DirectRvabrepTriggerStrategy(S0Strategy):
         self._columns = columns or RvabrepColumnsConfig()
 
     def acquire(self, source_descriptor: str = "") -> Iterator[Trigger]:
-        """Yieldea un ``RvabrepRowTrigger`` por cada fila matcheada
-        de RVABREP.
+        """Yieldea UN trigger por cada fila que el escaneo trajo.
 
-        Las filas con shortname o system_id vacío se descartan con
-        una única línea de log INFO de resumen (raro: indican filas
-        malformadas de RVABREP que no sobrevivirían a S1 de todos
-        modos).
+        148 REQ-004: ninguna fila se cae en silencio. Una fila sin
+        shortname o sin system_id sale como ``SOURCE_ROW_INCOMPLETE`` y
+        una cuyo código no está en ``filters.document_types`` sale como
+        ``EXCLUDED_BY_FILTER`` — ambas como
+        :class:`~cmcourier.domain.models.ExcludedTrigger`, que S1
+        registra y que nunca llega a S2. Pre-148 la primera era un
+        contador y un INFO agregado al final, y la segunda un ``continue``
+        pelado.
         """
         del source_descriptor
-        skipped = 0
+        allowed = {c.strip() for c in self._filters.document_types if c.strip()}
         for row in self._iter_filtered_rows():
-            shortname_raw = row.get(self._columns.col_shortname)
-            system_raw = row.get(self._columns.col_system_id)
-            if _is_blank(shortname_raw) or _is_blank(system_raw):
-                skipped += 1
+            if _is_blank(row.get(self._columns.col_shortname)) or _is_blank(
+                row.get(self._columns.col_system_id)
+            ):
+                yield self._excluded(row, ReasonCode.SOURCE_ROW_INCOMPLETE)
+                continue
+            if allowed and _text(row.get(self._columns.col_id_rvi)) not in allowed:
+                yield self._excluded(row, ReasonCode.EXCLUDED_BY_FILTER)
                 continue
             yield RvabrepRowTrigger(
                 row=row,
@@ -92,30 +130,31 @@ class DirectRvabrepTriggerStrategy(S0Strategy):
                 col_cif=self._columns.col_cif,
                 col_system_id=self._columns.col_system_id,
             )
-        if skipped:
-            _logger.info("skipped %d malformed RVABREP row(s)", skipped)
 
-    def _iter_filtered_rows(self) -> Iterator[dict[str, object]]:
-        f = self._filters
-        if not f.systems and not f.document_types:
+    def _excluded(self, row: Mapping[str, Any], reason: ReasonCode) -> ExcludedTrigger:
+        """Proyecta una fila rechazada al ítem clasificado que S1 registra."""
+        cols = self._columns
+        return ExcludedTrigger(
+            reason_code=reason,
+            txn_num=_text(row.get(cols.col_txn_num)),
+            id_rvi=_text(row.get(cols.col_id_rvi)),
+            file_name=_text(row.get(cols.file_name_column)),
+            shortname=_text(row.get(cols.col_shortname)) or None,
+            cif=_text(row.get(cols.col_cif)) or None,
+            system_id=_text(row.get(cols.col_system_id)) or None,
+        )
+
+    def _iter_filtered_rows(self) -> Iterator[dict[str, Any]]:
+        """148 REQ-001: el ``WHERE`` lleva sólo los sistemas, y siempre en stream.
+
+        ``filters.document_types`` NO entra al SQL: un código excluido
+        tiene que volver del origen para que el censo lo pueda contar.
+        """
+        if not self._filters.systems:
             yield from self._source.get_all()
             return
-        # Elegir el filtro más chico para la query IN; rechazar el
-        # otro en Python.
-        if f.document_types and (not f.systems or len(f.document_types) <= len(f.systems)):
-            primary_field, primary_values = self._columns.col_id_rvi, list(f.document_types)
-            secondary_field, secondary_values = self._columns.col_system_id, set(f.systems)
-        else:
-            primary_field, primary_values = self._columns.col_system_id, list(f.systems)
-            secondary_field, secondary_values = self._columns.col_id_rvi, set(f.document_types)
-        rows = self._source.get_by_fields_in(
-            field=primary_field,
-            values=primary_values,
+        yield from self._source.stream_by_fields_in(
+            field=self._columns.col_system_id,
+            values=list(self._filters.systems),
             fixed_filters={},
         )
-        for row in rows:
-            if secondary_values:
-                v = row.get(secondary_field)
-                if v is None or str(v) not in secondary_values:
-                    continue
-            yield row

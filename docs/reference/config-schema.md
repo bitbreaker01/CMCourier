@@ -117,7 +117,7 @@ Unión discriminada por `kind`. Pickeá EXACTAMENTE uno.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `systems` | `list[str]` | `[]` | Filtra por `ABAACD`. |
-| `document_types` | `list[str]` | `[]` | Filtra por id_rvi (`ABAHCD`). |
+| `document_types` | `list[str]` | `[]` | Códigos RVI (`ABAHCD`) a **migrar**. 148: no toca el SQL — el resto vuelve igual del origen y se reporta como `EXCLUDED_BY_FILTER` en el censo del batch. |
 
 ### `LocalScanTriggerConfig` — `kind: local_scan`
 

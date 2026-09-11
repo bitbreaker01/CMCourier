@@ -37,6 +37,7 @@ from cmcourier.domain.exceptions import (
 )
 from cmcourier.domain.models import (
     CMMapping,
+    ExcludedTrigger,
     MigrationRecord,
     ReasonBucket,
     ReasonCode,
@@ -66,6 +67,7 @@ __all__ = [
     "CMMapping",
     "ConfigurationError",
     "DefaultValidationFailedError",
+    "ExcludedTrigger",
     "IAssembler",
     "IDRViNotMappedError",
     "IdentityResolutionError",

@@ -24,7 +24,7 @@ from cmcourier.domain.exceptions import (
     RVABREPDeletedError,
     RVABREPNotFoundError,
 )
-from cmcourier.domain.models import RvabrepRowTrigger, TriggerRecord
+from cmcourier.domain.models import ReasonCode, RvabrepRowTrigger, TriggerRecord
 from cmcourier.domain.ports import IDataSource
 from cmcourier.services.indexing import IndexingColumnsConfig, IndexingService
 
@@ -46,6 +46,7 @@ class _CallCountingSource(IDataSource):
         self.inner = inner
         self.get_by_fields_calls = 0
         self.get_by_fields_in_calls = 0
+        self.stream_by_fields_in_calls = 0  # 148 REQ-001
 
     def get_all(self) -> Iterator[dict[str, Any]]:
         yield from self.inner.get_all()
@@ -68,6 +69,15 @@ class _CallCountingSource(IDataSource):
     ) -> list[dict[str, Any]]:
         self.get_by_fields_in_calls += 1
         return self.inner.get_by_fields_in(field, values, fixed_filters)
+
+    def stream_by_fields_in(  # 148 REQ-001
+        self,
+        field: str,
+        values: list[Any],
+        fixed_filters: Mapping[str, Any],
+    ) -> Iterator[dict[str, Any]]:
+        self.stream_by_fields_in_calls += 1
+        yield from self.inner.stream_by_fields_in(field, values, fixed_filters)
 
     def count(self) -> int:
         return self.inner.count()
@@ -315,6 +325,61 @@ class TestEnrichKnownRow051:
 
 
 # ---------------------------------------------------------------------------
+# Grupo 5b — 148 REQ-004: el censo de S1, las filas borradas dejan de caerse
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichCensus148:
+    """``enrich`` devuelve sólo los vivos; ``enrich_census`` devuelve
+    ADEMÁS los borrados, uno por uno y con su ``txn_num`` real.
+
+    Pre-148 ``_classify`` los tiraba con un ``[r for r in rows if not
+    delete_code]``: sin contador, sin log y sin fila. Y el orquestador,
+    cuando TODAS venían borradas, escribía UNA sola fila con una clave
+    sintética por identidad de trigger — N documentos borrados del mismo
+    cliente colapsaban en 1.
+    """
+
+    def test_mixed_deleted_are_returned_as_excluded(self, service: IndexingService) -> None:
+        # PEPELOPEZ03: 1 activa + 2 borradas.
+        outcome = service.enrich_census(_trigger("PEPELOPEZ03"))
+        assert [d.txn_num for d in outcome.documents] == ["TXN0000006"]
+        assert {e.txn_num for e in outcome.excluded} == {"TXN0000007", "TXN0000008"}
+        assert {e.reason_code for e in outcome.excluded} == {ReasonCode.DELETED_AT_SOURCE}
+
+    def test_all_deleted_yields_one_excluded_per_row_not_one_collapsed(
+        self, service: IndexingService
+    ) -> None:
+        """La colisión de la clave sintética: 2 filas borradas ⇒ 2 items."""
+        outcome = service.enrich_census(_trigger("MARIAGOMEZ02"))
+        assert outcome.documents == ()
+        assert [e.txn_num for e in outcome.excluded] == ["TXN0000004", "TXN0000005"]
+
+    def test_excluded_carries_id_rvi_for_grouping(self, service: IndexingService) -> None:
+        outcome = service.enrich_census(_trigger("MARIAGOMEZ02"))
+        assert {e.id_rvi for e in outcome.excluded} == {"FF17"}
+        assert {e.shortname for e in outcome.excluded} == {"MARIAGOMEZ02"}
+
+    def test_known_row_deleted_is_excluded_not_an_exception(self, service: IndexingService) -> None:
+        outcome = service.enrich_census(_row_trigger(_row(shortname="GONE01", delete_code="D")))
+        assert outcome.documents == ()
+        assert len(outcome.excluded) == 1
+        assert outcome.excluded[0].reason_code is ReasonCode.DELETED_AT_SOURCE
+        assert outcome.excluded[0].txn_num == "TXN999"
+
+    def test_not_found_still_raises(self, service: IndexingService) -> None:
+        with pytest.raises(RVABREPNotFoundError):
+            service.enrich_census(_trigger("DOES_NOT_EXIST"))
+
+    def test_enrich_keeps_its_pre_148_contract(self, service: IndexingService) -> None:
+        """``doctor`` y cualquier caller viejo siguen viendo lo de siempre."""
+        assert len(service.enrich(_trigger("PEPELOPEZ03"))) == 1
+        with pytest.raises(RVABREPDeletedError) as ei:
+            service.enrich(_trigger("MARIAGOMEZ02"))
+        assert ei.value.deleted_count == 2
+
+
+# ---------------------------------------------------------------------------
 # Grupo 6 — Envoltura de errores
 # ---------------------------------------------------------------------------
 
@@ -343,6 +408,15 @@ class _BrokenSource(IDataSource):
         fixed_filters: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
         raise RuntimeError("synthetic adapter failure")
+
+    def stream_by_fields_in(  # 148 REQ-001
+        self,
+        field: str,
+        values: list[Any],
+        fixed_filters: Mapping[str, Any],
+    ) -> Iterator[dict[str, Any]]:
+        raise RuntimeError("synthetic adapter failure")
+        yield  # pragma: no cover
 
     def count(self) -> int:
         return 0

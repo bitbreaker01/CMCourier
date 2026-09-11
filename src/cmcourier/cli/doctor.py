@@ -85,7 +85,7 @@ from cmcourier.config.wiring import (
     build_pipeline,
     niarvilog_columns_from_schema,
 )
-from cmcourier.domain.models import trigger_system_id
+from cmcourier.domain.models import ExcludedTrigger, trigger_system_id
 from cmcourier.domain.ports import S0Strategy
 from cmcourier.services.indexing import IndexingService
 from cmcourier.services.manifest_check import run_manifest_check
@@ -1253,9 +1253,12 @@ def _dry_run_first_doc(services: _DryRunServices, *, source_descriptor: str) -> 
     triggers_iter = _try("S0", lambda: list(services.trigger_strategy.acquire(source_descriptor)))
     if isinstance(triggers_iter, CheckResult):
         return triggers_iter
-    if not triggers_iter:
+    # 148 REQ-001: el escaneo emite TAMBIÉN las filas que clasificó como no
+    # migrables. El dry-run quiere la primera que sí lo es — si arrancara
+    # por una excluida diría "no se puede migrar" cuando la config está bien.
+    trigger = next((t for t in triggers_iter if not isinstance(t, ExcludedTrigger)), None)
+    if trigger is None:
         return _skip("sample_dry_run", "no_triggers")
-    trigger = triggers_iter[0]
     docs = _try("S1", lambda: services.indexing.enrich(trigger))
     if isinstance(docs, CheckResult):
         return docs

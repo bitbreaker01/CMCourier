@@ -72,6 +72,14 @@ class _CountingSource(IDataSource):
     ) -> list[dict[str, Any]]:
         return self.inner.get_by_fields_in(field, values, fixed_filters)
 
+    def stream_by_fields_in(  # 148 REQ-001
+        self,
+        field: str,
+        values: list[Any],
+        fixed_filters: Mapping[str, Any],
+    ) -> Iterator[dict[str, Any]]:
+        return self.inner.stream_by_fields_in(field, values, fixed_filters)
+
     def count(self) -> int:
         return self.inner.count()
 

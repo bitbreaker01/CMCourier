@@ -162,20 +162,52 @@ class OdbcDataSource(IDataSource):
         values: list[Any],
         fixed_filters: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for sql, params in self._in_chunks(field, values, fixed_filters):
+            results.extend(self.query(sql, params))
+        return results
+
+    def stream_by_fields_in(
+        self,
+        field: str,
+        values: list[Any],
+        fixed_filters: Mapping[str, Any],
+    ) -> Iterator[dict[str, Any]]:
+        """148 REQ-001: mismo filtro y mismo chunkeo que
+        :meth:`get_by_fields_in`, pero cada chunk sale por ``query_stream``
+        (``fetchmany(500)``) en lugar de ``fetchall()``.
+
+        El escaneo de S0 en modo ``direct_rvabrep`` filtra por sistema, y
+        un sistema es la tabla casi entera: materializarlo en una lista de
+        Python no es aceptable. Al ser un generator, no ejecuta SQL hasta
+        el primer ``next()``.
+        """
+        for sql, params in self._in_chunks(field, values, fixed_filters):
+            yield from self.query_stream(sql, params)
+
+    def _in_chunks(
+        self,
+        field: str,
+        values: list[Any],
+        fixed_filters: Mapping[str, Any],
+    ) -> Iterator[tuple[str, list[Any]]]:
+        """Yieldea ``(sql, params)`` por cada chunk de 1000 valores del ``IN``.
+
+        Un solo lugar arma la cláusula para los dos caminos (materializado
+        y stream): si el chunkeo cambia, cambia para ambos.
+        """
         if not values:
-            return []
+            return
         fixed_cols = list(fixed_filters.keys())
         fixed_vals = [fixed_filters[c] for c in fixed_cols]
         fixed_clause = " AND " + " AND ".join(f"{c} = ?" for c in fixed_cols) if fixed_cols else ""
-        results: list[dict[str, Any]] = []
         for start in range(0, len(values), _IN_CHUNK_SIZE):
             chunk = values[start : start + _IN_CHUNK_SIZE]
             placeholders = ", ".join("?" * len(chunk))
             sql = (
                 f"SELECT * FROM {self._source_expr} WHERE {field} IN ({placeholders}){fixed_clause}"
             )
-            results.extend(self.query(sql, list(chunk) + fixed_vals))
-        return results
+            yield sql, list(chunk) + fixed_vals
 
     def get_all(self) -> Iterator[dict[str, Any]]:
         return self.query_stream(f"SELECT * FROM {self._source_expr}", [])

@@ -39,6 +39,7 @@ from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, 
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -59,7 +60,6 @@ from cmcourier.domain.exceptions import (
     IndexingError,
     PDFAssemblyFailedError,
     RetriesExhaustedError,
-    RVABREPDeletedError,
     RVABREPNotFoundError,
     SourceFailedError,
     SourceFileMissingError,
@@ -67,7 +67,9 @@ from cmcourier.domain.exceptions import (
 from cmcourier.domain.models import (
     ClientTrigger,
     CMMapping,
+    ExcludedTrigger,
     MigrationRecord,
+    ReasonCode,
     ResolvedMetadata,
     RVABREPDocument,
     StagedFile,
@@ -76,14 +78,14 @@ from cmcourier.domain.models import (
     trigger_system_id,
 )
 from cmcourier.domain.ports import ITrackingStore, S0Strategy
-from cmcourier.observability.error_classification import classify_failure
+from cmcourier.observability.error_classification import ErrorCategory, classify_failure
 from cmcourier.observability.metrics import MetricsRecorder, StageTimer
 from cmcourier.observability.system_metrics import SystemMetricsSampler
 from cmcourier.services.auto_tune import AutoTuneController
 from cmcourier.services.cancellation import CancellationToken
 from cmcourier.services.document_cache import DocumentCacheService
 from cmcourier.services.identity import IdentityResolver, ResolvedIdentity
-from cmcourier.services.indexing import IndexingService
+from cmcourier.services.indexing import EnrichOutcome, IndexingService
 from cmcourier.services.lane_controller import LaneController
 from cmcourier.services.lane_splitter import Lane
 from cmcourier.services.lane_splitter import split as split_lanes
@@ -93,6 +95,20 @@ from cmcourier.services.reconciler import stop_reconciler_visibly
 from cmcourier.services.worker_pool_stats import ResizableSemaphore, WorkerPoolStats
 
 _log = logging.getLogger(__name__)
+
+# 148 REQ-002: los cuatro ``CM_*`` salen de ``classify_failure`` (104), que YA
+# produce exactamente este enum y hasta ahora sólo alimentaba métricas. Se
+# conecta a la base, no se reinventa. ``app_error`` no tiene código propio en
+# la taxonomía: es, por definición, la excepción no contemplada.
+_CM_REASONS: Mapping[ErrorCategory, ReasonCode] = MappingProxyType(
+    {
+        "timeout": ReasonCode.CM_TIMEOUT,
+        "http_4xx": ReasonCode.CM_REJECTED_4XX,
+        "http_5xx": ReasonCode.CM_ERROR_5XX,
+        "transport": ReasonCode.CM_TRANSPORT,
+        "app_error": ReasonCode.CRASHED,
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +140,27 @@ class RunReport:
 # ---------------------------------------------------------------------------
 # Estado interno de `stage`
 # ---------------------------------------------------------------------------
+
+
+def _census_record(excluded: ExcludedTrigger, batch_id: str) -> MigrationRecord:
+    """148 REQ-004: la fila de ``migration_log`` de un documento que no sigue.
+
+    Un solo lugar la arma para todos los caminos del censo. ``id_rvi`` va
+    siempre: sin él el censo no se puede agrupar por código RVI, que es
+    exactamente la pregunta del operador.
+    """
+    return MigrationRecord(
+        trigger_shortname=excluded.shortname or "",
+        trigger_cif=excluded.cif or "",
+        trigger_system_id=excluded.system_id or "",
+        rvabrep_txn_num=excluded.txn_num,
+        rvabrep_file_name=excluded.file_name,
+        batch_id=batch_id,
+        status=StageStatus.S1_PENDING,
+        created_at=datetime.now(),  # noqa: DTZ005 — wall-clock para auditoría humana
+        reason_code=excluded.reason_code,
+        id_rvi=excluded.id_rvi,
+    )
 
 
 @dataclass(slots=True)
@@ -572,11 +609,7 @@ class StagedPipeline:
             self._metrics.record_stage(
                 stage="S0", duration_ms=(time.monotonic() - s0_start) * 1000.0
             )
-            resume_scope = (
-                self._tracking_store.list_txn_nums_for_batch(resolved_batch_id)
-                if from_stage > 1
-                else None
-            )
+            resume_scope = self._resume_scope(resolved_batch_id) if from_stage > 1 else None
 
             items, skipped, s1_filtered = self._stage_s0_s1(
                 triggers, resolved_batch_id, resume_scope
@@ -655,10 +688,30 @@ class StagedPipeline:
         if from_stage > 1 and batch_id is None:
             raise ValueError("from_stage > 1 requires batch_id")
 
+    def _resume_scope(self, batch_id: str) -> set[str]:
+        """Los ``txn_num`` que un resume DEBE volver a mirar.
+
+        148 REQ-004: es todo el `batch` MENOS las filas que una corrida
+        anterior escribió como ``OUT_OF_SCOPE_RESUME``. Sin esa resta, el
+        segundo resume del mismo `batch` vería esas filas dentro del
+        alcance y adoptaría documentos que nunca fueron parte de él —
+        justo lo que el primer resume decidió no tocar.
+        """
+        return {
+            doc.txn_num
+            for doc in self._tracking_store.list_docs_for_batch(batch_id)
+            if doc.reason_code != ReasonCode.OUT_OF_SCOPE_RESUME.value
+        }
+
     def _resolve_batch_id(self, batch_id: str | None, from_stage: int, batch_size: int) -> str:
         if batch_id is not None:
             return batch_id
-        return self._tracking_store.start_batch(total_records=batch_size)
+        new_batch_id = self._tracking_store.start_batch(total_records=batch_size)
+        # 148 REQ-005: ``batch_size`` es una perilla de memoria, NO un conteo
+        # del origen. Se siembra en 0 y S1 lo arma documento por documento —
+        # si no, el denominador arranca mintiendo y el censo nunca cierra.
+        self._tracking_store.set_source_total(new_batch_id, 0)
+        return new_batch_id
 
     # ----------------------------------------------------- puntos de entrada multi-batch
     # 028: prep_chunk / upload_chunk permiten que el MultiBatchOrchestrator
@@ -681,9 +734,7 @@ class StagedPipeline:
         responsabilidad del orchestrator — este método toma la lista
         directamente.
         """
-        resume_scope = (
-            self._tracking_store.list_txn_nums_for_batch(batch_id) if from_stage > 1 else None
-        )
+        resume_scope = self._resume_scope(batch_id) if from_stage > 1 else None
         items, skipped, s1_filtered = self._stage_s0_s1(
             triggers, batch_id, resume_scope, recorder=recorder
         )
@@ -763,6 +814,71 @@ class StagedPipeline:
         """063: pre-abre el `connection pool` de S5 a ``workers`` `socket`s."""
         self._uploader.warm_connection_pool(workers)
 
+    def record_prep_crash(self, trigger: Trigger, batch_id: str, exc: BaseException) -> None:
+        """148 REQ-004: una excepción no contemplada en S1..S4 deja su fila.
+
+        Hasta acá ese camino sólo incrementaba un tally en memoria: el
+        documento desaparecía del `batch` sin estado terminal y sin razón.
+
+        Si S1 alcanzó a marcarlo ``S1_DONE`` ya está contado en el
+        denominador; si reventó antes, se cuenta acá — el censo tiene que
+        cerrar en los dos casos.
+        """
+        txn = self._indexing_service.txn_num_of(trigger)
+        excluded = self._exclusion_for(trigger, ReasonCode.CRASHED)
+        counted = bool(txn) and self._tracking_store.is_stage_done(
+            txn, batch_id, StageStatus.S1_DONE
+        )
+        self._record_crash(excluded, batch_id, StageStatus.S1_FAILED, exc, count_source=not counted)
+
+    def record_upload_crash(self, item: _StageItem, batch_id: str, exc: BaseException) -> None:
+        """148 REQ-004: el crash de S5 — el bug de los ~200 uploads perdidos.
+
+        La excepción no-CMIS no persistía nada, y como
+        ``mark_stage_pending`` es ``INSERT OR IGNORE`` el documento se
+        quedaba en ``S4_DONE``: subido a los ojos del reporte, nunca
+        subido de verdad. Acá termina en ``S5_FAILED`` + ``CRASHED``.
+
+        El documento ya fue contado por S1, así que el denominador no se
+        toca.
+        """
+        self._record_crash(
+            self._exclusion_for(item.trigger, ReasonCode.CRASHED, item.document),
+            batch_id,
+            StageStatus.S5_FAILED,
+            exc,
+            count_source=False,
+        )
+
+    def _record_crash(
+        self,
+        excluded: ExcludedTrigger,
+        batch_id: str,
+        stage: StageStatus,
+        exc: BaseException,
+        *,
+        count_source: bool,
+    ) -> None:
+        """Escribe la fila del crash. Best-effort: el tracking nunca mata al worker."""
+        try:
+            self._tracking_store.mark_stage_pending(
+                _census_record(excluded, batch_id), StageStatus.S1_PENDING
+            )
+            if count_source:
+                self._tracking_store.increment_source_total(batch_id, 1)
+            self._tracking_store.mark_stage_terminal(
+                excluded.txn_num,
+                batch_id,
+                stage,
+                f"crashed: {type(exc).__name__}",
+                reason_code=ReasonCode.CRASHED,
+            )
+        except Exception:  # noqa: BLE001 — S6 nunca bloquea el pipeline
+            _log.exception(
+                "pipeline: could not record crash",
+                extra={"batch_id": batch_id, "txn_num": excluded.txn_num},
+            )
+
     def _build_record(
         self,
         item: _StageItem,
@@ -798,6 +914,11 @@ class StagedPipeline:
             source_file_path=str(item.staged_file.path) if item.staged_file else None,
             page_count=item.staged_file.page_count if item.staged_file else None,
             file_size_bytes=item.staged_file.size_bytes if item.staged_file else None,
+            # 148 REQ-004: el código RVI se persiste SIEMPRE, no sólo en las
+            # exclusiones. Hoy no vive en ninguna otra parte de la base — sin
+            # él el censo no se puede agrupar por código, que es exactamente
+            # la pregunta del operador.
+            id_rvi=item.document.index7,
         )
 
     # ----------------------------------------------------------- `stage`s
@@ -810,135 +931,228 @@ class StagedPipeline:
         *,
         recorder: MetricsRecorder | None = None,
     ) -> tuple[list[_StageItem], int, int]:
+        """S0→S1. 148 REQ-004: ningún documento del origen sale de acá sin fila.
+
+        Cuatro salidas posibles por documento, y las cuatro dejan rastro:
+        sigue viaje (``S1_DONE``), ya se había subido (``S1_SKIPPED`` +
+        ``ALREADY_UPLOADED``), el origen o el operador lo excluyeron
+        (``S1_FILTERED`` + su razón), o el escaneo se rompió
+        (``S1_FAILED`` + su razón). Pre-148 tres de esos caminos eran un
+        ``continue`` pelado.
+        """
         rec = recorder or self._metrics
         items: list[_StageItem] = []
         skipped_cross_batch = 0
-        # 051: un trigger cuya fila RVABREP viene con código de baja es
-        # *filtrado* — un resultado de primera clase, NO una falla y
-        # NO un descarte silencioso.
+        # 051: un trigger filtrado es un resultado de primera clase, NO una
+        # falla y NO un descarte silencioso.
         filtered = 0
         for trigger in triggers:
             # 097: cancelación cooperativa — dejamos de tomar triggers
-            # nuevos; los ya convertidos a items siguen su curso.
+            # nuevos; los ya convertidos a items siguen su curso. 148: el
+            # trigger que teníamos en la mano deja su fila CANCELLED.
             if not self._cancel_token.checkpoint():
+                self._record_cancelled(trigger, batch_id)
                 break
-            audit = trigger.audit_row()
-            audit_shortname = audit.get("shortname") or "<unknown>"
-            docs: list[RVABREPDocument] = []
-            with StageTimer(
-                rec,
-                pipeline=self._pipeline_name,
-                stage="S1",
-                batch_id=batch_id,
-                txn_num=audit_shortname,
-            ) as timer:
-                try:
-                    docs = self._indexing_service.enrich(trigger)
-                except RVABREPNotFoundError:
-                    timer.mark_failed()
-                    _log.warning(
-                        "pipeline: trigger has no rvabrep rows",
-                        extra={"batch_id": batch_id, "shortname": audit_shortname},
-                    )
-                    continue
-                except RVABREPDeletedError as exc:
-                    # 051: borrado-en-origen NO es una falla del `pipeline`
-                    # — el doc se excluye correctamente. Lo contamos, lo
-                    # logueamos y seguimos.
-                    # 062: persiste una fila `S1_FILTERED` en
-                    # migration_log para que el tab DETAIL + analyzer +
-                    # `batch show` puedan ver QUÉ triggers fueron
-                    # filtrados y por qué. La excepción se dispara antes
-                    # de que se derive ningún txn_num, así que usamos
-                    # una clave sintética indexada por la identidad del
-                    # trigger — las re-corridas colisionan
-                    # idempotentemente vía INSERT OR IGNORE.
-                    filtered += 1
-                    # 147 REQ-004: acá NO hay identidad resuelta — el doc se
-                    # filtra en S1 y nunca llega a S2, que es donde la cadena
-                    # corre. La proyección del trigger es lo único disponible,
-                    # y es lo mismo que se escribía pre-147.
-                    audit_system_id = audit.get("system_id") or ""
-                    synthetic_txn = f"FILTERED__{audit_shortname}__{audit_system_id}"
-                    filtered_record = MigrationRecord(
-                        trigger_shortname=audit_shortname,
-                        trigger_cif=audit.get("cif") or "",
-                        trigger_system_id=audit_system_id,
-                        rvabrep_txn_num=synthetic_txn,
-                        rvabrep_file_name="",
-                        batch_id=batch_id,
-                        status=StageStatus.S1_PENDING,
-                        created_at=datetime.now(),  # noqa: DTZ005
-                    )
-                    self._tracking_store.mark_stage_pending(filtered_record, StageStatus.S1_PENDING)
-                    self._tracking_store.mark_stage_terminal(
-                        synthetic_txn,
-                        batch_id,
-                        StageStatus.S1_FILTERED,
-                        f"deleted_at_source; deleted_count={exc.deleted_count}",
-                    )
-                    _log.info(
-                        "pipeline: doc filtered at S1",
-                        extra={
-                            "batch_id": batch_id,
-                            "shortname": audit_shortname,
-                            "reason": "deleted_at_source",
-                        },
-                    )
-                    continue
-                except IndexingError:
-                    timer.mark_failed()
-                    _log.exception(
-                        "pipeline: indexing failed",
-                        extra={"batch_id": batch_id, "shortname": audit_shortname},
-                    )
-                    continue
-            for doc in docs:
-                if resume_scope is not None and doc.txn_num not in resume_scope:
-                    _log.info(
-                        "pipeline: doc out of resume scope",
-                        extra={
-                            "batch_id": batch_id,
-                            "txn_num": doc.txn_num,
-                            "reason": "resume_out_of_scope",
-                        },
-                    )
-                    continue
-                already_in_batch = self._tracking_store.is_stage_done(
-                    doc.txn_num, batch_id, StageStatus.S1_DONE
-                )
-                if not already_in_batch and self._tracking_store.is_uploaded(doc.txn_num):
-                    # 062: persiste una fila ``S1_SKIPPED`` para que el
-                    # tab DETAIL + analyzer + `batch show` puedan ver
-                    # qué docs fueron salteados cross-batch (el
-                    # contrato previo de "salteado silenciosamente"
-                    # se revierte intencionalmente por trazabilidad).
-                    skipped_cross_batch += 1
-                    skip_item = _StageItem(trigger=trigger, document=doc)
-                    skip_record = self._build_record(skip_item, batch_id, StageStatus.S1_PENDING)
-                    self._tracking_store.mark_stage_pending(skip_record, StageStatus.S1_PENDING)
-                    self._tracking_store.mark_stage_terminal(
-                        doc.txn_num,
-                        batch_id,
-                        StageStatus.S1_SKIPPED,
-                        "cross_batch_uploaded",
-                    )
-                    _log.info(
-                        "pipeline: doc already uploaded in prior batch",
-                        extra={
-                            "batch_id": batch_id,
-                            "txn_num": doc.txn_num,
-                            "reason": "cross_batch_uploaded",
-                        },
-                    )
-                    continue
-                item = _StageItem(trigger=trigger, document=doc)
-                if not already_in_batch:
-                    record = self._build_record(item, batch_id, StageStatus.S1_PENDING)
-                    self._tracking_store.mark_stage_pending(record, StageStatus.S1_PENDING)
-                    self._tracking_store.mark_stage_done(doc.txn_num, batch_id, StageStatus.S1_DONE)
-                items.append(item)
+            # 148 REQ-001: S0 ya clasificó esta fila (código fuera del
+            # allow-list, o fila sin identidad). No se enriquece: se
+            # registra y no llega a S2.
+            if isinstance(trigger, ExcludedTrigger):
+                filtered += 1
+                self._record_exclusion(trigger, batch_id, StageStatus.S1_FILTERED)
+                continue
+            outcome = self._s1_enrich(trigger, batch_id, rec)
+            if outcome is None:
+                continue
+            for excluded in outcome.excluded:
+                filtered += 1
+                self._record_exclusion(excluded, batch_id, StageStatus.S1_FILTERED)
+            for doc in outcome.documents:
+                item, skipped_delta = self._s1_admit(trigger, doc, batch_id, resume_scope)
+                skipped_cross_batch += skipped_delta
+                if item is not None:
+                    items.append(item)
         return items, skipped_cross_batch, filtered
+
+    def _record_cancelled(self, trigger: Trigger, batch_id: str) -> None:
+        """148: el trigger que estaba en la mano cuando se canceló la corrida."""
+        self._record_exclusion(
+            self._exclusion_for(trigger, ReasonCode.CANCELLED),
+            batch_id,
+            StageStatus.S1_FAILED,
+            failure=True,
+        )
+
+    def _s1_enrich(
+        self,
+        trigger: Trigger,
+        batch_id: str,
+        rec: MetricsRecorder,
+    ) -> EnrichOutcome | None:
+        """Enriquece un trigger. ``None`` = el escaneo falló y ya dejó su fila.
+
+        148 REQ-004: ``RVABREPNotFoundError`` e ``IndexingError`` eran dos
+        ``continue`` pelados — el documento se evaporaba sin contador, sin
+        fila y con un log que nadie correlaciona.
+        """
+        audit_shortname = trigger.audit_row().get("shortname") or "<unknown>"
+        with StageTimer(
+            rec,
+            pipeline=self._pipeline_name,
+            stage="S1",
+            batch_id=batch_id,
+            txn_num=audit_shortname,
+        ) as timer:
+            try:
+                return self._indexing_service.enrich_census(trigger)
+            except RVABREPNotFoundError:
+                timer.mark_failed()
+                _log.warning(
+                    "pipeline: trigger has no rvabrep rows",
+                    extra={"batch_id": batch_id, "shortname": audit_shortname},
+                )
+                reason = ReasonCode.SOURCE_ROW_NOT_FOUND
+            except IndexingError:
+                timer.mark_failed()
+                _log.exception(
+                    "pipeline: indexing failed",
+                    extra={"batch_id": batch_id, "shortname": audit_shortname},
+                )
+                reason = ReasonCode.INDEXING_FAILED
+        self._record_exclusion(
+            self._exclusion_for(trigger, reason), batch_id, StageStatus.S1_FAILED, failure=True
+        )
+        return None
+
+    def _s1_admit(
+        self,
+        trigger: Trigger,
+        doc: RVABREPDocument,
+        batch_id: str,
+        resume_scope: set[str] | None,
+    ) -> tuple[_StageItem | None, int]:
+        """Decide si *doc* entra al `batch`. Devuelve ``(item, skipped_delta)``."""
+        if resume_scope is not None and doc.txn_num not in resume_scope:
+            self._record_exclusion(
+                self._exclusion_for(trigger, ReasonCode.OUT_OF_SCOPE_RESUME, doc),
+                batch_id,
+                StageStatus.S1_FILTERED,
+            )
+            return None, 0
+        already_in_batch = self._tracking_store.is_stage_done(
+            doc.txn_num, batch_id, StageStatus.S1_DONE
+        )
+        if not already_in_batch and self._tracking_store.is_uploaded(doc.txn_num):
+            # 062: persiste una fila ``S1_SKIPPED`` para que el tab DETAIL
+            # + analyzer + `batch show` puedan ver qué docs fueron
+            # salteados cross-batch.
+            self._record_exclusion(
+                self._exclusion_for(trigger, ReasonCode.ALREADY_UPLOADED, doc),
+                batch_id,
+                StageStatus.S1_SKIPPED,
+            )
+            return None, 1
+        item = _StageItem(trigger=trigger, document=doc)
+        if not already_in_batch:
+            record = self._build_record(item, batch_id, StageStatus.S1_PENDING)
+            self._tracking_store.mark_stage_pending(record, StageStatus.S1_PENDING)
+            self._tracking_store.mark_stage_done(doc.txn_num, batch_id, StageStatus.S1_DONE)
+            # 148 REQ-005: el denominador se arma a medida que S1 ve los
+            # documentos — no se conoce de antemano.
+            self._tracking_store.increment_source_total(batch_id, 1)
+        return item, 0
+
+    # ------------------------------------------------- 148 REQ-004: el censo
+
+    def _exclusion_for(
+        self,
+        trigger: Trigger,
+        reason: ReasonCode,
+        doc: RVABREPDocument | None = None,
+    ) -> ExcludedTrigger:
+        """Proyecta ``(trigger[, doc])`` al ítem clasificado que se registra.
+
+        Con documento en mano la clave es su ``txn_num`` REAL. Sin él —el
+        trigger no matcheó ninguna fila, o el escaneo explotó antes— se
+        usa el txn que el propio trigger conozca y, recién en último
+        lugar, una clave sintética por identidad: no hay ninguna otra
+        cosa que usar, y sin fila el documento vuelve a ser invisible.
+        """
+        audit = trigger.audit_row()
+        if doc is not None:
+            txn, id_rvi, file_name = doc.txn_num, doc.index7, doc.file_name
+        elif isinstance(trigger, ExcludedTrigger):
+            txn, id_rvi, file_name = trigger.txn_num, trigger.id_rvi, trigger.file_name
+        else:
+            txn = self._indexing_service.txn_num_of(trigger)
+            id_rvi, file_name = "", ""
+        if not txn:
+            txn = f"{reason.value}__{audit.get('shortname') or ''}__{audit.get('system_id') or ''}"
+        return ExcludedTrigger(
+            reason_code=reason,
+            txn_num=txn,
+            id_rvi=id_rvi,
+            file_name=file_name,
+            shortname=audit.get("shortname"),
+            cif=audit.get("cif"),
+            system_id=audit.get("system_id"),
+        )
+
+    def _record_exclusion(
+        self,
+        excluded: ExcludedTrigger,
+        batch_id: str,
+        stage: StageStatus,
+        *,
+        failure: bool = False,
+    ) -> None:
+        """148 REQ-004: escribe LA fila del censo para un documento que no sigue.
+
+        Siempre tres cosas: la fila (``INSERT OR IGNORE``, con ``id_rvi``
+        para que el censo se pueda agrupar por código), el denominador, y
+        el estado terminal con su ``reason_code``. ``failure`` elige entre
+        ``mark_stage_failed`` (cuenta como reintento) y
+        ``mark_stage_terminal`` (terminó su recorrido, no falló).
+        """
+        reason = excluded.reason_code.value.lower()
+        self._tracking_store.mark_stage_pending(
+            _census_record(excluded, batch_id), StageStatus.S1_PENDING
+        )
+        self._tracking_store.increment_source_total(batch_id, 1)
+        # 148: UN log por exclusión, con la razón legible por máquina — la
+        # misma que va a la columna. Pre-148 cada camino inventaba su propio
+        # string (o no logueaba nada).
+        _log.info(
+            "pipeline: doc excluded at S1",
+            extra={"batch_id": batch_id, "txn_num": excluded.txn_num, "reason": reason},
+        )
+        write = (
+            self._tracking_store.mark_stage_failed
+            if failure
+            else self._tracking_store.mark_stage_terminal
+        )
+        write(excluded.txn_num, batch_id, stage, reason, reason_code=excluded.reason_code)
+
+    def _record_terminal_reason(
+        self,
+        item: _StageItem,
+        batch_id: str,
+        stage: StageStatus,
+        reason: ReasonCode,
+    ) -> None:
+        """148 REQ-004: cierra un documento que YA tiene fila en el `batch`.
+
+        Para los caminos que abortan con el documento a mitad del
+        `pipeline` (cancelación, claim perdido, crash): la fila existe
+        desde S1, así que no hace falta insertarla ni volver a contar el
+        denominador — sólo que deje de estar en un estado progresivo.
+        """
+        self._tracking_store.mark_stage_terminal(
+            item.document.txn_num,
+            batch_id,
+            stage,
+            reason.value.lower(),
+            reason_code=reason,
+        )
 
     def _run_prep_stage(
         self,
@@ -1049,8 +1263,12 @@ class StagedPipeline:
         marcada como done en una corrida previa se descarta sin contar.
         """
         # 097: cancelación cooperativa — el item se saltea sin contar
-        # como falla; queda pendiente para un resume.
+        # como falla; queda pendiente para un resume. 148 REQ-004: pero
+        # deja de quedar en un estado progresivo sin explicación.
         if not self._cancel_token.checkpoint():
+            self._record_terminal_reason(
+                item, batch_id, StageStatus.S2_FAILED, ReasonCode.CANCELLED
+            )
             return None, False
         txn = item.document.txn_num
         with StageTimer(
@@ -1075,7 +1293,11 @@ class StagedPipeline:
                     record = self._build_record(item, batch_id, StageStatus.S2_PENDING)
                     self._tracking_store.mark_stage_pending(record, StageStatus.S2_PENDING)
                     self._tracking_store.mark_stage_failed(
-                        txn, batch_id, StageStatus.S2_FAILED, str(exc)
+                        txn,
+                        batch_id,
+                        StageStatus.S2_FAILED,
+                        str(exc),
+                        reason_code=self._s2_reason(exc),
                     )
                     return None, True
                 return None, False
@@ -1085,6 +1307,25 @@ class StagedPipeline:
             self._tracking_store.mark_stage_done(txn, batch_id, StageStatus.S2_DONE)
         item.mapping = mapping
         return item, False
+
+    def _s2_reason(self, exc: IDRViNotMappedError | IdentityResolutionError) -> ReasonCode:
+        """148 REQ-002: las tres razones que hoy colapsan en ``S2_FAILED``.
+
+        Las tres son del balde ``BLOQUEADO`` —las arregla el operador—
+        pero editando archivos DISTINTOS: el YAML de identidad,
+        ``MapeoRVI_CM.csv``, o el manifest de tipos del server. Un
+        ``S2_FAILED`` con texto libre no permite separarlas.
+
+        El ``is True`` es deliberado: ``missing_from_manifest`` puede no
+        existir (modos consolidado/split, dobles de test), y un atributo
+        cualquiera no debe valer como "sí".
+        """
+        if isinstance(exc, IdentityResolutionError):
+            return ReasonCode.IDENTITY_UNRESOLVED
+        missing = getattr(self._mapping_service, "missing_from_manifest", None)
+        if missing is not None and missing(exc.id_rvi) is True:
+            return ReasonCode.TYPE_NOT_IN_MANIFEST
+        return ReasonCode.CODE_NOT_MAPPED
 
     def _resolve_identity(self, item: _StageItem) -> None:
         """147 REQ-003: resuelve la identidad y la cuelga del item.
@@ -1130,7 +1371,11 @@ class StagedPipeline:
         """Resolución de metadata S3 para un item. Devuelve
         ``(survivor_or_None, counted_failure)``."""
         # 097: cancelación cooperativa — saltea sin contar como falla.
+        # 148 REQ-004: con fila terminal, no colgado en un estado progresivo.
         if not self._cancel_token.checkpoint():
+            self._record_terminal_reason(
+                item, batch_id, StageStatus.S3_FAILED, ReasonCode.CANCELLED
+            )
             return None, False
         assert item.mapping is not None
         txn = item.document.txn_num
@@ -1184,7 +1429,11 @@ class StagedPipeline:
                         record = self._build_record(item, batch_id, StageStatus.S3_PENDING)
                         self._tracking_store.mark_stage_pending(record, StageStatus.S3_PENDING)
                         self._tracking_store.mark_stage_failed(
-                            txn, batch_id, StageStatus.S3_FAILED, str(exc)
+                            txn,
+                            batch_id,
+                            StageStatus.S3_FAILED,
+                            str(exc),
+                            reason_code=ReasonCode.METADATA_UNRESOLVED,
                         )
                         return None, True
                     return None, False
@@ -1230,7 +1479,11 @@ class StagedPipeline:
         trabajo de S1-S3.
         """
         # 097: cancelación cooperativa — saltea sin contar como falla.
+        # 148 REQ-004: con fila terminal, no colgado en un estado progresivo.
         if not self._cancel_token.checkpoint():
+            self._record_terminal_reason(
+                item, batch_id, StageStatus.S4_FAILED, ReasonCode.CANCELLED
+            )
             return None, False
         txn = item.document.txn_num
         with StageTimer(
@@ -1268,7 +1521,15 @@ class StagedPipeline:
                     record = self._build_record(item, batch_id, StageStatus.S4_PENDING)
                     self._tracking_store.mark_stage_pending(record, StageStatus.S4_PENDING)
                     self._tracking_store.mark_stage_failed(
-                        txn, batch_id, StageStatus.S4_FAILED, str(exc)
+                        txn,
+                        batch_id,
+                        StageStatus.S4_FAILED,
+                        str(exc),
+                        reason_code=(
+                            ReasonCode.SOURCE_FILE_MISSING
+                            if isinstance(exc, SourceFileMissingError)
+                            else ReasonCode.ASSEMBLY_FAILED
+                        ),
                     )
                     return None, True
                 return None, False
@@ -1466,6 +1727,13 @@ class StagedPipeline:
                     "reason": "as400_claim_lost",
                 },
             )
+            # 148 REQ-004: sin esto el doc quedaba en ``S5_PENDING`` para
+            # siempre — la fila recién insertada arriba, y nadie que la
+            # cierre. Terminal + ``CLAIM_LOST``: se ve en el censo y el
+            # operador sabe que otro proceso se lo llevó.
+            self._record_terminal_reason(
+                item, batch_id, StageStatus.S5_FAILED, ReasonCode.CLAIM_LOST
+            )
             return "skipped"
         return record
 
@@ -1490,7 +1758,12 @@ class StagedPipeline:
         # upload se saltea limpio (queda pendiente para un resume). Los
         # docs ya en vuelo pasaron este chequeo y terminan — eso es el
         # drain. Chequeado antes de tomar el slot del semaphore.
+        # 148 REQ-004: el doc está en ``S4_DONE``; sin fila terminal el censo
+        # lo cuenta como "preparado" y nadie sabe que nunca se intentó subir.
         if not self._cancel_token.checkpoint():
+            self._record_terminal_reason(
+                item, batch_id, StageStatus.S5_FAILED, ReasonCode.CANCELLED
+            )
             return "skipped"
         txn = item.document.txn_num
         # 109: el pre-flight de idempotencia (query SQLite + claim AS400)
@@ -1544,6 +1817,9 @@ class StagedPipeline:
                     # perdió el tipo.
                     category, status_code = classify_failure(exc)
                     (recorder or self._metrics).record_upload_failed(category, status_code)
+                    # 148 REQ-002: el MISMO clasificador que alimenta las
+                    # métricas alimenta ahora la base. Un solo criterio.
+                    reason = _CM_REASONS[category]
                     if self._coordinator is not None:
                         self._coordinator.mark_failed(
                             record=record,
@@ -1552,10 +1828,11 @@ class StagedPipeline:
                             trigger=item.trigger,
                             stage=StageStatus.S5_FAILED,
                             error=str(exc),
+                            reason_code=reason,
                         )
                     else:
                         self._tracking_store.mark_stage_failed(
-                            txn, batch_id, StageStatus.S5_FAILED, str(exc)
+                            txn, batch_id, StageStatus.S5_FAILED, str(exc), reason_code=reason
                         )
                     self._mark_failed(lane)
                     return "failed"

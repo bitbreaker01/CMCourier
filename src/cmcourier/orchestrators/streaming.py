@@ -46,9 +46,10 @@ import queue
 import threading
 import time
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from cmcourier.config.schema import PipelineConfig
 from cmcourier.domain.models import Trigger
@@ -62,6 +63,25 @@ from cmcourier.services.reconciler import stop_reconciler_visibly
 _log = logging.getLogger(__name__)
 
 _POISON: object = object()
+
+
+def _record_crash(
+    recorder: Callable[[Any, str, BaseException], None],
+    subject: Any,
+    batch_id: str,
+    exc: BaseException,
+) -> None:
+    """148 REQ-004: deja la fila del crash sin poder matar al worker.
+
+    El registro del censo es la RED, no la corrida: si el tracking está
+    caído, el `worker` sigue drenando su cola. Al revés —un crash del
+    censo tumbando el `pipeline`— sería cambiar un documento perdido por
+    todos los que quedaban.
+    """
+    try:
+        recorder(subject, batch_id, exc)
+    except Exception:  # noqa: BLE001 — S6 nunca bloquea el pipeline
+        _log.exception("streaming: could not record crash", extra={"batch_id": batch_id})
 
 
 class _TriggerIter:
@@ -691,6 +711,10 @@ class StreamingOrchestrator:
                         "streaming: prep failed",
                         extra={"batch_id": batch_id, "reason": type(exc).__name__},
                     )
+                    # 148 REQ-004: hasta acá esto sólo movía un contador en
+                    # memoria — el documento se evaporaba del batch sin
+                    # estado terminal y sin razón.
+                    _record_crash(self._pipeline.record_prep_crash, trigger, batch_id, exc)
                     with tally_lock:
                         tally.prep_failed += 1
                     continue
@@ -734,11 +758,9 @@ class StreamingOrchestrator:
                 if item is _POISON:
                     self._pop_pill()  # 144: republica sin la píldora
                     return
-                # 067: un `consumer` acaba de hacer pop → los
-                # pendientes bajan en 1.
+                # 067: un `consumer` acaba de hacer pop → los pendientes bajan en 1.
                 self._publish_pending_count()
-                # ``bucket`` lleva instancias de _StageItem excepto
-                # por el `sentinel` de poison (manejado arriba).
+                # ``bucket`` lleva _StageItem salvo el `sentinel` de poison.
                 stage_item: _StageItem = item  # type: ignore[assignment]
                 try:
                     outcome = self._pipeline.streaming_upload_one(stage_item, batch_id, recorder)
@@ -747,6 +769,9 @@ class StreamingOrchestrator:
                         "streaming: upload crashed",
                         extra={"batch_id": batch_id, "reason": type(exc).__name__},
                     )
+                    # 148 REQ-004: el bug de los ~200 uploads perdidos — sin
+                    # esto el doc se queda en ``S4_DONE``, dado por preparado.
+                    _record_crash(self._pipeline.record_upload_crash, stage_item, batch_id, exc)
                     with tally_lock:
                         tally.s5_failed += 1
                     self._publish_chunk_state(batch_id=batch_id, tally=tally, tally_lock=tally_lock)
@@ -911,6 +936,9 @@ class StreamingOrchestrator:
                             "reason": type(exc).__name__,
                         },
                     )
+                    # 148 REQ-004: mismo arreglo que en ``_upload_loop`` — con
+                    # lanes puestas el handler es OTRO bloque de código.
+                    _record_crash(self._pipeline.record_upload_crash, stage_item, batch_id, exc)
                     with tally_lock:
                         tally.s5_failed += 1
                     self._publish_chunk_state(batch_id=batch_id, tally=tally, tally_lock=tally_lock)

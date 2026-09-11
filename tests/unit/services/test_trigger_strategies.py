@@ -7,15 +7,21 @@ SUT (the strategies) does no I/O of its own; the data source is wiring.
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from cmcourier.adapters.sources import TabularDataSource
 from cmcourier.domain.exceptions import ConfigurationError
-from cmcourier.domain.models import LocalScanTrigger, RvabrepRowTrigger
-from cmcourier.domain.ports import S0Strategy
+from cmcourier.domain.models import (
+    ExcludedTrigger,
+    LocalScanTrigger,
+    ReasonCode,
+    RvabrepRowTrigger,
+)
+from cmcourier.domain.ports import IDataSource, S0Strategy
 from cmcourier.services.triggers import (
     CsvTriggerColumnsConfig,
     CsvTriggerStrategy,
@@ -120,11 +126,13 @@ class TestDirectRvabrepTriggerStrategy:
         and then S1 re-expanded — wasted work and the wrong semantic for
         "process THIS RVABREP row". Now: 8 fixture rows minus 1 blank = 7
         ``RvabrepRowTrigger`` instances, one per surviving row.
+
+        148: the blank row is no longer dropped — it comes out classified
+        (see ``TestDirectRvabrepCensus148``), so the total is 8.
         """
         strategy = DirectRvabrepTriggerStrategy(source)
-        records = list(strategy.acquire())
+        records = [r for r in strategy.acquire() if isinstance(r, RvabrepRowTrigger)]
         assert len(records) == 7
-        assert all(isinstance(r, RvabrepRowTrigger) for r in records)
 
     def test_row_carries_full_rvabrep_payload(self, source: TabularDataSource) -> None:
         """Downstream S1 reads from the row directly, so every column must
@@ -178,7 +186,8 @@ class TestDirectRvabrepTriggerStrategy:
     def test_blank_rows_skipped(self, source: TabularDataSource) -> None:
         strategy = DirectRvabrepTriggerStrategy(source)
         for r in strategy.acquire():
-            assert isinstance(r, RvabrepRowTrigger)
+            if not isinstance(r, RvabrepRowTrigger):
+                continue  # 148: classified out, never reaches S2
             # No row with blank shortname or system_id reaches downstream.
             assert r.row["ABABCD"]
             assert r.row["ABAACD"]
@@ -200,11 +209,178 @@ class TestDirectRvabrepTriggerStrategy:
     def test_source_descriptor_ignored(self, source: TabularDataSource) -> None:
         strategy = DirectRvabrepTriggerStrategy(source)
         records = list(strategy.acquire("any-descriptor"))
-        assert len(records) == 7
+        assert len(records) == 8  # 148: 7 de trabajo + 1 clasificada
 
     def test_is_s0strategy(self, source: TabularDataSource) -> None:
         strategy = DirectRvabrepTriggerStrategy(source)
         assert isinstance(strategy, S0Strategy)
+
+
+# ---------------------------------------------------------------------------
+# 148 REQ-001 — the RVI code never reaches the SQL, and the filtered path streams
+# ---------------------------------------------------------------------------
+
+
+class _RecordingSource(IDataSource):
+    """Wraps a real ``IDataSource`` and records which access path was used.
+
+    Principle VI: the inner adapter is real (``TabularDataSource`` over a
+    CSV fixture); only the call log is test wiring.
+    """
+
+    def __init__(self, inner: IDataSource) -> None:
+        self.inner = inner
+        self.get_all_calls = 0
+        self.get_by_fields_in_calls: list[tuple[str, list[Any]]] = []
+        self.stream_by_fields_in_calls: list[tuple[str, list[Any]]] = []
+
+    def query(self, sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
+        return self.inner.query(sql, params)
+
+    def query_stream(self, sql: str, params: list[Any] | None = None) -> Iterator[dict[str, Any]]:
+        return self.inner.query_stream(sql, params)
+
+    def get_by_fields(self, filters: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return self.inner.get_by_fields(filters)
+
+    def get_by_fields_in(
+        self, field: str, values: list[Any], fixed_filters: Mapping[str, Any]
+    ) -> list[dict[str, Any]]:
+        self.get_by_fields_in_calls.append((field, list(values)))
+        return self.inner.get_by_fields_in(field, values, fixed_filters)
+
+    def stream_by_fields_in(
+        self, field: str, values: list[Any], fixed_filters: Mapping[str, Any]
+    ) -> Iterator[dict[str, Any]]:
+        self.stream_by_fields_in_calls.append((field, list(values)))
+        yield from self.inner.stream_by_fields_in(field, values, fixed_filters)
+
+    def get_all(self) -> Iterator[dict[str, Any]]:
+        self.get_all_calls += 1
+        yield from self.inner.get_all()
+
+    def count(self) -> int:
+        return self.inner.count()
+
+    def close(self) -> None:
+        self.inner.close()
+
+    # --- helpers for the assertions ------------------------------------
+    @property
+    def every_queried_value(self) -> list[Any]:
+        seen: list[Any] = []
+        for _field, values in self.get_by_fields_in_calls + self.stream_by_fields_in_calls:
+            seen.extend(values)
+        return seen
+
+    @property
+    def every_queried_field(self) -> list[str]:
+        return [f for f, _ in self.get_by_fields_in_calls + self.stream_by_fields_in_calls]
+
+
+class TestDirectRvabrepCensus148:
+    """148 REQ-001/REQ-004: the RVI code never touches SQL, and every row
+    the scan rejects leaves a classified item instead of a bare ``continue``."""
+
+    @pytest.fixture
+    def source(self) -> Iterator[_RecordingSource]:
+        src = _RecordingSource(TabularDataSource(_FIXTURES / "rvabrep_export.csv"))
+        yield src
+        src.close()
+
+    def test_document_types_never_reach_the_query(self, source: _RecordingSource) -> None:
+        """The whole point: an excluded code must COME BACK from the AS400
+        so it can be counted. If the code is in the ``IN``, the row never
+        comes back and the census cannot see it."""
+        strategy = DirectRvabrepTriggerStrategy(
+            source, filters=RvabrepFilters(systems=("1",), document_types=("FF17",))
+        )
+        list(strategy.acquire())
+        assert "FF17" not in source.every_queried_value
+        assert "ABAHCD" not in source.every_queried_field
+
+    def test_document_types_alone_never_narrows_the_query(self, source: _RecordingSource) -> None:
+        """Codes alone = no ``WHERE`` at all: the scan brings everything
+        and classifies in Python."""
+        strategy = DirectRvabrepTriggerStrategy(
+            source, filters=RvabrepFilters(document_types=("FF17",))
+        )
+        list(strategy.acquire())
+        assert source.get_all_calls == 1
+        assert source.get_by_fields_in_calls == []
+        assert source.stream_by_fields_in_calls == []
+
+    def test_systems_filter_streams_never_materializes(self, source: _RecordingSource) -> None:
+        """``filters.systems: ["1"]`` is the NORMAL config with the census
+        always on; a whole system must not land in a Python list."""
+        strategy = DirectRvabrepTriggerStrategy(source, filters=RvabrepFilters(systems=("1",)))
+        list(strategy.acquire())
+        assert source.stream_by_fields_in_calls == [("ABAACD", ["1"])]
+        assert source.get_by_fields_in_calls == []
+
+    def test_acquire_is_lazy(self, source: _RecordingSource) -> None:
+        strategy = DirectRvabrepTriggerStrategy(source, filters=RvabrepFilters(systems=("1",)))
+        it = strategy.acquire()
+        assert source.stream_by_fields_in_calls == []
+        next(it)
+        assert len(source.stream_by_fields_in_calls) == 1
+
+    def test_code_not_in_document_types_is_excluded_by_filter(
+        self, source: _RecordingSource
+    ) -> None:
+        strategy = DirectRvabrepTriggerStrategy(
+            source, filters=RvabrepFilters(document_types=("FF17",))
+        )
+        excluded = [
+            t
+            for t in strategy.acquire()
+            if isinstance(t, ExcludedTrigger) and t.reason_code is ReasonCode.EXCLUDED_BY_FILTER
+        ]
+        # AA01, BB02, CC03 — every non-FF17 row with a usable identity.
+        assert {t.id_rvi for t in excluded} == {"AA01", "BB02", "CC03"}
+        assert {t.txn_num for t in excluded} == {"TXN02", "TXN04", "TXN08"}
+
+    def test_excluded_rows_are_not_rvabrep_row_triggers(self, source: _RecordingSource) -> None:
+        """An excluded document must NOT flow into S2: it is a different
+        subtype, so the S1 dispatch cannot mistake it for work."""
+        strategy = DirectRvabrepTriggerStrategy(
+            source, filters=RvabrepFilters(document_types=("FF17",))
+        )
+        work = [t for t in strategy.acquire() if isinstance(t, RvabrepRowTrigger)]
+        assert all(t.row["ABAHCD"] == "FF17" for t in work)
+
+    def test_blank_identity_is_source_row_incomplete(self, source: _RecordingSource) -> None:
+        strategy = DirectRvabrepTriggerStrategy(source)
+        excluded = [t for t in strategy.acquire() if isinstance(t, ExcludedTrigger)]
+        assert len(excluded) == 1
+        assert excluded[0].reason_code is ReasonCode.SOURCE_ROW_INCOMPLETE
+        assert excluded[0].txn_num == "TXN07"
+        assert excluded[0].id_rvi == "FF17"
+
+    def test_incomplete_row_wins_over_the_code_filter(self, source: _RecordingSource) -> None:
+        """A row with no shortname is unusable no matter what its code is —
+        the identity problem is the one worth reporting."""
+        strategy = DirectRvabrepTriggerStrategy(
+            source, filters=RvabrepFilters(document_types=("FF17",))
+        )
+        excluded = [t for t in strategy.acquire() if isinstance(t, ExcludedTrigger)]
+        by_txn = {t.txn_num: t for t in excluded}
+        assert by_txn["TXN07"].reason_code is ReasonCode.SOURCE_ROW_INCOMPLETE
+
+    def test_every_source_row_leaves_exactly_one_trigger(self, source: _RecordingSource) -> None:
+        """The census invariant at S0: nothing is dropped in silence."""
+        strategy = DirectRvabrepTriggerStrategy(
+            source, filters=RvabrepFilters(document_types=("FF17",))
+        )
+        assert len(list(strategy.acquire())) == 8  # the whole fixture
+
+    def test_excluded_trigger_carries_the_audit_triple(self, source: _RecordingSource) -> None:
+        strategy = DirectRvabrepTriggerStrategy(
+            source, filters=RvabrepFilters(document_types=("FF17",))
+        )
+        excluded = {t.txn_num: t for t in strategy.acquire() if isinstance(t, ExcludedTrigger)}
+        audit = excluded["TXN02"].audit_row()
+        assert audit == {"shortname": "JUANPEREZ01", "cif": "123456", "system_id": "1"}
 
 
 # ---------------------------------------------------------------------------

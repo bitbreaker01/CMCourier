@@ -231,6 +231,9 @@ class MappingService:
         self._by_cm_code: dict[str, list[CMMapping]] = {}
         # 145 REQ-001: los ``IDCM`` del CSV que el manifest no conoce.
         self._missing_cm_codes: set[str] = set()
+        # 148 REQ-002: los IDRVI que se cayeron POR el manifest —
+        # ``TYPE_NOT_IN_MANIFEST``, no ``CODE_NOT_MAPPED``.
+        self._id_rvis_missing_from_manifest: set[str] = set()
         if type_manifest is not None:
             self._load_manifest(source, type_manifest)
         elif metadata_source is None:
@@ -270,6 +273,7 @@ class MappingService:
                     id_rvi,
                 )
                 self._missing_cm_codes.add(id_corto)
+                self._id_rvis_missing_from_manifest.add(id_rvi)  # 148 REQ-002
                 continue
 
             system = _norm_system(row.get(self._columns.col_rvi_cm_id_sistema))
@@ -304,6 +308,17 @@ class MappingService:
         split: ahí no hay manifest contra el cual fallar.
         """
         return tuple(sorted(self._missing_cm_codes))
+
+    def missing_from_manifest(self, id_rvi: str) -> bool:
+        """148 REQ-002: ¿*id_rvi* se cayó porque su IDCM no está en el manifest?
+
+        Es lo que separa ``TYPE_NOT_IN_MANIFEST`` de ``CODE_NOT_MAPPED``:
+        los dos llegan a S2 como ``IDRViNotMappedError`` y los dos son
+        del balde ``BLOQUEADO``, pero uno se arregla agregando la fila al
+        CSV y el otro publicando el tipo en el server. Siempre ``False``
+        en los modos consolidado y split: ahí no hay manifest.
+        """
+        return id_rvi in self._id_rvis_missing_from_manifest
 
     def _load_split(self, rvi_cm: IDataSource, metadatos: IDataSource) -> None:
         """`Loader` en modo split (035): join entre ``MapeoRVI_CM`` y

@@ -21,6 +21,7 @@ from cmcourier.adapters.tracking.as400_niarvilog import NiarvilogRow
 from cmcourier.domain.models import (
     CMMapping,
     MigrationRecord,
+    ReasonCode,
     RVABREPDocument,
     StageStatus,
     TriggerRecord,
@@ -167,7 +168,7 @@ class TestCoordinatorAs400Disabled:
             error="CMIS 500",
         )
         sqlite.mark_stage_failed.assert_called_once_with(
-            "0000001", "B1", StageStatus.S5_FAILED, "CMIS 500"
+            "0000001", "B1", StageStatus.S5_FAILED, "CMIS 500", reason_code=None
         )
 
     def test_preflight_sync_is_noop(self) -> None:
@@ -259,9 +260,28 @@ class TestCoordinatorAs400Enabled:
             error="boom",
         )
         sqlite.mark_stage_failed.assert_called_once_with(
-            "0000001", "B1", StageStatus.S5_FAILED, "boom"
+            "0000001", "B1", StageStatus.S5_FAILED, "boom", reason_code=None
         )
         as400.mark_failed.assert_called_once()
+
+    def test_reason_code_goes_to_sqlite_only(self) -> None:
+        """148 REQ-004: el censo vive en ``migration_log``. NIARVILOG tiene
+        su propio ``STSCOD`` y no es la tabla que el censo lee."""
+        sqlite = MagicMock()
+        as400 = MagicMock()
+        coord = IdempotencyCoordinator(sqlite_store=sqlite, as400_store=as400)
+        record, document, mapping, trigger = _record()
+        coord.mark_failed(
+            record=record,
+            document=document,
+            mapping=mapping,
+            trigger=trigger,
+            stage=StageStatus.S5_FAILED,
+            error="boom",
+            reason_code=ReasonCode.CM_ERROR_5XX,
+        )
+        assert sqlite.mark_stage_failed.call_args.kwargs["reason_code"] is ReasonCode.CM_ERROR_5XX
+        assert "reason_code" not in as400.mark_failed.call_args.kwargs
 
 
 # ---------------------------------------------------------------------------

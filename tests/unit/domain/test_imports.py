@@ -12,6 +12,7 @@ from __future__ import annotations
 def test_models_importable() -> None:
     from cmcourier.domain import (
         CMMapping,
+        ExcludedTrigger,
         MigrationRecord,
         ReasonBucket,
         ReasonCode,
@@ -31,6 +32,7 @@ def test_models_importable() -> None:
         x is not None
         for x in (
             CMMapping,
+            ExcludedTrigger,
             MigrationRecord,
             ReasonBucket,
             ReasonCode,
@@ -142,6 +144,7 @@ def test_dunder_all_is_complete() -> None:
         "UploadError",
         # Modelos + helpers
         "CMMapping",
+        "ExcludedTrigger",  # 148 REQ-001
         "MigrationRecord",
         "ReasonBucket",
         "ReasonCode",
