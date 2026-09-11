@@ -90,7 +90,9 @@ trigger:
   #   The RVABREP table comes from `indexing.source` below (CSV or AS400).
   # kind: rvabrep
   # filters:                               # (default: empty → scan everything)
-  #   systems: ["1", "3"]                  # (default: []) keep only these system ids
+  #   systems: ["1", "3"]                  # (default: []) keep only these system ids.
+  #                                        #   148: the ONLY filter that reaches the SQL;
+  #                                        #   that path is streamed, not fetchall()d.
   #   document_types: ["CC03", "FF17"]     # (default: []) MIGRATE only these RVI doc
   #                                        #   types. 148: the rest still comes back
   #                                        #   from the source and is reported as

@@ -116,8 +116,8 @@ Unión discriminada por `kind`. Pickeá EXACTAMENTE uno.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `systems` | `list[str]` | `[]` | Filtra por `ABAACD`. |
-| `document_types` | `list[str]` | `[]` | Códigos RVI (`ABAHCD`) a **migrar**. 148: no toca el SQL — el resto vuelve igual del origen y se reporta como `EXCLUDED_BY_FILTER` en el censo del batch. |
+| `systems` | `list[str]` | `[]` | Filtra por `ABAACD`. 148: es el **único** filtro que llega al SQL, y ese camino lee en stream (`stream_by_fields_in`, chunks del `IN` de 1000) porque un sistema entero no entra en una lista de Python. |
+| `document_types` | `list[str]` | `[]` | Códigos RVI (`ABAHCD`) a **migrar**. 148: no toca el SQL — el resto vuelve igual del origen y se reporta como `EXCLUDED_BY_FILTER` en el censo del batch (ver [`../how-to/operator/read-the-batch-census.md`](../how-to/operator/read-the-batch-census.md)). |
 
 ### `LocalScanTriggerConfig` — `kind: local_scan`
 

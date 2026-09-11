@@ -694,7 +694,9 @@ class ConsoleApp(App[None]):
             details = store.get_batch_details(info.batch_id)
             if details is None:
                 continue
-            # stage_counts = {Sn: {DONE/FAILED/PENDING: n}} (forma fija).
+            # stage_counts = {Sn: {salida: n}}. 148: el pivot rinde también
+            # FILTERED / SKIPPED, pero "reanudable" sigue siendo FAILED +
+            # PENDING: un doc filtrado o salteado terminó su recorrido.
             pending = sum(
                 n
                 for states in details.stage_counts.values()

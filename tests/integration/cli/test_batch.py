@@ -287,16 +287,20 @@ class TestBatchExportReport:
             ],
         )
         assert result.exit_code == 0, result.output
-        # Header + 6 filas de stage.
-        lines = result.stdout.strip().splitlines()
-        assert lines[0].startswith("batch_id,status,started_at")
-        assert len(lines) == 7
+        # 148: el reporte pasó a tener tres bloques (etapas, cuadre, censo)
+        # separados por una línea en blanco. El primero es el de siempre.
+        blocks = result.stdout.strip().split("\n\n")
+        stage_block = blocks[0].splitlines()
+        assert stage_block[0].startswith("batch_id,status,started_at")
+        assert len(stage_block) == 7
         # Cada fila tiene el batch_id en la columna 0.
-        for line in lines[1:]:
+        for line in stage_block[1:]:
             assert line.startswith(f"{batch_id},")
         # La fila S5 reporta la cantidad de fallos.
-        s5_line = next(ln for ln in lines if ",S5," in ln)
+        s5_line = next(ln for ln in stage_block if ",S5," in ln)
         assert s5_line.endswith(",0,1,0")
+        assert blocks[1].splitlines()[0] == "metric,value"
+        assert blocks[2].splitlines()[0] == "bucket,reason_code,id_rvi,count"
 
     def test_json_stdout(self, tmp_path: Path) -> None:
         import json
@@ -366,3 +370,147 @@ class TestBatchExportReport:
         )
         assert result.exit_code == 1
         assert "Batch not found" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# El censo, de punta a punta (148 REQ-006)
+# ---------------------------------------------------------------------------
+
+
+def _seed_census_batch(db_path: Path, *, source_total: int) -> str:
+    """Un batch con un migrado y cinco razones repartidas en tres baldes.
+
+    Va contra el store REAL: lo que se ejercita es la agregación SQL de
+    ``get_batch_details`` más el render, no un mock del medio.
+    """
+    from datetime import datetime
+
+    from cmcourier.domain.models import MigrationRecord, ReasonCode
+
+    store = SQLiteTrackingStore(db_path)
+    try:
+        batch_id = store.start_batch(total_records=0)
+        store.increment_source_total(batch_id, source_total)
+
+        def _row(txn: str, id_rvi: str, stage: StageStatus) -> None:
+            store.mark_stage_pending(
+                MigrationRecord(
+                    trigger_shortname="TESTUSER001",
+                    trigger_cif="000000",
+                    trigger_system_id="1",
+                    rvabrep_txn_num=txn,
+                    rvabrep_file_name=f"{txn}.001",
+                    batch_id=batch_id,
+                    status=stage,
+                    created_at=datetime(2026, 1, 1, 0, 0),
+                    id_rvi=id_rvi,
+                ),
+                stage,
+            )
+
+        _row("TXN_OK", "CC03", StageStatus.S5_PENDING)
+        store.mark_stage_done("TXN_OK", batch_id, StageStatus.S5_DONE)
+        for n, id_rvi in ((1, "CC03"), (2, "CC03"), (3, "AA01")):
+            _row(f"TXN_FILT_{n}", id_rvi, StageStatus.S1_PENDING)
+            store.mark_stage_terminal(
+                f"TXN_FILT_{n}",
+                batch_id,
+                StageStatus.S1_FILTERED,
+                "codigo fuera de filters.document_types",
+                reason_code=ReasonCode.EXCLUDED_BY_FILTER,
+            )
+        _row("TXN_BLOCK", "ZZ99", StageStatus.S2_PENDING)
+        store.mark_stage_failed(
+            "TXN_BLOCK",
+            batch_id,
+            StageStatus.S2_FAILED,
+            "id rvi sin fila en MapeoRVI_CM.csv",
+            reason_code=ReasonCode.CODE_NOT_MAPPED,
+        )
+        _row("TXN_FAIL", "CC03", StageStatus.S5_PENDING)
+        store.mark_stage_failed(
+            "TXN_FAIL",
+            batch_id,
+            StageStatus.S5_FAILED,
+            "content manager no respondio",
+            reason_code=ReasonCode.CM_TIMEOUT,
+        )
+        store.complete_batch(batch_id)
+        store.flush()
+    finally:
+        store.close()
+    return batch_id
+
+
+class TestCensoEnBatchShow148:
+    """El censo llega desde SQLite hasta la pantalla del operador."""
+
+    def test_breakdown_renders_in_bucket_order_when_numbers_add_up(self, tmp_path: Path) -> None:
+        yaml_path = _write_yaml(tmp_path)
+        batch_id = _seed_census_batch(tmp_path / "tracking.db", source_total=6)
+        result = CliRunner().invoke(main, ["batch", "show", "-c", str(yaml_path), batch_id])
+        assert result.exit_code == 0, result.output
+        assert "Total en origen: 6" in result.stdout
+        assert "Migrados: 1" in result.stdout
+        lines = result.stdout.splitlines()
+        census = [ln for ln in lines if ln.startswith(("EXCLUIDO", "BLOQUEADO", "FALLO"))]
+        assert [ln.split()[:3] for ln in census] == [
+            ["EXCLUIDO", "EXCLUDED_BY_FILTER", "CC03"],
+            ["EXCLUIDO", "EXCLUDED_BY_FILTER", "AA01"],
+            ["BLOQUEADO", "CODE_NOT_MAPPED", "ZZ99"],
+            ["FALLO", "CM_TIMEOUT", "CC03"],
+        ]
+        assert "DESCUADRE" not in result.stdout
+        cuadre = "Cuadre OK: migrados 1 + censados 5 = 6, igual al total en origen (6)."
+        assert cuadre in result.stdout
+
+    def test_discrepancy_is_stated_when_numbers_do_not_add_up(self, tmp_path: Path) -> None:
+        yaml_path = _write_yaml(tmp_path)
+        batch_id = _seed_census_batch(tmp_path / "tracking.db", source_total=9)
+        result = CliRunner().invoke(main, ["batch", "show", "-c", str(yaml_path), batch_id])
+        assert result.exit_code == 0, result.output
+        line = next(ln for ln in result.stdout.splitlines() if "DESCUADRE" in ln)
+        assert "9" in line and "3 documentos sin explicar" in line
+
+    def test_filtered_outcome_reaches_the_stage_table(self, tmp_path: Path) -> None:
+        yaml_path = _write_yaml(tmp_path)
+        batch_id = _seed_census_batch(tmp_path / "tracking.db", source_total=6)
+        result = CliRunner().invoke(main, ["batch", "show", "-c", str(yaml_path), batch_id])
+        header = next(ln for ln in result.stdout.splitlines() if ln.startswith("STAGE"))
+        assert "FILTERED" in header.split()
+        s1_row = next(ln for ln in result.stdout.splitlines() if ln.startswith("S1 "))
+        assert s1_row.split()[header.split().index("FILTERED")] == "3"
+
+    def test_exports_carry_the_census(self, tmp_path: Path) -> None:
+        import json
+
+        yaml_path = _write_yaml(tmp_path)
+        batch_id = _seed_census_batch(tmp_path / "tracking.db", source_total=6)
+        csv_result = CliRunner().invoke(
+            main,
+            ["batch", "export-report", "-c", str(yaml_path)]
+            + ["--batch", batch_id, "--format", "csv"],
+        )
+        assert csv_result.exit_code == 0, csv_result.output
+        assert "EXCLUIDO,EXCLUDED_BY_FILTER,CC03,2" in csv_result.stdout
+        assert "cuadra,si" in csv_result.stdout
+        json_result = CliRunner().invoke(
+            main,
+            [
+                "batch",
+                "export-report",
+                "-c",
+                str(yaml_path),
+                "--batch",
+                batch_id,
+                "--format",
+                "json",
+            ],
+        )
+        assert json_result.exit_code == 0, json_result.output
+        census = json.loads(json_result.stdout)["census"]
+        assert census["source_total"] == 6
+        assert census["migrated"] == 1
+        assert census["accounted"] == 5
+        assert census["reconciles"] is True
+        assert census["by_bucket"] == {"EXCLUIDO": 3, "BLOQUEADO": 1, "FALLO": 1}

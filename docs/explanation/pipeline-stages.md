@@ -90,13 +90,17 @@ Cada flecha hacia el `TrackingStore` es una transición de estado **persistida**
 
 **Qué tira**: `TriggerError` si la fuente está inalcanzable, malformada o vacía. Subclases: `RVABREPNotFoundError`, `RVABREPDeletedError`, `RVABREPDuplicateError`.
 
-**Qué deja en el tracking store**: nada directamente. S0 alimenta a S1; S1 es quien hace el primer INSERT a `migration_log`.
+**Qué deja en el tracking store**: nada directamente en el camino feliz. S0 alimenta a S1; S1 es quien hace el primer INSERT a `migration_log`. La excepción son las **exclusiones** (148): una fila que la estrategia decide no migrar sale de S0 como `ExcludedTrigger` —un subtipo de `Trigger` que el dispatch de S1 no puede confundir con trabajo— y el orquestador le escribe su fila con `reason_code`. La estrategia **clasifica**; el orquestador **registra**: `services/` sigue sin ver el tracking store ni el `batch_id`.
+
+**`filters.document_types` cambió de significado (148).** Antes, el allow-list de códigos se metía en el `IN` del SQL contra RVABREP: los documentos excluidos **nunca volvían del AS400** y por lo tanto eran invisibles por diseño — no se podían contar porque no existían. Hoy la consulta lleva **únicamente** `filters.systems`; el código nunca toca el SQL. La lista pasó de decir *"traeme sólo estos"* a decir *"de todo lo que traigas, migrá estos y contame el resto"*. El costo es real y hay que saberlo: la corrida trae más filas del origen y escribe filas de `migration_log` para documentos que no va a migrar. El beneficio es el censo. Como con `filters.systems` la corrida normal ahora arrastra un sistema entero, ese camino dejó de terminar en `fetchall()` y pasó a `stream_by_fields_in` (chunks del `IN` de 1000, `fetchmany` por lote).
 
 ### S1 — Indexing
 
-**Qué hace**: por cada trigger, consulta la tabla RVABREP y expande el resultado en uno o más `RVABREPDocument`s (un trigger puede mapear a múltiples documentos físicos). Antes de devolver, descarta filas marcadas con código de baja (`ABACST` no vacío) — esas se reportan como `S1_FILTERED` en lugar de `S1_DONE` (spec 051).
+**Qué hace**: por cada trigger, consulta la tabla RVABREP y expande el resultado en uno o más `RVABREPDocument`s (un trigger puede mapear a múltiples documentos físicos). Antes de devolver, descarta filas marcadas con código de baja (`ABACST` no vacío) — esas se reportan como `S1_FILTERED` en lugar de `S1_DONE` (spec 051), con `reason_code = DELETED_AT_SOURCE` (148). Cada borrado escribe su fila con **su `txn_num` real**: hasta 148 la clave era sintética (`FILTERED__{shortname}__{system_id}`) y, contra el índice único `(rvabrep_txn_num, batch_id)` con `INSERT OR IGNORE`, N documentos borrados del mismo cliente colapsaban en 1 sola fila.
 
-También chequea idempotencia cross-batch acá: si `tracking.is_uploaded(txn_num)` devuelve `True`, el doc se anota como `S1_SKIPPED` (spec 062) y no avanza. Pre-062 el skip era silencioso; ahora deja rastro auditable.
+También chequea idempotencia cross-batch acá: si `tracking.is_uploaded(txn_num)` devuelve `True`, el doc se anota como `S1_SKIPPED` (spec 062) con `reason_code = ALREADY_UPLOADED` y no avanza. Pre-062 el skip era silencioso; ahora deja rastro auditable.
+
+**S1 es también quien cuenta el origen** (148 REQ-005). A medida que ve documentos llama a `increment_source_total`, que suma en SQL — el total no se conoce de antemano (S1 ve chunks y streaming nunca sabe cuántos hay) y con la suma del lado de la base N workers suman exacto. Ése es el denominador contra el que todo lo demás tiene que cerrar, y reemplaza al `total_records` viejo, que era el `batch_size` configurado en batched y un `0` pelado en streaming.
 
 **Dónde corre**: en modo batched, dentro de los `prep_workers` (threads). En modo streaming, dentro de los **producers** del bucket. Es I/O-bound (espera la respuesta de RVABREP), así que threads escalan bien.
 
@@ -210,6 +214,53 @@ INDEX ON migration_log (rvabrep_txn_num) WHERE status='S5_DONE'
 
 Eso permite que `is_uploaded()` sea O(log n) y la corrida de un batch sobre 200k docs ya migrados termine en segundos sin tocar CMIS.
 
+## El censo: todo documento del origen termina con una razón
+
+Los siete stages contestan *"¿qué procesé?"*. El **censo** (spec 148) contesta la otra pregunta, que es la que se necesita para auditar una migración: *"¿qué había en el origen y qué pasó con cada cosa?"*.
+
+Son preguntas distintas. Antes del censo, un rastreo encontró **19 caminos** por los que un documento del origen terminaba sin subirse: **dos** dejaban una razón legible por máquina y **ocho no escribían absolutamente nada**. Un documento podía desaparecer en silencio y el reporte no tenía cómo notarlo.
+
+### Tres campos ortogonales, cero estados nuevos
+
+El censo NO agregó estados a la máquina. Agregó un eje:
+
+| Campo | Contesta | Ejemplo |
+|---|---|---|
+| `status` | **dónde** paró | `S2_FAILED` |
+| `reason_code` | **por qué** | `CODE_NOT_MAPPED` |
+| balde (derivado del código) | **quién** lo arregla | `BLOQUEADO` |
+
+Que el `status` diga `FAILED` no lo vuelve un error de ejecución: el balde lo desmiente, y **el balde es lo que se reporta**. Esto fue deliberado — un estado nuevo se hubiera tenido que propagar por toda la máquina de recovery, la consola y los docs, y no habría contestado mejor la pregunta.
+
+La taxonomía de `ReasonCode` es **cerrada** y el mapeo código → balde es **total**: un test itera el enum entero y exige que cada código tenga balde. El día que alguien agregue una razón y se olvide de mapearla, no pasa el CI en vez de desaparecer del reporte.
+
+### Los tres baldes
+
+| Balde | Significa | Quién lo resuelve |
+|---|---|---|
+| `EXCLUIDO` | Decisión del operador, o el origen dice que no | nadie, está bien así |
+| `BLOQUEADO` | Falta configuración | el operador, editando YAML / CSV / manifest |
+| `FALLO` | Se rompió en ejecución | reintento o investigación |
+
+Cada balde se resuelve de una manera distinta y **por una persona distinta**; por eso el balde es la unidad del reporte y no el código. Qué hacer con cada uno, razón por razón, está en [`../how-to/operator/read-the-batch-census.md`](../how-to/operator/read-the-batch-census.md).
+
+### Dónde se escribe
+
+`migration_log` ganó dos columnas (DDL aditivo, `PRAGMA table_info` + `ALTER TABLE ADD COLUMN`):
+
+- `reason_code TEXT` — el enum, `NULL` para los que subieron.
+- `id_rvi TEXT` — el código RVI. **Hasta 148 no se guardaba en ninguna parte de la base**: vivía sólo en memoria, en `RVABREPDocument.index7`. Sin esa columna el censo no se puede agrupar por código, que es exactamente la pregunta del operador. Se llena siempre, no sólo en las exclusiones.
+
+Los cuatro `CM_*` (`CM_TIMEOUT`, `CM_REJECTED_4XX`, `CM_ERROR_5XX`, `CM_TRANSPORT`) salen de `classify_failure`, que ya producía ese enum para las métricas: se conectó a la base, no se reinventó.
+
+### La red que hace imposible perder un documento en silencio
+
+El censo no es sólo un reporte. El caso que lo demuestra: en streaming, un `except BaseException` no-CMIS incrementaba el tally y **no persistía nada**; como `mark_stage_pending` es `INSERT OR IGNORE`, el documento quedaba registrado como `S4_DONE` y nunca se subía. Ése era el bug de los ~200 uploads perdidos — el operador buscaba el TXN en Content Manager y no estaba. Hoy ese camino termina en `S5_FAILED` + `CRASHED` y aparece en el censo.
+
+### El cuadre
+
+`batch show` cierra el reporte con una línea de cuadre: `migrados + censados` contra el total del origen. Si no da, lo dice con las palabras `!! DESCUADRE`, nombrando los dos números y la diferencia. **Un reporte que no cuadra y no avisa es peor que no tener reporte**: el primero te hace tomar decisiones sobre números falsos, el segundo al menos te obliga a ir a mirar.
+
 ## Por qué separar stages: el caso del retry quirúrgico
 
 Imaginá que tu corrida cae en el medio. 8000 docs procesados, 200 con `S4_FAILED` (un share de red se cayó), 50 con `S5_FAILED` (CMIS devolvió 503 por mucho tiempo). Querés recuperar.
@@ -244,4 +295,5 @@ En ambos modos, los stages siguen siendo siete y la state machine no cambia. Lo 
 - [`streaming-vs-batched.md`](streaming-vs-batched.md) — los dos modos que orquestan estos stages
 - [`idempotency-and-retries.md`](idempotency-and-retries.md) — cómo se aplica la state machine para resume y retry
 - [`architecture-overview.md`](architecture-overview.md) — la arquitectura que hace que esta separación se sostenga
+- [`../how-to/operator/read-the-batch-census.md`](../how-to/operator/read-the-batch-census.md) — leer el censo balde por balde y saber qué hacer con cada razón
 - la spec de dominio del proyecto — descripción canónica de RVABREP, CMIS y el modelo documental

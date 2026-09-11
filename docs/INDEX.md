@@ -48,6 +48,7 @@ Orientados a **problemas específicos**. Recetas: pre-requisitos → pasos → v
 | [`how-to/operator/run-a-migration-from-csv.md`](how-to/operator/run-a-migration-from-csv.md) | Corrida estándar con CSV-trigger |
 | [`how-to/operator/run-a-streaming-load-against-staging.md`](how-to/operator/run-a-streaming-load-against-staging.md) | Volumen alto sin reventar memoria |
 | [`how-to/operator/recover-from-a-corrupted-tracking-db.md`](how-to/operator/recover-from-a-corrupted-tracking-db.md) | SQLite tracking dañado |
+| [`how-to/operator/read-the-batch-census.md`](how-to/operator/read-the-batch-census.md) | Leer el censo balde por balde (`EXCLUIDO` / `BLOQUEADO` / `FALLO`) y saber qué hacer con cada razón (148) |
 | [`how-to/operator/retry-only-failed-records.md`](how-to/operator/retry-only-failed-records.md) | Re-correr solo lo que falló |
 | [`how-to/operator/tune-aimd-for-a-slow-link.md`](how-to/operator/tune-aimd-for-a-slow-link.md) | Ajustar `growth_factor`, `halve_factor`, `halve_threshold_ratio` |
 | [`how-to/operator/configure-heavy-light-lanes.md`](how-to/operator/configure-heavy-light-lanes.md) | Activar lanes para corpus mixto |

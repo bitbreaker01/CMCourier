@@ -498,12 +498,78 @@ Enumera batches con estado y contadores (más nuevos primero).
 
 ### `batch show <batch_id>`
 
-Detalle por etapa (DONE / FAILED / PENDING) + records fallados.
+Detalle por etapa, **censo del origen** (148) y records fallados.
+
+```
+Usage: cmcourier batch show [OPTIONS] BATCH_ID
+
+  Estado detallado por etapa, censo del origen y records fallados.
+
+Options:
+  -c, --config FILE  [required]
+  --help             Show this message and exit.
+```
 
 | Arg / Flag | Type | Default |
 |------|------|---------|
 | `batch_id` | str (positional, required) | — |
 | `--config` / `-c` | Path (required) | — |
+
+Forma de la salida desde 148:
+
+```
+Batch: 4f3c1f2a-...
+Status: completed
+Started: 2026-09-11T14:33:41
+Completed: 2026-09-11T15:02:07
+Total en origen: 9
+Migrados: 1
+
+STAGE  DONE  FAILED  PENDING  FILTERED
+S0     0     0       0        0
+S1     0     0       0        3
+S2     0     1       0        0
+S3     0     0       0        0
+S4     0     0       0        0
+S5     1     1       0        0
+
+CENSO — por qué no se subió cada documento
+Baldes: EXCLUIDO 3 · BLOQUEADO 1 · FALLO 1
+
+BALDE      RAZON               ID_RVI  DOCS
+EXCLUIDO   EXCLUDED_BY_FILTER  CC03    2
+EXCLUIDO   EXCLUDED_BY_FILTER  AA01    1
+BLOQUEADO  CODE_NOT_MAPPED     ZZ99    1
+FALLO      CM_TIMEOUT          CC03    1
+
+!! DESCUADRE: migrados 1 + censados 5 = 6, pero el total en origen es 9 — 3 documentos sin explicar.
+
+FAILED records:
+TXN_NUM    STAGE      RAZON            ERROR
+TXN_BLOCK  S2_FAILED  CODE_NOT_MAPPED  id rvi sin fila en MapeoRVI_CM.csv
+TXN_FAIL   S5_FAILED  CM_TIMEOUT       content manager no respondio
+```
+
+Lo que cambió respecto de pre-148:
+
+- **`Total en origen`** reemplaza a `Total records`: es el conteo REAL de
+  documentos del origen (`increment_source_total` a medida que S1 los ve), no
+  el `batch_size` configurado. **`Migrados`** son los `S5_DONE`.
+- La tabla de etapas tiene **columnas variables**: rinde toda salida que
+  exista en los datos, no sólo `DONE / FAILED / PENDING`. `S1_FILTERED` y
+  `S1_SKIPPED` se caían de todo agregado desde la spec 062, así que las
+  columnas no sumaban el total y nadie avisaba.
+- El bloque **`CENSO`** desglosa balde → `reason_code` → `ID RVI`. Los baldes
+  van en orden semántico (`EXCLUIDO`, `BLOQUEADO`, `FALLO`) y dentro de cada
+  uno los códigos por conteo descendente. Un `reason_code` que ya no está en
+  la taxonomía se muestra bajo `(sin balde)`: no desaparece.
+- La **última línea es el cuadre**. `Cuadre OK: …` o `!! DESCUADRE: …` con
+  ambos números y la diferencia. Si el batch no registró ninguna razón, una
+  segunda línea aclara que probablemente es anterior a 148.
+- La tabla `FAILED records` gana la columna `RAZON`.
+
+Cómo actuar sobre cada balde:
+[`../how-to/operator/read-the-batch-census.md`](../how-to/operator/read-the-batch-census.md).
 
 ### `batch retry-failed`
 
@@ -517,7 +583,20 @@ Resetea filas `*_FAILED` a `*_PENDING` para reintento.
 
 ### `batch export-report`
 
-Vuelca el estado completo del batch a CSV o JSON para análisis offline.
+Vuelca el estado completo del batch —etapas **y censo**— a CSV o JSON.
+
+```
+Usage: cmcourier batch export-report [OPTIONS]
+
+  Vuelca el estado completo del batch a CSV o JSON para analisis offline.
+
+Options:
+  -c, --config FILE    [required]
+  --batch TEXT         [required]
+  --format [csv|json]  [required]
+  --output FILE        Write the report to a file (default: stdout).
+  --help               Show this message and exit.
+```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
@@ -525,6 +604,53 @@ Vuelca el estado completo del batch a CSV o JSON para análisis offline.
 | `--batch` | str (required) | — | — |
 | `--format` | `csv`/`json` (required) | — | — |
 | `--output` | Path | `None` (stdout) | Destino del reporte. |
+
+**CSV (148): tres bloques rectangulares separados por una línea en blanco**,
+cada uno con su propio header. El primero es el de siempre (salvo que las
+columnas de salidas siguen al pivot, así que puede traer `filtered` /
+`skipped`); los otros dos son el censo:
+
+```csv
+batch_id,status,started_at,completed_at,total_records,stage,done,failed,pending,filtered
+4f3c1f2a-...,completed,2026-09-11T14:33:41,2026-09-11T15:02:07,9,S0,0,0,0,0
+...
+
+metric,value
+total_en_origen,9
+migrados,1
+censados,5
+sin_explicar,3
+cuadra,no
+
+bucket,reason_code,id_rvi,count
+EXCLUIDO,EXCLUDED_BY_FILTER,CC03,2
+EXCLUIDO,EXCLUDED_BY_FILTER,AA01,1
+BLOQUEADO,CODE_NOT_MAPPED,ZZ99,1
+FALLO,CM_TIMEOUT,CC03,1
+```
+
+**JSON**: además de `stage_counts` y `failed_records` (que ahora llevan
+`reason_code`), un objeto `census`:
+
+```json
+{
+  "census": {
+    "source_total": 9,
+    "migrated": 1,
+    "accounted": 5,
+    "unexplained": 3,
+    "reconciles": false,
+    "by_bucket": { "EXCLUIDO": 3, "BLOQUEADO": 1, "FALLO": 1 },
+    "reasons": [
+      { "bucket": "EXCLUIDO", "reason_code": "EXCLUDED_BY_FILTER", "id_rvi": "CC03", "count": 2 }
+    ]
+  }
+}
+```
+
+`unexplained` va siempre, aunque sea `0`: quien consuma el reporte tiene que
+poder chequear el cuadre sin recalcularlo. El reporte lleva metadata de
+documentos del banco — tratalo como confidencial.
 
 ---
 

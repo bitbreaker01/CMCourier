@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS migration_log (
     file_size_bytes     INTEGER,
     started_at          TEXT,
     completed_at        TEXT,
-    retry_count         INTEGER NOT NULL DEFAULT 0
+    retry_count         INTEGER NOT NULL DEFAULT 0,
+    reason_code         TEXT,
+    id_rvi              TEXT
 );
 ```
 
@@ -64,6 +66,8 @@ CREATE TABLE IF NOT EXISTS migration_log (
 | `started_at` | TEXT (ISO-8601) | YES | Inicio del stage actual. |
 | `completed_at` | TEXT (ISO-8601) | YES | Fin del stage actual. |
 | `retry_count` | INTEGER | NO (default 0) | Reintentos acumulados. |
+| `reason_code` | TEXT | YES | **148** — POR QUÉ el documento no se subió (`ReasonCode`, taxonomía cerrada). `NULL` en los que subieron. Eje **ortogonal** a `status`: `status` dice dónde paró, `reason_code` por qué, y el balde (derivado) quién lo arregla. `retry_failed` lo limpia junto con `error_message`. |
+| `id_rvi` | TEXT | YES | **148** — el código RVI del documento. Hasta 148 no se guardaba en NINGÚN lado de la base (vivía sólo en `RVABREPDocument.index7`, en memoria) y sin él el censo no se puede agrupar por código. Se llena siempre, no sólo en las exclusiones. |
 
 ### Índices
 
@@ -101,7 +105,7 @@ CREATE TABLE IF NOT EXISTS migration_batch (
 | Column | Type | Nullable | Meaning |
 |--------|------|----------|---------|
 | `batch_id` | TEXT PK | NO | Identificador (provisto por CLI o autogenerado). |
-| `total_records` | INTEGER | NO | Cantidad de triggers/docs declarada al arrancar. |
+| `total_records` | INTEGER | NO | **148**: el conteo REAL de documentos del origen. `start_batch` sólo deja una semilla (streaming pasa `0`, staged el `batch_size` configurado) y `increment_source_total` lo va sumando EN SQL a medida que S1 ve documentos, así que N workers suman exacto. Es el denominador contra el que tiene que cerrar el censo de `batch show`. En batches anteriores a 148 es la semilla y nada más. |
 | `started_at` | TEXT (ISO-8601) | NO | — |
 | `completed_at` | TEXT (ISO-8601) | YES | `NULL` mientras el batch está en vuelo. |
 
@@ -170,7 +174,8 @@ stateDiagram-v2
 | `S0_DONE` | S0 | no | Trigger emitido a S1. |
 | `S1_PENDING` | S1 | no | En indexing. |
 | `S1_DONE` | S1 | no | Documento RVABREP listo. |
-| `S1_SKIPPED` | S1 | **sí** | Cross-batch dedup (062) — ya existía un `S5_DONE` para este `txn_num`. |
+| `S1_SKIPPED` | S1 | **sí** | Cross-batch dedup (062) — ya existía un `S5_DONE` para este `txn_num`. `reason_code = ALREADY_UPLOADED`. |
+| `S1_FILTERED` | S1 | **sí** | El documento no se migra: código de baja en RVABREP (051, `reason_code = DELETED_AT_SOURCE`) o código fuera de `filters.document_types` (148, `reason_code = EXCLUDED_BY_FILTER`). |
 | `S2_PENDING` | S2 | no | En mapping. |
 | `S2_DONE` | S2 | no | Folder + object type resueltos. |
 | `S2_FAILED` | S2 | sí (hasta retry) | `IDRViNotMappedError`. |
@@ -186,9 +191,16 @@ stateDiagram-v2
 
 `*_FAILED` se resetea a `*_PENDING` con `cmcourier batch retry-failed --batch <id> [--stage Sn]`.
 
+**148: `status` no alcanza para saber qué pasó.** El `reason_code` es un eje
+ortogonal — `status=S2_FAILED` + `reason_code=CODE_NOT_MAPPED` cae en el balde
+`BLOQUEADO`, que NO es un error de ejecución aunque el status diga `FAILED`:
+lo arregla el operador editando `MapeoRVI_CM.csv`. Por eso 148 no agregó ni un
+solo estado nuevo. El desglose por balde lo rinde `cmcourier batch show`.
+
 ## Ver también
 
 - [`error-codes.md`](error-codes.md) — qué exception escribe qué `status`.
 - [`cli.md`](cli.md) — `cmcourier batch show`, `batch retry-failed`, `cache clear`.
 - [How-to: document cache](../how-to/document-cache.md) — manejo de `document_cache`.
 - [How-to: AS400 sync](../how-to/as400-sync.md) — relación con NIARVILOG (S6).
+- [How-to: leer el censo de un batch](../how-to/operator/read-the-batch-census.md) — qué hacer con cada `reason_code` (148).

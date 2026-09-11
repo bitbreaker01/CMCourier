@@ -17,6 +17,7 @@ Tareas comunes que ejecutás cuando corrés migraciones.
 | [`operator/run-a-migration-from-csv.md`](operator/run-a-migration-from-csv.md) | Corrida estándar con CSV-trigger |
 | [`operator/run-a-streaming-load-against-staging.md`](operator/run-a-streaming-load-against-staging.md) | Volumen alto sin reventar memoria |
 | [`operator/recover-from-a-corrupted-tracking-db.md`](operator/recover-from-a-corrupted-tracking-db.md) | SQLite tracking dañado |
+| [`operator/read-the-batch-census.md`](operator/read-the-batch-census.md) | Leer el censo de un batch balde por balde y saber qué hacer con cada razón (148) |
 | [`operator/retry-only-failed-records.md`](operator/retry-only-failed-records.md) | Re-correr solo lo que falló |
 | [`operator/tune-aimd-for-a-slow-link.md`](operator/tune-aimd-for-a-slow-link.md) | Ajustar AIMD para tu link |
 | [`operator/configure-heavy-light-lanes.md`](operator/configure-heavy-light-lanes.md) | Activar lanes para corpus mixto |

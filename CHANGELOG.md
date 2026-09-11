@@ -12,6 +12,50 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- **Censo del origen: todo documento termina con una razón (148).** El
+  operador no podía responder *"¿qué había en el origen y qué pasó con
+  cada cosa?"* — sólo *"¿qué procesé?"*. Son preguntas distintas y la
+  segunda no sirve para auditar una migración. De los **19 caminos** por
+  los que un documento del origen termina sin subirse, dos dejaban una
+  razón legible por máquina y **ocho no escribían absolutamente nada**.
+
+  `ReasonCode` es una taxonomía **cerrada** de 20 razones repartidas en
+  tres **baldes** —`EXCLUIDO`, `BLOQUEADO`, `FALLO`— porque cada balde
+  lo resuelve una persona distinta: el primero está bien así, el segundo
+  lo arregla el operador editando config, el tercero se reintenta o se
+  investiga. El mapeo código → balde es TOTAL y un test itera el enum
+  entero exigiéndolo: el día que alguien agregue una razón y se olvide
+  del balde, se pone rojo el CI en vez de desaparecer del reporte.
+
+  **Cero estados nuevos.** `reason_code` es un eje ORTOGONAL a `status`:
+  `status` dice dónde paró, `reason_code` por qué, el balde quién lo
+  arregla. Un código no mapeado es `S2_FAILED` + `CODE_NOT_MAPPED` +
+  `BLOQUEADO` — que el status diga FAILED no lo vuelve un error de
+  ejecución, y el balde es lo que se reporta. La alternativa (estados
+  nuevos) obligaba a propagarlos por toda la máquina de recovery, la
+  consola y los docs sin contestar mejor la pregunta.
+
+  `migration_log` gana `reason_code` e `id_rvi` (migración aditiva en
+  sitio, mismo patrón que la 124). La segunda porque **el código RVI no
+  se guardaba en NINGÚN lado de la base** —vivía sólo en memoria, en
+  `RVABREPDocument.index7`— y sin ella el censo no se puede agrupar por
+  código, que es justamente la pregunta. Los cuatro `CM_*` salen de
+  `classify_failure`, que ya producía ese enum y sólo alimentaba
+  métricas: se conectó, no se reinventó.
+
+  `batch show` pasa a rendir **total en origen**, **migrados** y el
+  desglose balde → `reason_code` → `ID RVI`, en orden semántico
+  (`EXCLUIDO` → `BLOQUEADO` → `FALLO`, y dentro de cada uno los códigos
+  por conteo descendente). Cierra con el **cuadre**: si
+  `migrados + censados` no da el total del origen lo dice con las
+  palabras `!! DESCUADRE`, nombrando los dos números y la diferencia —
+  un reporte que no cuadra y no avisa es peor que no tener reporte.
+  `batch export-report` exporta lo mismo: el CSV suma dos bloques
+  (`metric,value` y `bucket,reason_code,id_rvi,count`) y el JSON un
+  objeto `census` con `unexplained` y `reconciles` explícitos. Guía
+  nueva balde por balde en
+  [`docs/how-to/operator/read-the-batch-census.md`](docs/how-to/operator/read-the-batch-census.md).
+
 - **Cadenas configurables de identidad (147).** `lookup_value_source` acepta un tercer scope,
   `field.<NOMBRE_CANONICO>`: la clave de búsqueda pasa a ser el valor YA
   RESUELTO de otro campo, que es lo que permite encadenar los saltos que
@@ -156,6 +200,35 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Changed
 
+- **⚠️ CAMBIO DE COMPORTAMIENTO — el código RVI no va más al SQL (148).**
+  La consulta a RVABREP lleva ahora **únicamente** `filters.systems`;
+  `filters.document_types` **nunca** toca el SQL. Esto cambia lo que
+  hace una corrida, no sólo lo que reporta: **trae más filas del origen
+  y escribe filas de `migration_log` para documentos que no va a
+  migrar**. Es el precio del censo y hay que presupuestarlo — tanto en
+  tiempo de scan como en tamaño del tracking.
+
+  El motivo: el allow-list de códigos era invisible **por diseño**.
+  `_iter_filtered_rows` metía el filtro MÁS CHICO en el `IN` del SQL, y
+  como el caso normal es "un sistema, veinte códigos", los documentos
+  excluidos **nunca volvían del AS400**: no se podían contar porque no
+  existían. `filters.document_types` cambia de significado —de *"traeme
+  sólo estos"* a *"de todo lo que traigas, migrá estos y contame el
+  resto"*— y así queda documentado.
+
+  Como `filters.systems` pasa a ser la configuración NORMAL, ese camino
+  dejó de terminar en `cursor.fetchall()`: `stream_by_fields_in` nuevo
+  en el puerto, con `query_stream` y chunkeo del `IN` de 1000.
+  Materializar un sistema entero en una lista de Python no era
+  aceptable.
+
+  `migration_batch.total_records` deja de ser la semilla que pasaba el
+  caller (`0` en streaming, el `batch_size` configurado en staged) y
+  pasa a ser el **conteo real del origen**: `increment_source_total`
+  suma EN SQL a medida que S1 ve documentos, así que N workers suman
+  exacto. Los batches anteriores a 148 no tienen ese número y
+  `batch show` lo dice en vez de fingir que cuadra.
+
 - **`types check` ahora audita también los tipos revisados-pero-sin-mapear
   (145).** El alcance por defecto pasó de "sólo lo que referencia
   `MapeoRVI_CM.csv`" a `reviewed`: los mapeados MÁS todo tipo con
@@ -216,6 +289,35 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Fixed
 
+- **Los ~200 uploads perdidos (148).** En streaming, una excepción
+  no-CMIS caía en un `except BaseException` que incrementaba el tally y
+  **no persistía nada**; como `mark_stage_pending` es
+  `INSERT OR IGNORE`, el documento quedaba registrado como `S4_DONE` y
+  nunca se subía. Por eso el operador buscaba el TXN en Content Manager
+  y no lo encontraba. Ahora ese camino termina en `S5_FAILED` +
+  `CRASHED` y aparece en el censo. El censo no es sólo un reporte: es la
+  red que hace imposible perder un documento en silencio.
+- **`S1_FILTERED` y `S1_SKIPPED` se caían de TODO agregado desde la spec
+  062 (148).** `_pivot_status_counts` hardcodeaba
+  `("DONE","FAILED","PENDING")` y sólo copiaba el conteo si la salida
+  estaba en esa lista. La spec 062 §4 afirmaba que `batch show` y
+  `analyze` los recibían "gratis": era **falso**. En `batch show`,
+  `DONE + FAILED + PENDING` no sumaba el total y nadie avisaba. El pivot
+  rinde ahora toda salida que exista en los datos (las tres históricas
+  primero, para no reordenar lo que ya se lee), y las tablas de
+  `batch show` y el CSV de `batch export-report` tienen columnas
+  variables. La consola `7·BATCHES` y el auto-resume no cambian de
+  números: leen `FAILED`/`PENDING`/`DONE` por clave, y un doc filtrado o
+  salteado terminó su recorrido.
+- **La clave sintética de `S1_FILTERED` colisionaba (148).** Los
+  borrados en el origen se registraban como
+  `FILTERED__{shortname}__{system_id}` contra el índice único
+  `(rvabrep_txn_num, batch_id)` con `INSERT OR IGNORE`, así que **N
+  documentos borrados del mismo cliente colapsaban en 1 sola fila**.
+  Cada fila usa ahora su `txn_num` real.
+- **`retry_failed` no limpiaba `reason_code` (148).** Sin eso, un
+  documento reintentado con éxito quedaba contado en el censo Y en los
+  migrados. La razón muere con la falla que la produjo.
 - **`types check` ignoraba `metadata.field_aliases`:** una propiedad del
   manifest resuelta por alias daba un CRITICAL falso y su entrada de
   `field_sources` un INFO falso. Ahora sigue el alias (case-insensitive,
