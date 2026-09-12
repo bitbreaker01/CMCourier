@@ -142,7 +142,7 @@ Si el campo afecta a un consumer pipeline, corré también `pytest tests/integra
 ## Ver también
 
 - [`../../reference/config-schema.md`](../../reference/config-schema.md) — catálogo completo de campos
-- [`../../samples/config-reference.yaml`](../../samples/config-reference.yaml) — sample anotado
+- [`../../reference/config-reference.yaml`](../../reference/config-reference.yaml) — sample anotado
 - `src/cmcourier/config/schema.py` — fuente declarativa de verdad
 - `src/cmcourier/config/wiring.py` — traducción schema → runtime
 - `src/cmcourier/config/loader.py` — carga YAML → modelos
