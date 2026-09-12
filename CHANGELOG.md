@@ -10,6 +10,16 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Removed
+
+- **El botón "ver" de las contraseñas, en `[2] CREDENCIALES`.** La
+  consola la opera personal de operaciones, que no es el dueño de la
+  credencial: una contraseña que el banco entrega bajo reseña no puede
+  quedar a un click de mostrarse en pantalla. El campo sigue siendo
+  editable y enmascarado; para verificar que la credencial sirve está
+  "probar conexión", que además responde la pregunta real — si funciona,
+  no si coincide con lo que alguien recuerda.
+
 ### Added
 
 - **Elegibilidad: sólo los clientes con producto activo (150).** Content

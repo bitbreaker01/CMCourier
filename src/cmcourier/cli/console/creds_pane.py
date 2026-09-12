@@ -8,7 +8,12 @@ Contrato UX (mock v2 + informes adversariales):
   siempre existe;
 * las tarjetas ``as400`` llevan contador de intentos y confirmación antes
   del 3° (lockout del perfil en el iSeries); cmis/mssql no;
-* toggle mostrar/ocultar contraseña;
+* la contraseña se escribe enmascarada y NO se puede revelar. El toggle
+  "ver" de 123 se quitó: la consola la opera personal de operaciones, no
+  el dueño de la credencial, y una contraseña que el banco entrega bajo
+  reseña no puede quedar a un click de mostrarse en pantalla. Si hace
+  falta verificarla, se prueba la conexión — que es la pregunta real;
+
 * (138) alta / edición / baja de conexiones del registro y "mover al
   registro" una inline, escribiendo el YAML vía ``YamlDocument`` (137)
   con verificación ``load_config`` + backup. Los overrides de sesión
@@ -221,13 +226,9 @@ class CredsPane(VerticalScroll):
         card.compose_add_child(Label("usuario"))
         card.compose_add_child(Input(value=cred.username, id=f"user-{alias}"))
         card.compose_add_child(Label("contraseña"))
-        card.compose_add_child(
-            Horizontal(
-                Input(value=cred.password, password=True, id=f"pass-{alias}"),
-                Button("ver", id=f"reveal-{alias}"),
-                classes="frow",
-            )
-        )
+        # La contraseña NO se puede revelar desde la consola (ver el
+        # docstring del módulo). No re-agregar un botón "ver".
+        card.compose_add_child(Input(value=cred.password, password=True, id=f"pass-{alias}"))
         row = Horizontal(classes="frow")
         row.compose_add_child(Button("probar conexión", variant="primary", id=f"test-{alias}"))
         if info.kind == "as400":
@@ -282,11 +283,7 @@ class CredsPane(VerticalScroll):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id or ""
-        if bid.startswith("reveal-"):
-            inp = self.query_one(f"#pass-{bid.removeprefix('reveal-')}", Input)
-            inp.password = not inp.password
-            event.button.label = "ver" if inp.password else "ocultar"
-        elif bid.startswith("test-"):
+        if bid.startswith("test-"):
             self.request_test(bid.removeprefix("test-"))
         elif bid == "new-conn":
             self.open_new()
