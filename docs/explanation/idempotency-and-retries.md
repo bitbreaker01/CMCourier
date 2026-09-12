@@ -281,6 +281,19 @@ Caso de uso: dos servidores físicos, cada uno con su propia copia de CMCourier 
 
 La sincronización es **eventually consistent** — un doc subido en host A puede tardar segundos en ser visible para host B. El daemon de sync corre periódicamente con `stale_in_progress_minutes` y `retry_attempts`. El caso patológico (race entre dos hosts) puede generar duplicados; lo limitamos eligiendo trabajo no-solapado para cada host (split por shortname prefix).
 
+### Dos direcciones, una regla de autoridad (151)
+
+El otro productor de NIARVILOG no es sólo otra instancia de CMCourier: es el **proceso Java del banco**, que hace la misma migración. Los dos lados tienen que poder enterarse de lo que hizo el otro, y eso son dos direcciones distintas. La regla que decide quién manda sobre qué:
+
+> El lado local manda sobre los documentos que CMCourier procesó. El AS400 manda sobre los documentos que CMCourier nunca vio.
+
+- `sync recover` (local → AS400) **corrige lo que hicimos nosotros**. Desde 151 compara el `STSCOD`, no la presencia de la clave: una fila presente pero en `'F'`/`'I'`/`'N'` se ACTUALIZA a `'O'`. Pre-151 se contaba como `already_present` y quedaba divergente para siempre — el bug de "el mejor estado no gana".
+- `sync pull` (AS400 → local) **sólo rellena huecos**. Importa los `'O'` y `'F'` cuyo TXN no tiene fila terminal local, bajo el batch sintético `__as400_import__`; jamás pisa un `S5_DONE`/`S5_FAILED` nuestro.
+
+Cuando los dos afirman cosas distintas sobre el mismo documento, **ninguna dirección decide sola**: se reporta como divergencia y decide el operador (`sync resolve`). Dos direcciones que se pisan entre sí no son una sincronización, son una pelea — y una resolución automática es justamente la clase de "arreglo" que convierte un estado inconsistente visible en uno invisible.
+
+Los UPDATE de esta capa llevan guarda de estado (`STSCOD <> 'O'`) para que un write masivo y automático no pise el terminal que otro productor escribió entre nuestra lectura batcheada y el write. El helper sin guarda (`mark_uploaded_by_txn`) queda sólo para `sync resolve --prefer-local`, que es una decisión explícita del operador sobre un txn.
+
 ## La defensa profundidad
 
 Repasando, idempotencia en CMCourier vive en **cuatro capas**:

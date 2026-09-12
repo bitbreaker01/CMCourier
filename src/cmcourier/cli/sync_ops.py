@@ -18,6 +18,7 @@ __all__ = [
     "build_as400_store",
     "SyncOpError",
     "build_sync_stores",
+    "sync_pull",
     "sync_recover",
     "sync_resolve",
     "sync_status",
@@ -25,7 +26,7 @@ __all__ = [
 ]
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from cmcourier.adapters.tracking import SQLiteTrackingStore
@@ -33,6 +34,7 @@ from cmcourier.adapters.tracking.as400_niarvilog import As400NiarvilogStore
 from cmcourier.config.loader import Secrets
 from cmcourier.config.schema import PipelineConfig
 from cmcourier.config.wiring import build_as400_recovery, build_niarvilog_store
+from cmcourier.services.pull import As400Pull, PullItem, PullResult
 from cmcourier.services.recovery import RecoveryResult, SyncProgress
 
 
@@ -42,7 +44,22 @@ class SyncOpError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class StatusResult:
+    """151 REQ-005: ``sync status`` decía *"reporta cualquier conflicto sin
+    tocar estado"* y sólo limpiaba los ``'I'`` vencidos. Ahora los reporta:
+    con el pull construido, listar divergencias es la misma consulta sin
+    escribir.
+
+    * ``scanned`` — filas ``'O'`` / ``'F'`` vistas en NIARVILOG.
+    * ``importable`` — las que el tracking local no tiene terminadas (las
+      traería ``sync pull``).
+    * ``divergences`` — los dos lados afirman cosas distintas. No las
+      resuelve ninguna dirección sola: ``sync resolve``.
+    """
+
     stale_cleaned: int
+    scanned: int = 0
+    importable: int = 0
+    divergences: list[PullItem] = field(default_factory=list)
 
 
 def sync_unavailable_reason(config: PipelineConfig, secrets: Secrets) -> str | None:
@@ -87,15 +104,54 @@ def _require_available(config: PipelineConfig, secrets: Secrets) -> None:
         raise SyncOpError(reason)
 
 
-def sync_status(config: PipelineConfig, secrets: Secrets) -> StatusResult:
-    """Cleanup de in_progress vencidos + prueba de conectividad. Read-only
-    salvo por el cleanup (que es idempotente)."""
+def sync_status(
+    config: PipelineConfig,
+    secrets: Secrets,
+    *,
+    on_progress: Callable[[SyncProgress], None] | None = None,
+) -> StatusResult:
+    """Cleanup de in_progress vencidos + **reporte de divergencias**.
+
+    151 REQ-005: es el barrido de :func:`sync_pull` en dry-run, así que no
+    escribe una sola fila del tracking local. Lo único que muta es el
+    cleanup de los ``'I'`` vencidos, que es idempotente y ya estaba."""
     _require_available(config, secrets)
-    as400 = build_as400_store(config, secrets)  # el SQLite no hace falta acá
+    sqlite, as400 = build_sync_stores(config, secrets)
     try:
-        return StatusResult(stale_cleaned=as400.cleanup_stale_in_progress())
+        stale = as400.cleanup_stale_in_progress()
+        report = As400Pull(sqlite_store=sqlite, as400_store=as400).pull(
+            apply=False, on_progress=on_progress
+        )
+        return StatusResult(
+            stale_cleaned=stale,
+            scanned=report.scanned,
+            importable=report.imported_uploaded + report.imported_failed,
+            divergences=report.divergent,
+        )
     finally:
+        sqlite.close()
         as400.close()
+
+
+def sync_pull(
+    config: PipelineConfig,
+    secrets: Secrets,
+    *,
+    apply: bool,
+    on_progress: Callable[[SyncProgress], None] | None = None,
+) -> PullResult:
+    """151 REQ-004: trae de NIARVILOG lo que hicieron los otros programas.
+
+    ``apply=False`` (default del CLI) es dry-run, igual que ``recover``.
+    El pull sólo rellena huecos: nunca pisa un estado terminal local."""
+    _require_available(config, secrets)
+    sqlite, as400 = build_sync_stores(config, secrets)
+    pull = As400Pull(sqlite_store=sqlite, as400_store=as400)
+    try:
+        return pull.pull(apply=apply, on_progress=on_progress)
+    finally:
+        pull.close()  # cierra el store AS400
+        sqlite.close()
 
 
 def sync_recover(

@@ -9,6 +9,7 @@ import pytest
 import cmcourier.cli.sync_ops as ops
 from cmcourier.cli.sync_ops import (
     SyncOpError,
+    sync_pull,
     sync_recover,
     sync_resolve,
     sync_status,
@@ -16,6 +17,7 @@ from cmcourier.cli.sync_ops import (
 )
 from cmcourier.config.loader import Credential, Secrets
 from cmcourier.config.schema import As400ConnectionConfig, ConnectionRef
+from cmcourier.services.pull import PullItem, PullResult
 
 pytestmark = pytest.mark.unit
 
@@ -113,21 +115,82 @@ class TestResolve:
 
 
 class TestStatus:
-    def test_status_uses_only_as400_and_closes_it(self) -> None:
-        as400 = MagicMock()
+    def test_status_cleans_stale_and_closes_both_stores(self) -> None:
+        sqlite, as400 = MagicMock(), MagicMock()
         as400.cleanup_stale_in_progress.return_value = 3
-        with (
-            patch.object(ops, "build_as400_store", return_value=as400),
-            patch.object(ops, "SQLiteTrackingStore") as sqlite_cls,
-        ):
+        as400.stream_rows_by_status.return_value = iter([])
+        with patch.object(ops, "build_sync_stores", return_value=(sqlite, as400)):
             result = sync_status(_config(), _secrets())
         assert result.stale_cleaned == 3
-        sqlite_cls.assert_not_called()
+        sqlite.close.assert_called_once()
         as400.close.assert_called_once()
+
+    def test_status_reports_divergences_without_writing(self) -> None:
+        """151 REQ-005: ``sync status`` decía reportar conflictos y sólo
+        limpiaba los ``'I'`` vencidos. Ahora los reporta de verdad — es la
+        misma consulta del pull, sin escribir."""
+        sqlite, as400 = MagicMock(), MagicMock()
+        as400.cleanup_stale_in_progress.return_value = 0
+        divergente = PullItem("0000001", "AS400 STSCOD='F' vs local S5_DONE")
+        report = PullResult(
+            scanned=9, imported_uploaded=2, imported_failed=1, consistent=5, divergent=[divergente]
+        )
+        with (
+            patch.object(ops, "build_sync_stores", return_value=(sqlite, as400)),
+            patch.object(ops, "As400Pull") as pull_cls,
+        ):
+            pull_cls.return_value.pull.return_value = report
+            result = sync_status(_config(), _secrets())
+
+        assert result.divergences == [divergente]
+        assert result.scanned == 9
+        assert result.importable == 3  # 2 'O' + 1 'F' que el tracking no tiene
+        assert pull_cls.return_value.pull.call_args.kwargs["apply"] is False
+        # read-only: ninguna escritura al tracking local
+        sqlite.record_external_upload.assert_not_called()
+        sqlite.record_external_failure.assert_not_called()
 
     def test_status_unavailable_raises(self) -> None:
         with pytest.raises(SyncOpError, match="as400_sync"):
             sync_status(_config(enabled=False), _secrets())
+
+
+class TestPull151:
+    def test_pull_forwards_apply_and_progress_then_closes(self) -> None:
+        sqlite, as400 = MagicMock(), MagicMock()
+
+        def on_progress(_: object) -> None:
+            pass
+
+        with (
+            patch.object(ops, "build_sync_stores", return_value=(sqlite, as400)),
+            patch.object(ops, "As400Pull") as pull_cls,
+        ):
+            pull_cls.return_value.pull.return_value = PullResult(scanned=4)
+            result = sync_pull(_config(), _secrets(), apply=True, on_progress=on_progress)
+
+        assert result.scanned == 4
+        kwargs = pull_cls.return_value.pull.call_args.kwargs
+        assert kwargs["apply"] is True
+        assert kwargs["on_progress"] is on_progress
+        pull_cls.return_value.close.assert_called_once()  # cierra el store AS400
+        sqlite.close.assert_called_once()
+
+    def test_pull_closes_stores_when_the_scan_explodes(self) -> None:
+        sqlite, as400 = MagicMock(), MagicMock()
+        with (
+            patch.object(ops, "build_sync_stores", return_value=(sqlite, as400)),
+            patch.object(ops, "As400Pull") as pull_cls,
+            pytest.raises(RuntimeError),
+        ):
+            pull_cls.return_value.pull.side_effect = RuntimeError("AS400 caído")
+            sync_pull(_config(), _secrets(), apply=True)
+        pull_cls.return_value.close.assert_called_once()
+        sqlite.close.assert_called_once()
+
+    def test_pull_unavailable_raises(self) -> None:
+        with pytest.raises(SyncOpError, match="as400_sync"):
+            sync_pull(_config(enabled=False), _secrets(), apply=False)
 
 
 class TestRecover:

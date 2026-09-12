@@ -196,6 +196,41 @@ sesión, esas tres avisan en el log y no rompen nada — `Verificar YAML`
 (el equivalente de `types check`) y la revisión de decisiones/carpeta
 funcionan completamente offline, igual que `types review` por CLI.
 
+## Pestaña `8·SYNC`
+
+> 128 — `cli/console/sync_pane.py`; 151 agrega la segunda dirección. La
+> lógica está en `cli/sync_ops.py`, compartida con `cmcourier sync`.
+
+Cuatro bloques, en el orden en que se usan:
+
+1. **ESTADO** — cleanup de los `'I'` vencidos **y reporte de
+   divergencias**. Desde 151 hace el mismo barrido de NIARVILOG que
+   `TRAER` en modo simulación, así que dice cuántas filas hay allá que
+   acá faltan (`importables`) y cuáles no coinciden.
+2. **RECUPERAR (local → AS400)** — inserta las filas que faltan y
+   ACTUALIZA las desactualizadas.
+3. **TRAER (AS400 → local)** — importa lo que subió o rompió otro
+   programa de la migración (151).
+4. **RESOLVER** — una divergencia por TRNNUM.
+
+Los dos bloques que escriben exigen **simular antes de aplicar**, y el
+`aplicar` pasa por confirmación (tipeada, si `environment: prd`). El
+dry-run se consume al aplicar: para repetir hay que volver a simular.
+
+El campo `batch_id` de RECUPERAR lleva desde 151 una línea que dice
+explícitamente que **vacío = TODOS los batches del tracking**. La
+capacidad estaba desde el principio (`batch_id=None` barre todo); lo que
+faltaba era que el operador la viera — el placeholder no entraba en el
+ancho del campo y se leía cortado. Un feature que el operador no ve es un
+feature que no existe.
+
+Las dos direcciones no se pisan: valen las mismas reglas que en la CLI,
+incluida la de autoridad de 151
+([`idempotency-and-retries.md`](idempotency-and-retries.md#dos-direcciones-una-regla-de-autoridad-151)).
+Las divergencias se listan en el log y **nunca** habilitan un `aplicar`:
+si lo único que hay es una divergencia, no hay nada que ninguna de las
+dos direcciones pueda escribir sin pisar al otro lado.
+
 ## Lo que la consola NO es
 
 - **No es un editor de texto libre.** `[9]` edita cualquier clave del schema y `[2]` administra el registro de conexiones, pero los dos siguen siendo un *formulario*: no hay forma de escribir una clave que pydantic no conozca (`extra: forbid` la rechaza al validar antes de escribir), y cambiar el `kind` de un ítem de lista descarta sus otros campos (conserva `alias`/`name` si los tenía). Un anchor, una clave nueva que el schema todavía no modela, sigue necesitando el editor de texto.

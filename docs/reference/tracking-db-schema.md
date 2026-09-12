@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS migration_log (
 | `trigger_system_id` | TEXT | NO | Idem. |
 | `rvabrep_txn_num` | TEXT | NO | Clave natural del documento (idempotency). |
 | `rvabrep_file_name` | TEXT | NO | Nombre del archivo en RVABREP. |
-| `batch_id` | TEXT | NO | FK lógico → `migration_batch.batch_id`. |
+| `batch_id` | TEXT | NO | FK lógico → `migration_batch.batch_id`. El valor sintético `__as400_import__` no corresponde a ninguna corrida: lo usan `record_external_upload` / `record_external_failure` para las filas que `cmcourier sync pull` (151) importa de NIARVILOG. Se mantiene aparte a propósito — lo que subió o rompió otro programa no es una exclusión nuestra y no puede ensuciar el censo (148) de un batch real. |
 | `status` | TEXT | NO | Ver state machine abajo. |
 | `created_at` | TEXT (ISO-8601) | NO | Cuando se insertó la fila. |
 | `cm_object_id` | TEXT | YES | Sólo después de `S5_DONE`. |

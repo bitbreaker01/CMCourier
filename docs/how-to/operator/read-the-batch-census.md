@@ -167,6 +167,12 @@ Reintentar contra un CMIS caído sólo llena el log.
 | `CRASHED` | Excepción no contemplada | **Esto es un bug o un entorno roto.** Mirá el log estructurado del `txn_num`; si se repite, abrí un issue con el traceback |
 | `INDEXING_FAILED` | La consulta de indexado explotó | Casi siempre AS400 caído o una credencial vencida — ver [`../../runbooks/as400-down.md`](../../runbooks/as400-down.md) |
 | `SOURCE_ROW_NOT_FOUND` | El trigger no matcheó ninguna fila RVABREP | El trigger apunta a algo que no existe. Revisá el CSV de triggers o el filtro de sistemas |
+| `EXTERNAL_FAILURE` (151) | **No falló acá.** `cmcourier sync pull` importó una fila `STSCOD='F'` de NIARVILOG: el documento lo intentó otro programa de la migración y se rompió | El `ERROR` trae el `EERRMSG` que dejó el AS400. No hay nada que reintentar de este lado sin decidirlo con el otro equipo |
+
+> `EXTERNAL_FAILURE` nunca aparece en el censo de un batch real: esas filas
+> viven en el `batch_id` sintético `__as400_import__`. Un documento que
+> intentó otro programa no es una exclusión nuestra — ver
+> [`../as400-sync.md`](../as400-sync.md).
 
 > `CRASHED` es el que más vale la pena mirar aunque sea uno solo. Antes de
 > 148 ese camino **no escribía nada**: el documento quedaba registrado como

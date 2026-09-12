@@ -10,6 +10,92 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Added
+
+- **Sincronización de verdad entre el tracking local y RVIMGLOG (151).**
+  La tabla del AS400 (`NIARVILOG` en el código) es el punto de
+  coordinación entre **varios programas** que hacen la misma migración:
+  CMCourier y el proceso Java del banco. Para que eso funcione, los dos
+  lados tienen que poder enterarse de lo que hizo el otro. No funcionaba,
+  y la spec lo arregla con **una sola regla** que gobierna las dos
+  direcciones:
+
+  > El lado local manda sobre los documentos que CMCourier procesó. El
+  > AS400 manda sobre los documentos que CMCourier nunca vio.
+
+  `cmcourier sync pull` es la dirección que **no existía**. Todas las
+  lecturas del AS400 partían de una lista de TXN que el lado local ya
+  conocía: se podía preguntar *"¿qué sabés de estos que yo ya tengo?"*,
+  nunca *"¿qué hay ahí?"*. Y las tres vías que decían importar —el
+  reconciliador con un `import_scope_provider` que el wiring nunca
+  pasaba, `preflight_sync`, `sync resolve --prefer-as400`— no escribieron
+  **una sola fila en producción, nunca**. Ahora `pull` lista la tabla por
+  `STSCOD IN ('O','F')` e importa lo que el tracking local no tiene: `'O'`
+  → `S5_DONE` con el `OBJIDN` del AS400, `'F'` → `S5_FAILED` con
+  `ReasonCode.EXTERNAL_FAILURE` (balde `FALLO`) y el `EERRMSG` en
+  `error_message`, todo bajo el batch sintético `__as400_import__` —
+  porque un documento que subió otro programa **no es una exclusión
+  nuestra** y no puede ensuciar el censo (148) de un batch real. Dry-run
+  por default, `--apply` para escribir, igual que `recover`.
+
+  Se trae **todo**, sin rango, por decisión del operador. Pero *"todo" no
+  puede significar "todo en RAM"*: la lectura va en streaming
+  (`fetchmany`, el patrón de `query_stream`) y las escrituras a SQLite van
+  por lotes. El precedente es 148, donde un `fetchall()` era exactamente
+  lo que impedía barrer un sistema entero. `'I'` y `'N'` quedan afuera a
+  propósito: son estados en vuelo que cambian solos, e importarlos sería
+  fotografiar algo que ya no es cierto.
+
+### Fixed
+
+- **`sync recover` comparaba PRESENCIA, no ESTADO (151).** Un documento
+  `S5_DONE` local que en el AS400 había quedado en `'F'`, `'I'` o `'N'` se
+  contaba como `already_present` y **se dejaba divergente para siempre** —
+  con un nombre que sonaba a éxito. Éste era el verdadero bug de "el mejor
+  estado no gana". Ahora hay tres grupos donde había dos: `recuperadas`
+  (ausentes → INSERT `'O'`, como antes), `actualizadas` (presentes con
+  `STSCOD != 'O'` → **UPDATE a `'O'`** + `OBJIDN` + `EERRMSG=''`) y
+  `consistentes` (presentes con `'O'` **y el mismo `OBJIDN`**). El dry-run
+  y el reporte final distinguen los tres, en la CLI y en `8·SYNC`.
+
+  El UPDATE del recover lleva guarda `STSCOD <> 'O'`: es un write masivo y
+  automático, así que si otro productor llevó la fila a `'O'` entre
+  nuestra lectura batcheada y el write, no la pisa — lo reporta. El helper
+  sin guarda queda sólo para `sync resolve --prefer-local`, que es una
+  decisión explícita del operador sobre un txn.
+
+- **Un `'O'` con OTRO `OBJIDN` ya no se reporta como éxito (151).** Son
+  dos objetos en Content Manager para el mismo documento: una divergencia
+  real. Se reporta y **no se toca nada**. Igual que en `pull`: cuando los
+  dos lados afirman cosas distintas, ninguna dirección decide sola.
+  Resolución automática de divergencias es explícitamente lo que no
+  queremos — que un programa elija solo cuál de dos verdades gana
+  convierte un estado inconsistente visible en uno invisible.
+
+- **`uploaded_records` no deduplicaba por TXN (151).** El índice único del
+  tracking es `(rvabrep_txn_num, batch_id)`, así que un documento
+  `S5_DONE` re-corrido en dos batches dejaba dos filas locales — y
+  `recover` armaba **dos INSERT contra la misma PK del AS400**. Ahora
+  devuelve una fila por TXN, con elección determinística: gana el
+  `completed_at` más reciente y, a igualdad, el `id` mayor.
+
+- **`sync status` decía reportar conflictos y no reportaba ninguno
+  (151).** El docstring prometía *"reporta cualquier conflicto sin tocar
+  estado"* y lo único que hacía era limpiar los `'I'` vencidos. Ahora los
+  reporta de verdad: es el barrido de `pull` en dry-run, así que no
+  escribe una sola fila del tracking local. Informa `escaneadas`,
+  `importables` y `divergentes`, con una línea por divergencia.
+
+- **`sync resolve ... (or --all)` publicitaba un flag que no existe
+  (151).** Se fue del mensaje de `IdempotencyConflictError`. Mandar al
+  operador a tipear algo imposible es peor que no decirle nada.
+
+- **El campo `batch_id` de `8·SYNC` ahora dice que vacío = TODOS los
+  batches (151).** La capacidad estaba desde siempre (`batch_id=None`
+  barre todo el tracking); el operador no la veía porque el placeholder no
+  entraba en el ancho del campo y se leía cortado. Un feature que el
+  operador no ve es un feature que no existe.
+
 ### Removed
 
 - **El botón "ver" de las contraseñas, en `[2] CREDENCIALES`.** La

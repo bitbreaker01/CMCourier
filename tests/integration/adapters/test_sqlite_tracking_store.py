@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from cmcourier.adapters.tracking import SQLiteTrackingStore
+from cmcourier.adapters.tracking.sqlite import EXTERNAL_IMPORT_BATCH
 from cmcourier.domain.exceptions import TrackingError
 from cmcourier.domain.models import MigrationRecord, ReasonBucket, ReasonCode, StageStatus
 
@@ -789,6 +790,288 @@ class TestUploadedRecords:
 
         assert [r.txn_num for r in store.uploaded_records(batch_id=b1)] == ["TXN_B1"]
         assert {r.txn_num for r in store.uploaded_records()} == {"TXN_B1", "TXN_B2"}
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# 151 REQ-002 — ``uploaded_records`` deduplica por TXN
+# ---------------------------------------------------------------------------
+
+
+def _set_completed_at(db: Path, txn: str, batch_id: str, value: str) -> None:
+    """Fija ``completed_at`` con una conexión paralela — ``mark_stage_done``
+    usa ``datetime.now()`` y los tests necesitan un orden determinístico."""
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE migration_log SET completed_at = ? WHERE rvabrep_txn_num = ? AND batch_id = ?",
+        (value, txn, batch_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _upload(store: SQLiteTrackingStore, batch_id: str, txn: str, cm_object_id: str) -> None:
+    rec = _make_record(batch_id, txn, status=StageStatus.S5_PENDING)
+    store.mark_stage_pending(rec, StageStatus.S5_PENDING)
+    store.mark_stage_done(txn, batch_id, StageStatus.S5_DONE, cm_object_id=cm_object_id)
+
+
+class TestUploadedRecordsDedupe151:
+    """151 REQ-002: un TXN ``S5_DONE`` en dos batches es UNA fila, no dos.
+
+    El índice único del tracking es ``(rvabrep_txn_num, batch_id)``: el
+    mismo documento re-corrido en otro batch produce dos filas locales y,
+    sin deduplicar, ``recover`` armaba dos INSERT contra la MISMA PK del
+    AS400 (``recovery.py:150``).
+    """
+
+    def test_same_txn_in_two_batches_yields_one_record(
+        self, store: SQLiteTrackingStore, tmp_path: Path
+    ) -> None:
+        b1 = store.start_batch(total_records=1)
+        b2 = store.start_batch(total_records=1)
+        _upload(store, b1, "TXN_DUP", "cm-viejo")
+        _upload(store, b2, "TXN_DUP", "cm-nuevo")
+        store.flush()
+        _set_completed_at(tmp_path / "tracking.db", "TXN_DUP", b1, "2026-01-01T00:00:00")
+        _set_completed_at(tmp_path / "tracking.db", "TXN_DUP", b2, "2026-06-01T00:00:00")
+
+        records = store.uploaded_records()
+
+        assert [r.txn_num for r in records] == ["TXN_DUP"]
+        # Gana el ``completed_at`` más reciente, no el orden de inserción.
+        assert records[0].cm_object_id == "cm-nuevo"
+        store.close()
+
+    def test_most_recent_wins_even_when_inserted_first(
+        self, store: SQLiteTrackingStore, tmp_path: Path
+    ) -> None:
+        b1 = store.start_batch(total_records=1)
+        b2 = store.start_batch(total_records=1)
+        _upload(store, b1, "TXN_DUP", "cm-ganador")
+        _upload(store, b2, "TXN_DUP", "cm-perdedor")
+        store.flush()
+        _set_completed_at(tmp_path / "tracking.db", "TXN_DUP", b1, "2026-06-01T00:00:00")
+        _set_completed_at(tmp_path / "tracking.db", "TXN_DUP", b2, "2026-01-01T00:00:00")
+
+        records = store.uploaded_records()
+
+        assert [r.cm_object_id for r in records] == ["cm-ganador"]
+        store.close()
+
+    def test_tie_on_completed_at_breaks_on_greater_id(
+        self, store: SQLiteTrackingStore, tmp_path: Path
+    ) -> None:
+        b1 = store.start_batch(total_records=1)
+        b2 = store.start_batch(total_records=1)
+        _upload(store, b1, "TXN_TIE", "cm-primero")
+        _upload(store, b2, "TXN_TIE", "cm-segundo")
+        store.flush()
+        for batch in (b1, b2):
+            _set_completed_at(tmp_path / "tracking.db", "TXN_TIE", batch, "2026-03-03T03:03:03")
+
+        records = store.uploaded_records()
+
+        # A igualdad de ``completed_at`` gana el ``id`` mayor: el segundo.
+        assert [r.cm_object_id for r in records] == ["cm-segundo"]
+        store.close()
+
+    def test_a_row_without_completed_at_loses_to_one_with_it(
+        self, store: SQLiteTrackingStore, tmp_path: Path
+    ) -> None:
+        b1 = store.start_batch(total_records=1)
+        b2 = store.start_batch(total_records=1)
+        _upload(store, b1, "TXN_NULL", "cm-con-fecha")
+        _upload(store, b2, "TXN_NULL", "cm-sin-fecha")
+        store.flush()
+        _set_completed_at(tmp_path / "tracking.db", "TXN_NULL", b1, "2026-01-01T00:00:00")
+        conn = sqlite3.connect(tmp_path / "tracking.db")
+        conn.execute(
+            "UPDATE migration_log SET completed_at = NULL "
+            "WHERE rvabrep_txn_num = ? AND batch_id = ?",
+            ("TXN_NULL", b2),
+        )
+        conn.commit()
+        conn.close()
+
+        records = store.uploaded_records()
+
+        assert [r.cm_object_id for r in records] == ["cm-con-fecha"]
+        store.close()
+
+    def test_batch_scope_still_narrows_before_deduping(self, store: SQLiteTrackingStore) -> None:
+        """Acotar por batch sigue funcionando: el dedupe no lo pisa."""
+        b1 = store.start_batch(total_records=1)
+        b2 = store.start_batch(total_records=1)
+        _upload(store, b1, "TXN_DUP", "cm-b1")
+        _upload(store, b2, "TXN_DUP", "cm-b2")
+        store.flush()
+
+        assert [r.cm_object_id for r in store.uploaded_records(batch_id=b1)] == ["cm-b1"]
+        assert len(store.uploaded_records()) == 1
+        store.close()
+
+    def test_distinct_txns_are_all_returned(self, store: SQLiteTrackingStore) -> None:
+        """El dedupe agrupa por TXN, no colapsa documentos distintos."""
+        batch_id = store.start_batch(total_records=3)
+        for txn in ("TXN_A", "TXN_B", "TXN_C"):
+            _upload(store, batch_id, txn, f"cm-{txn}")
+        store.flush()
+
+        assert {r.txn_num for r in store.uploaded_records()} == {"TXN_A", "TXN_B", "TXN_C"}
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# 151 REQ-004 — la dirección AS400 → local: import y estados terminales
+# ---------------------------------------------------------------------------
+
+
+def _rows_of(db: Path, batch_id: str) -> list[tuple[object, ...]]:
+    conn = sqlite3.connect(db)
+    rows = conn.execute(
+        "SELECT rvabrep_txn_num, status, COALESCE(error_message, ''), "
+        "COALESCE(reason_code, ''), COALESCE(id_rvi, ''), COALESCE(cm_object_id, '') "
+        "FROM migration_log WHERE batch_id = ? ORDER BY rvabrep_txn_num",
+        (batch_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+class TestRecordExternalFailure151:
+    """151 REQ-004: un ``STSCOD='F'`` del AS400 para un documento que
+    CMCourier nunca vio entra como ``S5_FAILED`` + ``EXTERNAL_FAILURE``."""
+
+    def test_writes_a_failed_row_in_the_synthetic_batch(
+        self, store: SQLiteTrackingStore, tmp_path: Path
+    ) -> None:
+        store.record_external_failure(
+            txn_num="TXN_EXT_F",
+            file_name="EXT.001",
+            shortname="CLIENTE01",
+            cif="123456",
+            system_id="1",
+            error_message="SQL0803 duplicate key",
+            id_rvi="CC03",
+        )
+        store.flush()
+
+        rows = _rows_of(tmp_path / "tracking.db", EXTERNAL_IMPORT_BATCH)
+
+        assert rows == [
+            ("TXN_EXT_F", "S5_FAILED", "SQL0803 duplicate key", "EXTERNAL_FAILURE", "CC03", "")
+        ]
+        store.close()
+
+    def test_the_reason_code_lands_in_the_fallo_bucket(self, store: SQLiteTrackingStore) -> None:
+        assert ReasonCode.EXTERNAL_FAILURE.bucket is ReasonBucket.FALLO
+        store.close()
+
+    def test_is_idempotent_between_passes(self, store: SQLiteTrackingStore, tmp_path: Path) -> None:
+        for _ in range(3):
+            store.record_external_failure(
+                txn_num="TXN_EXT_F",
+                file_name="EXT.001",
+                shortname="CLIENTE01",
+                cif="123456",
+                system_id="1",
+                error_message="boom",
+            )
+        store.flush()
+
+        assert len(_rows_of(tmp_path / "tracking.db", EXTERNAL_IMPORT_BATCH)) == 1
+        store.close()
+
+    def test_the_synthetic_batch_does_not_pollute_a_real_batch_census(
+        self, store: SQLiteTrackingStore
+    ) -> None:
+        """Un documento que subió (o rompió) otro programa NO es una
+        exclusión nuestra: no puede aparecer en el censo de un batch real."""
+        batch_id = store.start_batch(total_records=1)
+        _upload(store, batch_id, "TXN_MIO", "cm-mio")
+        store.record_external_failure(
+            txn_num="TXN_AJENO",
+            file_name="EXT.001",
+            shortname="CLIENTE01",
+            cif="123456",
+            system_id="1",
+            error_message="boom",
+            id_rvi="CC03",
+        )
+        store.record_external_upload(
+            txn_num="TXN_AJENO_OK",
+            file_name="EXT.002",
+            shortname="CLIENTE01",
+            cif="123456",
+            system_id="1",
+            cm_object_id="cm-ajeno",
+            id_rvi="CC03",
+        )
+        store.flush()
+
+        details = store.get_batch_details(batch_id)
+
+        assert details is not None
+        assert details.reason_counts == ()
+        txns = {d.txn_num for d in store.list_docs_for_batch(batch_id)}
+        assert txns == {"TXN_MIO"}
+        # …y las filas importadas SÍ están, en el batch sintético.
+        assert {d.txn_num for d in store.list_docs_for_batch(EXTERNAL_IMPORT_BATCH)} == {
+            "TXN_AJENO",
+            "TXN_AJENO_OK",
+        }
+        store.close()
+
+
+class TestTerminalStatesByTxns151:
+    """151 REQ-004: qué afirma el lado local sobre un lote de TXN.
+
+    El ``pull`` la usa para decidir entre importar (no hay fila terminal),
+    no hacer nada (coincide) o reportar una divergencia (no coincide)."""
+
+    def test_returns_only_terminal_upload_rows(self, store: SQLiteTrackingStore) -> None:
+        batch_id = store.start_batch(total_records=3)
+        _upload(store, batch_id, "TXN_DONE", "cm-1")
+        failed = _make_record(batch_id, "TXN_FAILED", status=StageStatus.S5_PENDING)
+        store.mark_stage_pending(failed, StageStatus.S5_PENDING)
+        store.mark_stage_failed("TXN_FAILED", batch_id, StageStatus.S5_FAILED, "boom")
+        in_flight = _make_record(batch_id, "TXN_S1")
+        store.mark_stage_pending(in_flight, StageStatus.S1_PENDING)
+        store.mark_stage_done("TXN_S1", batch_id, StageStatus.S1_DONE)
+        store.flush()
+
+        states = store.terminal_states_by_txns(["TXN_DONE", "TXN_FAILED", "TXN_S1", "TXN_NADA"])
+
+        assert states == {"TXN_DONE": "S5_DONE", "TXN_FAILED": "S5_FAILED"}
+        store.close()
+
+    def test_done_wins_over_failed_across_batches(self, store: SQLiteTrackingStore) -> None:
+        """Un doc que falló en un batch y subió en otro está SUBIDO: si no,
+        el pull reportaría una divergencia que no existe."""
+        b1 = store.start_batch(total_records=1)
+        b2 = store.start_batch(total_records=1)
+        failed = _make_record(b1, "TXN_MIXTO", status=StageStatus.S5_PENDING)
+        store.mark_stage_pending(failed, StageStatus.S5_PENDING)
+        store.mark_stage_failed("TXN_MIXTO", b1, StageStatus.S5_FAILED, "boom")
+        _upload(store, b2, "TXN_MIXTO", "cm-ok")
+        store.flush()
+
+        assert store.terminal_states_by_txns(["TXN_MIXTO"]) == {"TXN_MIXTO": "S5_DONE"}
+        store.close()
+
+    def test_empty_input_issues_no_query(self, store: SQLiteTrackingStore) -> None:
+        assert store.terminal_states_by_txns([]) == {}
+        store.close()
+
+    def test_chunks_beyond_the_sqlite_variable_limit(self, store: SQLiteTrackingStore) -> None:
+        """Más TXN que variables admite un ``IN`` de SQLite: se chunkea."""
+        batch_id = store.start_batch(total_records=1)
+        _upload(store, batch_id, "TXN_UNO", "cm-1")
+        store.flush()
+        many = [f"TXN_{i:05d}" for i in range(2500)] + ["TXN_UNO"]
+
+        assert store.terminal_states_by_txns(many) == {"TXN_UNO": "S5_DONE"}
         store.close()
 
 

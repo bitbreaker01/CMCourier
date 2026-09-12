@@ -115,7 +115,7 @@ Necesita un TTY real — no funciona por un pipe ni en un editor sin terminal in
 | `5` | CORRER | Launcher: elección de pipeline (127), parámetros por kind, `nueva` vs `reanudar`, `total` y `max-duration`. |
 | `6` | MONITOR | Corrida en vivo a 4 Hz: cabecera, PREP/UPLOAD, y en `streaming` también el bucket. |
 | `7` | BATCHES | Tabla de batches con su auditoría; detalle, retry y export. |
-| `8` | SYNC | La versión interactiva de `sync status` / `recover` / `resolve` (128). |
+| `8` | SYNC | La versión interactiva de `sync status` / `recover` / `pull` / `resolve` (128, 151). |
 | `9` | YAML | Formulario generado del schema sobre el YAML completo (137–139): `v` valida, `w` escribe (con backup), `u` descarta el borrador. `connections` se administra en `[2]`, acá es de sólo lectura. |
 | `0` | PRUEBA | Tiro de prueba (141): sube UN documento sintético a un código CM puntual y muestra la respuesta CRUDA del servidor — sin tracking, sin reintentos. |
 
@@ -806,13 +806,44 @@ eval "$(cmcourier completion bash)"
 
 Reconcilia divergencias entre el SQLite local y `RVILIB.NIARVILOG`. Requiere `tracking.as400_sync.enabled: true` + credenciales AS400 en el environment.
 
+**La regla de autoridad (151 REQ-001)** gobierna las dos direcciones:
+
+> El lado local manda sobre los documentos que CMCourier procesó. El AS400 manda sobre los documentos que CMCourier nunca vio.
+
+`recover` (local → AS400) corrige lo que hicimos nosotros; `pull` (AS400 → local) sólo rellena huecos y **nunca pisa** un estado terminal local. Cuando los dos afirman cosas distintas sobre el mismo documento, ninguna dirección decide sola: se reporta como **divergencia** y la resuelve el operador con `sync resolve`. Ver `docs/how-to/as400-sync.md`.
+
 ### `sync status`
 
-Pre-flight cleanup + reporte. Read-only.
+Pre-flight cleanup + **reporte de divergencias**. Read-only sobre el tracking local: lo único que muta es el cleanup de los `'I'` vencidos, que es idempotente.
 
 | Flag | Type | Default |
 |------|------|---------|
 | `--config` | Path (required) | — |
+
+Salida: `stale_cleaned` (filas `'I'` vencidas reseteadas), `escaneadas` (filas `'O'`/`'F'` vistas en NIARVILOG), `importables` (las que el tracking local no tiene terminadas — las traería `sync pull`) y `divergentes`, con una línea por divergencia en **stderr**.
+
+Desde 151 el `status` hace el mismo barrido en streaming que `pull`: con una tabla grande tarda lo que tarda leerla. Antes decía reportar conflictos y sólo corría el cleanup.
+
+### `sync pull` (151)
+
+Trae de NIARVILOG lo que hicieron los **otros programas** de la migración (el proceso Java del banco). Es la dirección AS400 → local, que hasta 151 no existía en producción.
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--config` | Path (required) | — | — |
+| `--apply` | flag | `False` | Sin el flag = **dry-run** (reporta, no escribe). Con `--apply`, escribe en SQLite. |
+
+Qué hace con cada fila `'O'` / `'F'` de la tabla:
+
+| Situación local | Acción |
+|---|---|
+| sin fila terminal (`S5_DONE`/`S5_FAILED`) | **importa**: `'O'` → `S5_DONE` con el `OBJIDN` del AS400; `'F'` → `S5_FAILED` con `reason_code=EXTERNAL_FAILURE` (balde `FALLO`) y el `EERRMSG` en `error_message` |
+| fila terminal que coincide | nada |
+| fila terminal que NO coincide | **divergencia**: se reporta, no se pisa |
+
+Las filas importadas van al `batch_id` sintético `__as400_import__` — un documento que subió otro programa no es una exclusión nuestra y no puede ensuciar el censo (148) de un batch real.
+
+Sin rango, por decisión del operador: se trae todo. Pero *"todo" no significa "todo en RAM"*: la lectura del AS400 va en streaming (`fetchmany`, 500 filas) y las escrituras a SQLite van por lotes. Idempotente (`INSERT OR IGNORE`): re-correrlo tras un corte es seguro. `'I'` y `'N'` quedan fuera a propósito — son estados en vuelo que cambian solos.
 
 ### `sync resolve <txn>`
 
@@ -830,15 +861,26 @@ Exactamente uno de `--prefer-as400` / `--prefer-local`.
 
 ### `sync recover` (099)
 
-Recupera filas faltantes en `NIARVILOG` para documentos ya subidos a CM (`S5_DONE` en SQLite pero sin fila en AS400) — repara el daño del bug del modo `periodic`. Re-deriva los campos que SQLite no almacena (`DOCFRM`/`IMGTIP` desde RVABREP, `IDNBAC`/`TIPIDN` desde el mapping) e inserta las filas terminales. Idempotente: re-correr saltea las ya presentes.
+Empuja a `NIARVILOG` el estado de los documentos que CMCourier subió a CM (`S5_DONE` en SQLite). Re-deriva los campos que SQLite no almacena (`DOCFRM`/`IMGTIP` desde RVABREP, `IDNBAC`/`TIPIDN` desde el mapping). Idempotente.
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--config` | Path (required) | — | — |
-| `--apply` | flag | `False` | Sin el flag = **dry-run** (reporta el plan, no escribe). Con `--apply`, ejecuta los INSERT en AS400. |
-| `--batch-id` | str | `None` | Acota la recuperación a un `batch_id`. Default: todo el tracking. |
+| `--apply` | flag | `False` | Sin el flag = **dry-run** (reporta el plan, no escribe). Con `--apply`, ejecuta los INSERT y los UPDATE en AS400. |
+| `--batch-id` | str | `None` | Acota la recuperación a un `batch_id`. **Vacío / omitido = TODOS los batches del tracking.** |
 
-Un `txn` sin fila RVABREP o con id RVI no mapeado se reporta como `unrecoverable` — nunca se inserta a ciegas.
+Desde **151** compara el **estado**, no la presencia de la clave. Tres grupos donde antes había dos:
+
+| Grupo | Condición en NIARVILOG | Acción |
+|---|---|---|
+| `recuperadas` | el TXN no está | INSERT `STSCOD='O'` |
+| `actualizadas` | está, con `STSCOD != 'O'` | UPDATE a `'O'` + `OBJIDN` + `EERRMSG=''`, con guarda `STSCOD <> 'O'` |
+| `consistentes` | está con `'O'` y el **mismo** `OBJIDN` | nada |
+| `divergentes` | está con `'O'` y **otro** `OBJIDN` | nada: son dos objetos en CM para un documento. Se reporta y decide el operador. |
+
+Pre-151 los tres primeros casos colapsaban en un contador llamado `already_present`: un documento `S5_DONE` local que en el AS400 había quedado en `'F'` se reportaba como "ya presente" y se dejaba divergente para siempre.
+
+Un `txn` sin fila RVABREP o con id RVI no mapeado se reporta como `unrecoverable` — nunca se inserta a ciegas. Desde 151 `uploaded_records` deduplica por TXN (gana el `completed_at` más reciente; a igualdad, el `id` mayor): un documento re-corrido en dos batches deja dos filas locales, y contra el AS400 la PK es una sola.
 
 Desde 144 el recover es batcheado de punta a punta: la existencia en `NIARVILOG` y las filas RVABREP de los faltantes se leen en una consulta `IN` cada una (chunks de 1000), y los `INSERT` de `--apply` corren en un pool de 8 hilos (uno por conexión ODBC). El progreso sale por **stderr** — una línea por fase (`leyendo tracking`, `consultando NIARVILOG 0/2000`, `consultando RVABREP 0/1000`, `insertando 250/1000`…) — y el reporte final por stdout, así que `2>/dev/null` deja sólo el resultado. En la consola `[8]` la misma información aparece como línea viva debajo del log.
 

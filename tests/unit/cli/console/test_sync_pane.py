@@ -15,6 +15,7 @@ from cmcourier.cli.console.app import ConfirmScreen, ConsoleApp
 from cmcourier.cli.console.state import SessionCredentials
 from cmcourier.cli.console.sync_pane import SyncPane
 from cmcourier.config.schema import As400ConnectionConfig, As400SyncConfig, PipelineConfig
+from cmcourier.services.pull import PullItem, PullResult
 from cmcourier.services.recovery import RecoveryResult, SyncProgress
 from tests.unit.cli.console.conftest import goto
 from tests.unit.cli.console.conftest import wait_for as _wait_for
@@ -22,7 +23,14 @@ from tests.unit.cli.console.test_console_app import _make_config
 
 pytestmark = pytest.mark.unit
 
-_BUTTONS = ("#sy-status", "#sy-dry", "#sy-apply", "#sy-resolve")
+_BUTTONS = (
+    "#sy-status",
+    "#sy-dry",
+    "#sy-apply",
+    "#sy-pull-dry",
+    "#sy-pull-apply",
+    "#sy-resolve",
+)
 
 
 def _with_sync(config: PipelineConfig) -> PipelineConfig:
@@ -84,7 +92,7 @@ class TestRecover:
             config: Any, secrets: Any, *, batch_id: Any, apply: bool, on_progress: Any = None
         ) -> Any:
             calls.append({"batch_id": batch_id, "apply": apply})
-            return RecoveryResult(recovered=["t1", "t2"], already_present=[], unrecoverable=[])
+            return RecoveryResult(recovered=["t1", "t2"])
 
         async def _run() -> None:
             config, path = _make_config(tmp_path)
@@ -126,7 +134,7 @@ class TestRecover:
         def fake_recover(
             config: Any, secrets: Any, *, batch_id: Any, apply: bool, on_progress: Any = None
         ) -> Any:
-            return RecoveryResult(recovered=[], already_present=["x"], unrecoverable=[])
+            return RecoveryResult(consistent=["x"])
 
         async def _run() -> None:
             config, path = _make_config(tmp_path)
@@ -137,7 +145,7 @@ class TestRecover:
                 await goto(pilot, app, "8")
                 pane = app.query_one(SyncPane)
                 pane.query_one("#sy-dry", Button).press()
-                assert await _wait_for(pilot, lambda: "already_present=1" in pane.output_text())
+                assert await _wait_for(pilot, lambda: "consistentes=1" in pane.output_text())
                 assert pane.query_one("#sy-apply", Button).disabled is True
 
         asyncio.run(_run())
@@ -158,7 +166,7 @@ class TestRecover:
             on_progress(SyncProgress("insertando", 50, 100))
             release.wait(5)
             on_progress(SyncProgress("insertando", 100, 100))
-            return RecoveryResult(recovered=["t1"], already_present=[], unrecoverable=[])
+            return RecoveryResult(recovered=["t1"])
 
         async def _run() -> None:
             config, path = _make_config(tmp_path)
@@ -216,5 +224,99 @@ class TestResolve:
                 assert await _wait_for(pilot, lambda: len(calls) == 1)
                 assert calls[0] == {"txn": "0000007", "prefer": "local", "cm_object_id": "cmis-9"}
                 assert await _wait_for(pilot, lambda: "resolved 0000007" in pane.output_text())
+
+        asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# 151 — el botón TRAER (pull) y el batch_id que dice lo que hace
+# ---------------------------------------------------------------------------
+
+
+class TestPull151:
+    def test_apply_gated_by_dry_run_and_confirm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mismo contrato que recover: simular primero, aplicar después, y
+        el apply pasa por confirmación porque ESCRIBE."""
+        calls: list[bool] = []
+
+        def fake_pull(config: Any, secrets: Any, *, apply: bool, on_progress: Any = None) -> Any:
+            calls.append(apply)
+            return PullResult(scanned=9, imported_uploaded=2, imported_failed=1, consistent=6)
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            monkeypatch.setattr(sync_pane_module, "sync_pull", fake_pull)
+            app = ConsoleApp(config=_with_sync(config), config_path=path)
+            async with app.run_test() as pilot:
+                app.state.creds = _as400_creds()
+                await goto(pilot, app, "8")
+                pane = app.query_one(SyncPane)
+                apply_btn = pane.query_one("#sy-pull-apply", Button)
+                assert apply_btn.disabled is True
+                pane.apply_pull()  # sin simular previo: no hace nada
+                await pilot.pause()
+                assert calls == []
+                pane.query_one("#sy-pull-dry", Button).press()
+                assert await _wait_for(pilot, lambda: apply_btn.disabled is False)
+                assert calls == [False]
+                assert "importadas_ok=2" in pane.output_text()
+                apply_btn.press()
+                assert await _wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+                app.screen.query_one("#yes", Button).press()
+                assert await _wait_for(pilot, lambda: len(calls) == 2)
+                assert calls[1] is True
+                # tras aplicar hace falta simular de nuevo
+                assert await _wait_for(pilot, lambda: apply_btn.disabled is True)
+
+        asyncio.run(_run())
+
+    def test_divergences_are_listed_and_never_applied(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """REQ-001: una divergencia no habilita `aplicar` — no hay nada
+        que el pull pueda escribir sin pisar al lado local."""
+
+        def fake_pull(config: Any, secrets: Any, *, apply: bool, on_progress: Any = None) -> Any:
+            return PullResult(
+                scanned=1,
+                divergent=[PullItem("0000001", "AS400 STSCOD='F' vs local S5_DONE")],
+            )
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            monkeypatch.setattr(sync_pane_module, "sync_pull", fake_pull)
+            app = ConsoleApp(config=_with_sync(config), config_path=path)
+            async with app.run_test() as pilot:
+                app.state.creds = _as400_creds()
+                await goto(pilot, app, "8")
+                pane = app.query_one(SyncPane)
+                pane.query_one("#sy-pull-dry", Button).press()
+                assert await _wait_for(pilot, lambda: "divergentes=1" in pane.output_text())
+                assert "0000001" in pane.output_text()
+                assert pane.query_one("#sy-pull-apply", Button).disabled is True
+
+        asyncio.run(_run())
+
+
+class TestBatchIdIsExplicit151:
+    def test_the_field_says_empty_means_all_batches(self, tmp_path: Path) -> None:
+        """REQ-005: la capacidad (``batch_id=None`` barre todo el tracking)
+        estaba desde siempre; el operador no la veía porque el placeholder
+        no entraba en el ancho del campo."""
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=_with_sync(config), config_path=path)
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "8")
+                pane = app.query_one(SyncPane)
+                hint = str(pane.query_one("#sy-batch-hint", Static).renderable)
+                assert "vacío" in hint.lower()
+                assert "todos los batches" in hint.lower()
+                # y el placeholder entra en el ancho del Input
+                placeholder = pane.query_one("#sy-batch", Input).placeholder
+                assert len(placeholder) <= 34
 
         asyncio.run(_run())

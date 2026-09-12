@@ -440,6 +440,10 @@ _SPEC_TABLE: dict[str, tuple[str, ...]] = {
         "CANCELLED",
         "INDEXING_FAILED",
         "SOURCE_ROW_NOT_FOUND",
+        # 151 REQ-004: AS400 dice STSCOD='F' para un documento que CMCourier
+        # nunca vio — lo intentó otro programa del banco y se rompió. Es un
+        # fallo de ejecución (bucket FALLO), sólo que no fue el nuestro.
+        "EXTERNAL_FAILURE",
     ),
 }
 

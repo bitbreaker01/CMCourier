@@ -202,21 +202,100 @@ Si los conflictos son no vacíos, el pipeline aborta con exit 2.
 
 ---
 
+## La regla de autoridad (151)
+
+NIARVILOG es el **punto de coordinación entre varios programas** que
+hacen la misma migración: CMCourier y el proceso Java del banco. Para que
+eso funcione, los dos lados tienen que poder enterarse de lo que hizo el
+otro — y tiene que estar claro quién manda sobre qué. Una sola frase
+gobierna las dos direcciones:
+
+> **El lado local manda sobre los documentos que CMCourier procesó.
+> El AS400 manda sobre los documentos que CMCourier nunca vio.**
+
+De ahí sale todo lo demás:
+
+| Dirección | Comando | Qué hace |
+|---|---|---|
+| local → AS400 | ``sync recover`` | corrige lo que hicimos nosotros: INSERTa las filas que faltan y ACTUALIZA las desactualizadas |
+| AS400 → local | ``sync pull`` | sólo rellena huecos: importa lo que hizo otro programa y **nunca pisa** un estado terminal local |
+
+Cuando los dos afirman cosas distintas sobre el mismo documento,
+**ninguna dirección decide sola**: se reporta como *divergencia* y la
+resuelve el operador con ``sync resolve``. Dos direcciones que se pisan
+entre sí no son una sincronización, son una pelea.
+
+### Qué hacer con cada divergencia
+
+| Qué se ve | Qué significa | Qué hacer |
+|---|---|---|
+| ``recover``: ``divergente <txn>: objidn_mismatch`` — AS400 ``'O'`` con otro ``OBJIDN`` | hay **dos objetos en CM** para el mismo documento (lo subimos nosotros y lo subió el otro programa) | verificá los dos objectId en Content Manager. El que sobra se borra a mano; después ``sync resolve <txn> --prefer-local --cm-object-id <el bueno>`` |
+| ``pull``/``status``: ``AS400 STSCOD='F' vs local S5_DONE`` | nosotros lo subimos bien, el AS400 quedó viejo (se cayó durante S5) | **local manda**: ``cmcourier sync recover --apply`` lo lleva a ``'O'``. Es el caso normal |
+| ``pull``/``status``: ``AS400 STSCOD='O' vs local S5_FAILED`` | el otro programa lo subió después de que a nosotros nos falló | **AS400 manda**: ``sync resolve <txn> --prefer-as400`` |
+| ``recover``: ``unrecoverable <txn>: stale_update_no_rows`` | entre nuestra lectura y el UPDATE, otro proceso llevó la fila a ``'O'`` | re-corré ``sync recover``; si sigue, mirá la fila con ``sync resolve`` |
+
+Nada de esto se resuelve solo, y es deliberado: que un programa decida
+por su cuenta cuál de dos verdades gana es exactamente lo que no
+queremos.
+
+---
+
 ## Playbook de resolución de conflictos
 
 Los conflictos aparecen solo cuando los dos stores no acuerdan en un
-estado terminal "¿está hecho este doc?". Resolver con el nuevo
+estado terminal "¿está hecho este doc?". Resolver con el
 subcomando ``cmcourier sync``.
 
 ### Inspección
 
 ```bash
 cmcourier sync status --config prod.yaml
-# sync status: stale_cleaned=2
+# sync status: stale_cleaned=2 escaneadas=18432 importables=57 divergentes=3
+#   divergente 0001234: AS400 STSCOD='F' vs local S5_DONE: el pull no pisa un estado terminal local
 ```
 
-Read-only: corre el cleanup + te dice cuántas filas ``I``
-se resetearon.
+Corre el cleanup de los ``'I'`` vencidos y **barre la tabla** para
+reportar las divergencias. No escribe una sola fila del tracking local.
+Desde 151 el barrido es el mismo que el de ``pull``: con una tabla
+grande tarda lo que tarda leerla.
+
+### Traer lo que hicieron los otros (151)
+
+```bash
+cmcourier sync pull --config prod.yaml            # dry-run
+cmcourier sync pull --config prod.yaml --apply    # escribe
+# sync pull [APPLY]: escaneadas=18432 importadas_ok=55 importadas_fallidas=2 \
+#   consistentes=18374 divergentes=1
+```
+
+Importa al tracking local los documentos que el otro programa subió
+(``STSCOD='O'`` → ``S5_DONE``) o rompió (``'F'`` → ``S5_FAILED`` con
+``reason_code=EXTERNAL_FAILURE``, balde ``FALLO``, y el ``EERRMSG`` en
+``error_message``). Las filas importadas van al ``batch_id`` sintético
+``__as400_import__``: un documento que subió otro programa **no es una
+exclusión nuestra** y no puede ensuciar el censo (148) de un batch real.
+
+Se trae todo, sin rango — pero *"todo" no significa "todo en RAM"*: la
+lectura va en streaming y las escrituras por lotes. Es idempotente, así
+que re-correrlo tras un corte es seguro. ``'I'`` y ``'N'`` quedan afuera
+a propósito: son estados en vuelo que cambian solos, e importarlos sería
+fotografiar algo que ya no es cierto.
+
+### Empujar lo nuestro (099 + 151)
+
+```bash
+cmcourier sync recover --config prod.yaml --apply
+# sync recover [APPLY]: recuperadas=12 actualizadas=4 consistentes=980 \
+#   divergentes=1 unrecoverable=0
+```
+
+``--batch-id`` acota a un batch; **vacío = todos los batches del
+tracking**. Desde 151 compara el ESTADO y no la presencia de la clave:
+las filas presentes pero en ``'F'``/``'I'``/``'N'`` se ACTUALIZAN a
+``'O'`` (con guarda ``STSCOD <> 'O'``, así no pisa un terminal que otro
+proceso escribió mientras tanto). Pre-151 esas filas se contaban como
+``already_present`` — un nombre que sonaba a éxito — y quedaban
+divergentes para siempre.
 
 ### Preferir AS400 (más común)
 
@@ -297,8 +376,15 @@ propagan como ``As400CoordinationError`` inmediatamente.
   Confirmado con el operador en spec 034.
 * **``sync resolve --prefer-as400`` no escribe SQLite
   directamente** en 034 — el operador re-corre el pipeline con
-  ``--resume``. La escritura directa se puede agregar en un cambio
-  futuro si el workflow resulta cumbersome.
+  ``--resume``. Desde 151 el camino masivo de esa dirección SÍ escribe:
+  es ``sync pull``, que importa todo lo que el tracking local no tiene.
+  ``resolve`` queda para el caso de a uno.
+* **El ``pull`` no importa ``'I'`` ni ``'N'``**, y no tiene filtros de
+  rango (``--since`` / ``--system``). El operador eligió traer todo; si
+  con la tabla real resulta lento, los filtros son un agregado chico con
+  su propia spec — no se construyen por las dudas.
+* **Las divergencias no se resuelven solas.** Se reportan; las resuelve
+  el operador. Ver [La regla de autoridad](#la-regla-de-autoridad-151).
 * **``sync resolve --prefer-local`` requiere
   ``--cm-object-id`` explícito**. El operador lo saca de
   ``cmcourier batch show`` — evita extender

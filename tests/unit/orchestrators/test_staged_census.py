@@ -539,5 +539,13 @@ def test_every_reason_wp2_writes_has_a_bucket() -> None:
         # 150 REQ-004: lo escribe S2, después de resolver la identidad.
         ReasonCode.CLIENT_NOT_ACTIVE,
     }
-    assert written == set(ReasonCode)
-    assert all(isinstance(c.bucket, ReasonBucket) for c in written)
+    # 151 REQ-004: los códigos que NO escribe el pipeline. ``EXTERNAL_FAILURE``
+    # lo escribe ``cmcourier sync pull`` al importar una fila ``STSCOD='F'``
+    # de NIARVILOG: el documento lo intentó OTRO programa de la migración, así
+    # que ningún camino de WP2 puede producirlo. Se lista explícito para que
+    # este test siga siendo una guarda — si alguien agrega un código y se
+    # olvida de escribirlo en algún lado, la suite se pone roja igual.
+    escritos_fuera_del_pipeline = {ReasonCode.EXTERNAL_FAILURE}
+    assert written | escritos_fuera_del_pipeline == set(ReasonCode)
+    assert written.isdisjoint(escritos_fuera_del_pipeline)
+    assert all(isinstance(c.bucket, ReasonBucket) for c in set(ReasonCode))

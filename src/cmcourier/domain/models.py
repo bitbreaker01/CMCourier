@@ -214,6 +214,13 @@ class ReasonCode(StrEnum):
     CANCELLED = "CANCELLED"  # se canceló la corrida
     INDEXING_FAILED = "INDEXING_FAILED"  # la query de indexado explotó
     SOURCE_ROW_NOT_FOUND = "SOURCE_ROW_NOT_FOUND"  # el trigger no matcheó ninguna fila
+    # 151 REQ-004: ``sync pull`` importó una fila ``STSCOD='F'`` de
+    # NIARVILOG. El documento lo intentó OTRO programa de la migración (el
+    # proceso Java del banco) y se rompió: es un fallo de ejecución, sólo
+    # que no fue el nuestro. El ``EERRMSG`` del AS400 viaja en
+    # ``error_message``. No hay nada que reintentar de este lado sin
+    # decisión del operador — por eso se reporta, no se re-procesa solo.
+    EXTERNAL_FAILURE = "EXTERNAL_FAILURE"
 
     @property
     def bucket(self) -> ReasonBucket:
@@ -263,6 +270,7 @@ REASON_BUCKETS: Mapping[ReasonCode, ReasonBucket] = MappingProxyType(
         ReasonCode.CANCELLED: ReasonBucket.FALLO,
         ReasonCode.INDEXING_FAILED: ReasonBucket.FALLO,
         ReasonCode.SOURCE_ROW_NOT_FOUND: ReasonBucket.FALLO,
+        ReasonCode.EXTERNAL_FAILURE: ReasonBucket.FALLO,
     }
 )
 

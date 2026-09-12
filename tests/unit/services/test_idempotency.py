@@ -348,6 +348,23 @@ class TestPreflightSync:
             coord.preflight_sync(batch_scope={"0000001"}, raise_on_conflict=True)
         assert "0000001" in str(ei.value)
 
+    def test_the_message_does_not_advertise_a_flag_that_does_not_exist(self) -> None:
+        """151 REQ-005: publicitaba ``sync resolve ... (or --all)``. Ese
+        flag nunca existió — un mensaje de error que manda al operador a
+        tipear algo imposible es peor que no decir nada."""
+        sqlite = MagicMock()
+        sqlite.is_uploaded.return_value = True
+        as400 = MagicMock()
+        as400.cleanup_stale_in_progress.return_value = 0
+        as400.read_states_by_txns.return_value = {"0000001": _niarvilog_row(stscod="N")}
+        coord = IdempotencyCoordinator(sqlite_store=sqlite, as400_store=as400)
+        with pytest.raises(IdempotencyConflictError) as ei:
+            coord.preflight_sync(batch_scope={"0000001"}, raise_on_conflict=True)
+        message = str(ei.value)
+        assert "--all" not in message
+        # y lo que sí existe sigue estando
+        assert "--prefer-as400" in message and "--prefer-local" in message
+
 
 # ---------------------------------------------------------------------------
 # 096 — modo de sincronización periódico

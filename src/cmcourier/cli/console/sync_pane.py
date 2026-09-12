@@ -1,9 +1,14 @@
 """Panel SYNC de la consola (128): SQLite ↔ AS400 NIARVILOG a mano.
 
-Tres bloques sobre :mod:`cmcourier.cli.sync_ops` (la misma lógica que
-``cmcourier sync``): estado, recuperar (dry-run obligatorio antes de
-aplicar) y resolver una divergencia por TRNNUM. Todo corre en worker
-thread; el resultado se acumula en un panel de salida.
+Cuatro bloques sobre :mod:`cmcourier.cli.sync_ops` (la misma lógica que
+``cmcourier sync``): estado, recuperar (local → AS400), traer (AS400 →
+local, 151) y resolver una divergencia por TRNNUM. Los dos que escriben
+exigen un dry-run antes de aplicar. Todo corre en worker thread; el
+resultado se acumula en un panel de salida.
+
+151 REQ-001 — las dos direcciones NO se pisan: ``recuperar`` corrige lo
+que hicimos nosotros, ``traer`` sólo rellena huecos. Cuando los dos lados
+afirman cosas distintas, se reporta y decide el operador en RESOLVER.
 """
 
 from __future__ import annotations
@@ -22,12 +27,15 @@ from textual.widgets import Button, Input, Log, Select, Static
 
 from cmcourier.adapters.tracking.as400_niarvilog import As400CoordinationError
 from cmcourier.cli.sync_ops import (
+    StatusResult,
     SyncOpError,
+    sync_pull,
     sync_recover,
     sync_resolve,
     sync_status,
     sync_unavailable_reason,
 )
+from cmcourier.services.pull import PullResult
 from cmcourier.services.recovery import RecoveryResult, SyncProgress
 
 if TYPE_CHECKING:
@@ -55,6 +63,7 @@ class SyncPane(VerticalScroll):
     SyncPane .block { height: auto; border: solid $surface-lighten-2; padding: 0 1;
                       margin-bottom: 1; }
     SyncPane .block .title { text-style: bold; }
+    SyncPane .block .hint { color: $text-muted; }
     SyncPane .frow { height: 3; }
     SyncPane .frow Input { width: 34; }
     SyncPane .frow Select { width: 40; }
@@ -71,6 +80,9 @@ class SyncPane(VerticalScroll):
         # E4: `aplicar` sólo tras un dry-run del MISMO batch_id con filas.
         self._dry_batch: str | None = None
         self._dry_rows = 0
+        # 151: mismo contrato para el pull. No lleva batch_id: el pull
+        # barre la tabla del AS400 entera, no un batch nuestro.
+        self._pull_rows = 0
 
     # ------------------------------------------------------------ layout
 
@@ -82,19 +94,13 @@ class SyncPane(VerticalScroll):
         )
         yield Static("", id="sy-avail", markup=False)
         with Vertical(classes="block"):
-            yield Static("ESTADO — cleanup de in_progress vencidos + conectividad", classes="title")
-            with Horizontal(classes="frow"):
-                yield Button("estado (s)", id="sy-status", variant="primary")
-        with Vertical(classes="block"):
             yield Static(
-                "RECUPERAR — filas faltantes en NIARVILOG para docs ya subidos (099). "
-                "Simular primero; aplicar recién después.",
-                classes="title",
+                "ESTADO — cleanup de in_progress vencidos + divergencias (151)", classes="title"
             )
             with Horizontal(classes="frow"):
-                yield Input(placeholder="batch_id (vacío = todo el tracking)", id="sy-batch")
-                yield Button("simular", id="sy-dry")
-                yield Button("aplicar", id="sy-apply", variant="error", disabled=True)
+                yield Button("estado (s)", id="sy-status", variant="primary")
+        yield from self._compose_recover()
+        yield from self._compose_pull()
         with Vertical(classes="block"):
             yield Static("RESOLVER — una divergencia por TRNNUM", classes="title")
             with Horizontal(classes="frow"):
@@ -109,6 +115,41 @@ class SyncPane(VerticalScroll):
         # del ``Log`` porque éste sólo apendea: cada evento la reemplaza en
         # vez de acumular 20 líneas por fase. Se limpia al terminar la op.
         yield Static("", id="sy-progress", markup=False)
+
+    def _compose_recover(self) -> ComposeResult:
+        """Bloque local → AS400 (099/151)."""
+        with Vertical(classes="block"):
+            yield Static(
+                "RECUPERAR (local → AS400) — inserta las filas que faltan en NIARVILOG y "
+                "ACTUALIZA las desactualizadas (099/151). Simular primero; aplicar después.",
+                classes="title",
+            )
+            # 151 REQ-005: la capacidad de barrer TODOS los batches estaba
+            # desde siempre (``batch_id=None``); el operador no la veía
+            # porque el placeholder no entraba en el ancho del campo. Un
+            # feature que el operador no ve es un feature que no existe.
+            yield Static(
+                "batch_id: dejalo VACÍO para barrer TODOS los batches del tracking.",
+                id="sy-batch-hint",
+                classes="hint",
+            )
+            with Horizontal(classes="frow"):
+                yield Input(placeholder="batch_id (vacío = todos)", id="sy-batch")
+                yield Button("simular", id="sy-dry")
+                yield Button("aplicar", id="sy-apply", variant="error", disabled=True)
+
+    def _compose_pull(self) -> ComposeResult:
+        """151 REQ-004: bloque AS400 → local. Sin ``batch_id`` — el pull
+        barre la tabla del AS400 entera, no un batch nuestro."""
+        with Vertical(classes="block"):
+            yield Static(
+                "TRAER (AS400 → local) — importa lo que subió o rompió otro programa "
+                "de la migración (151). Nunca pisa un estado terminal local.",
+                classes="title",
+            )
+            with Horizontal(classes="frow"):
+                yield Button("simular", id="sy-pull-dry")
+                yield Button("aplicar", id="sy-pull-apply", variant="error", disabled=True)
 
     def on_mount(self) -> None:
         self._sync_objid_visibility()
@@ -138,9 +179,10 @@ class SyncPane(VerticalScroll):
 
     def _sync_buttons(self) -> None:
         enabled = self._available and not self._busy
-        for wid in ("#sy-status", "#sy-dry", "#sy-resolve"):
+        for wid in ("#sy-status", "#sy-dry", "#sy-pull-dry", "#sy-resolve"):
             self.query_one(wid, Button).disabled = not enabled
         self.query_one("#sy-apply", Button).disabled = not (enabled and self._apply_allowed())
+        self.query_one("#sy-pull-apply", Button).disabled = not (enabled and self._pull_rows > 0)
 
     def _apply_allowed(self) -> bool:
         return self._dry_rows > 0 and self._dry_batch == self._batch_id()
@@ -214,9 +256,24 @@ class SyncPane(VerticalScroll):
         config, secrets = self.console.config, self.console.state.creds.to_secrets()
         self._run(
             "estado",
-            lambda: sync_status(config, secrets),
-            lambda r: self._log(f"✔ estado: stale_cleaned={r.stale_cleaned} · AS400 responde"),
+            lambda: sync_status(config, secrets, on_progress=self._on_progress),
+            self._log_status,
         )
+
+    def _log_status(self, result: StatusResult) -> None:
+        """151 REQ-005: el estado REPORTA las divergencias. Antes decía que
+        lo hacía y sólo limpiaba los ``'I'`` vencidos."""
+        lines = [
+            f"✔ estado: stale_cleaned={result.stale_cleaned} "
+            f"escaneadas={result.scanned} importables={result.importable} "
+            f"divergentes={len(result.divergences)} · AS400 responde"
+        ]
+        lines.extend(f"  divergente {i.txn_num}: {i.reason}" for i in result.divergences[:8])
+        if len(result.divergences) > 8:
+            lines.append(f"  … y {len(result.divergences) - 8} divergencia(s) más")
+        if result.importable:
+            lines.append(f"  → {result.importable} fila(s) del AS400 faltan acá: usá TRAER.")
+        self._log("\n".join(lines))
 
     def dry_run_recover(self) -> None:
         if not self._available or self._busy:
@@ -225,7 +282,10 @@ class SyncPane(VerticalScroll):
         config, secrets = self.console.config, self.console.state.creds.to_secrets()
 
         def ok(result: RecoveryResult) -> None:
-            self._dry_batch, self._dry_rows = batch_id, len(result.recovered)
+            # 151 REQ-003: el apply escribe INSERT *y* UPDATE — las dos
+            # cuentan para habilitar `aplicar`.
+            self._dry_batch = batch_id
+            self._dry_rows = len(result.recovered) + len(result.updated)
             self._log(self._recover_report(result, apply=False))
 
         self._run(
@@ -244,10 +304,11 @@ class SyncPane(VerticalScroll):
         self.console.confirm(
             title="Aplicar recover en AS400",
             body=(
-                f"Se insertan {self._dry_rows} fila(s) en NIARVILOG "
-                f"({batch_id or 'todo el tracking'}). Esto ESCRIBE en el AS400."
+                f"Se escriben {self._dry_rows} fila(s) en NIARVILOG "
+                f"({batch_id or 'todo el tracking'}) — INSERT de las ausentes y "
+                "UPDATE a 'O' de las desactualizadas. Esto ESCRIBE en el AS400."
             ),
-            yes="insertar",
+            yes="escribir",
             no="cancelar",
             danger=True,
             confirm_text="PRD" if prd else None,
@@ -272,19 +333,99 @@ class SyncPane(VerticalScroll):
 
     @staticmethod
     def _recover_report(result: RecoveryResult, *, apply: bool) -> str:
+        # 151 REQ-003: los tres grupos por separado. ``already_present``
+        # escondía las filas DESACTUALIZADAS detrás de un conteo que sonaba
+        # a éxito — el operador creía que estaba todo bien.
         mode = "APPLY" if apply else "DRY-RUN"
         verbo = "recuperadas" if apply else "a recuperar"
         lines = [
             f"✔ recover [{mode}]: {verbo}={len(result.recovered)} "
-            f"already_present={len(result.already_present)} "
+            f"actualizadas={len(result.updated)} "
+            f"consistentes={len(result.consistent)} "
+            f"divergentes={len(result.divergent)} "
             f"unrecoverable={len(result.unrecoverable)}"
         ]
+        lines.extend(f"  divergente {i.txn_num}: {i.reason}" for i in result.divergent[:8])
+        if len(result.divergent) > 8:
+            lines.append(f"  … y {len(result.divergent) - 8} divergencia(s) más")
         lines.extend(f"  unrecoverable {i.txn_num}: {i.reason}" for i in result.unrecoverable[:8])
         if len(result.unrecoverable) > 8:
             lines.append(f"  … y {len(result.unrecoverable) - 8} más")
-        if not apply and result.recovered:
+        if result.divergent:
+            lines.append("  → las divergencias NO se tocan: resolvelas con RESOLVER.")
+        if not apply and (result.recovered or result.updated):
             lines.append("  → `aplicar` quedó habilitado para este batch_id.")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------ pull (151)
+
+    def dry_run_pull(self) -> None:
+        if not self._available or self._busy:
+            return
+        config, secrets = self.console.config, self.console.state.creds.to_secrets()
+
+        def ok(result: PullResult) -> None:
+            self._pull_rows = result.imported_uploaded + result.imported_failed
+            self._log(self._pull_report(result, apply=False))
+
+        self._run(
+            "simular pull (AS400 → local)",
+            lambda: sync_pull(config, secrets, apply=False, on_progress=self._on_progress),
+            ok,
+        )
+
+    def apply_pull(self) -> None:
+        if not self._available or self._busy or self._pull_rows <= 0:
+            return
+        prd = self.console.config.environment == "prd"
+        self.console.confirm(
+            title="Aplicar pull en el tracking local",
+            body=(
+                f"Se importan {self._pull_rows} fila(s) de NIARVILOG al tracking local, "
+                "bajo el batch sintético de importación. No se pisa ningún estado "
+                "terminal local."
+            ),
+            yes="importar",
+            no="cancelar",
+            danger=True,
+            confirm_text="PRD" if prd else None,
+            cb=lambda ok: self._do_apply_pull() if ok else None,
+        )
+
+    def _do_apply_pull(self) -> None:
+        config, secrets = self.console.config, self.console.state.creds.to_secrets()
+
+        def ok(result: PullResult) -> None:
+            # Un apply consume el dry-run: para repetir hay que simular de nuevo.
+            self._pull_rows = 0
+            self._log(self._pull_report(result, apply=True))
+
+        self._run(
+            "aplicar pull (AS400 → local)",
+            lambda: sync_pull(config, secrets, apply=True, on_progress=self._on_progress),
+            ok,
+        )
+
+    @staticmethod
+    def _pull_report(result: PullResult, *, apply: bool) -> str:
+        mode = "APPLY" if apply else "DRY-RUN"
+        lines = [
+            f"✔ pull [{mode}]: escaneadas={result.scanned} "
+            f"importadas_ok={result.imported_uploaded} "
+            f"importadas_fallidas={result.imported_failed} "
+            f"consistentes={result.consistent} "
+            f"divergentes={len(result.divergent)}"
+        ]
+        lines.extend(f"  divergente {i.txn_num}: {i.reason}" for i in result.divergent[:8])
+        if len(result.divergent) > 8:
+            lines.append(f"  … y {len(result.divergent) - 8} divergencia(s) más")
+        if result.divergent:
+            lines.append("  → las divergencias NO se pisan: resolvelas con RESOLVER.")
+        if not apply and (result.imported_uploaded or result.imported_failed):
+            lines.append("  → `aplicar` quedó habilitado para el pull.")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------ resolver
 
     def resolve(self) -> None:
         if not self._available or self._busy:
@@ -335,6 +476,8 @@ class SyncPane(VerticalScroll):
             "sy-status": self.run_status,
             "sy-dry": self.dry_run_recover,
             "sy-apply": self.apply_recover,
+            "sy-pull-dry": self.dry_run_pull,
+            "sy-pull-apply": self.apply_pull,
             "sy-resolve": self.resolve,
         }
         handler = handlers.get(event.button.id or "")

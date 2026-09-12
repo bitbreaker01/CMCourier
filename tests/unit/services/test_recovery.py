@@ -32,6 +32,18 @@ def _uploaded(txn: str = "0000001") -> UploadedRecord:
     )
 
 
+def _row(txn: str = "0000001", *, stscod: str = "O", objidn: str | None = None) -> MagicMock:
+    """151: una fila de NIARVILOG tal como la devuelve ``read_states_by_txns``.
+
+    Por default es la fila CONSISTENTE del txn (``'O'`` con el mismo
+    ``OBJIDN`` que ``_uploaded`` guarda en SQLite)."""
+    row = MagicMock()
+    row.trnnum = txn
+    row.stscod = stscod
+    row.objidn = f"cm-{txn}" if objidn is None else objidn
+    return row
+
+
 def _document(*, index7: str = "CC03", image_type: str = "B") -> MagicMock:
     doc = MagicMock()
     doc.index7 = index7
@@ -135,9 +147,9 @@ class TestRecoverHappyPath:
 
 
 class TestRecoverSkipsAndFailures:
-    def test_txn_already_in_as400_is_skipped(self) -> None:
+    def test_txn_already_consistent_in_as400_is_skipped(self) -> None:
         as400 = MagicMock()
-        as400.read_states_by_txns.return_value = {"0000001": object()}  # ya existe
+        as400.read_states_by_txns.return_value = {"0000001": _row("0000001")}
         rec = _recovery(
             uploaded=[_uploaded("0000001")],
             as400=as400,
@@ -147,7 +159,7 @@ class TestRecoverSkipsAndFailures:
 
         result = rec.recover(apply=True)
 
-        assert result.already_present == ["0000001"]
+        assert result.consistent == ["0000001"]
         assert result.recovered == []
         as400.insert_recovered_row.assert_not_called()
 
@@ -223,7 +235,7 @@ class TestBatchedExistenceCheck118:
         """118: N docs → UNA llamada batcheada, no N SELECTs."""
         as400 = MagicMock()
         txns = [f"{i:07d}" for i in range(50)]
-        as400.read_states_by_txns.return_value = {t: object() for t in txns}
+        as400.read_states_by_txns.return_value = {t: _row(t) for t in txns}
         rec = _recovery(
             uploaded=[_uploaded(t) for t in txns],
             as400=as400,
@@ -233,7 +245,7 @@ class TestBatchedExistenceCheck118:
 
         result = rec.recover(apply=True)
 
-        assert len(result.already_present) == 50
+        assert len(result.consistent) == 50
         as400.read_states_by_txns.assert_called_once()
         as400.read_state_by_txn.assert_not_called()
         as400.insert_recovered_row.assert_not_called()
@@ -261,8 +273,8 @@ class TestBatchedRvabrepLookup144:
         """144: N faltantes → UNA llamada a ``find_documents_by_txns`` con
         exactamente los txns faltantes; nunca ``find_document_by_txn``."""
         txns, as400, indexing, mapping = _missing_setup(120)
-        # uno ya presente: no debe pedirse a RVABREP
-        as400.read_states_by_txns.return_value = {txns[0]: object()}
+        # uno ya presente y consistente: no debe pedirse a RVABREP
+        as400.read_states_by_txns.return_value = {txns[0]: _row(txns[0])}
         rec = _recovery(
             uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
         )
@@ -272,18 +284,18 @@ class TestBatchedRvabrepLookup144:
         indexing.find_documents_by_txns.assert_called_once_with(txns[1:])
         indexing.find_document_by_txn.assert_not_called()
         assert result.recovered == txns[1:]
-        assert result.already_present == [txns[0]]
+        assert result.consistent == [txns[0]]
 
     def test_nothing_missing_skips_rvabrep_and_insert(self) -> None:
         txns, as400, indexing, mapping = _missing_setup(3)
-        as400.read_states_by_txns.return_value = {t: object() for t in txns}
+        as400.read_states_by_txns.return_value = {t: _row(t) for t in txns}
         rec = _recovery(
             uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
         )
 
         result = rec.recover(apply=True)
 
-        assert result.already_present == txns
+        assert result.consistent == txns
         indexing.find_documents_by_txns.assert_not_called()
         as400.insert_recovered_row.assert_not_called()
 
@@ -372,7 +384,7 @@ class TestProgress144:
 
     def test_dry_run_emits_read_phases_only(self) -> None:
         txns, as400, indexing, mapping = _missing_setup(3)
-        as400.read_states_by_txns.return_value = {txns[0]: object()}
+        as400.read_states_by_txns.return_value = {txns[0]: _row(txns[0])}
         events: list[SyncProgress] = []
         rec = _recovery(
             uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
@@ -457,6 +469,172 @@ class TestProgress144:
             uploaded=[_uploaded(t) for t in txns], as400=as400, indexing=indexing, mapping=mapping
         )
         assert rec.recover(apply=True).recovered == txns
+
+
+# ---------------------------------------------------------------------------
+# 151 REQ-003 — ``recover`` compara ESTADO, no presencia
+# ---------------------------------------------------------------------------
+
+
+class TestClasificacionPorEstado151:
+    """151 REQ-003: tres grupos donde antes había dos.
+
+    Pre-151 el recover miraba sólo la CLAVE (``txn in present``), así que
+    un documento ``S5_DONE`` local que en el AS400 había quedado en
+    ``'F'`` / ``'I'`` / ``'N'`` se contaba como ``already_present`` y se
+    dejaba divergente — con un nombre que sonaba a éxito.
+    """
+
+    def _recovery_for(self, present: dict[str, MagicMock]) -> tuple[As400Recovery, MagicMock]:
+        as400 = MagicMock()
+        as400.read_states_by_txns.return_value = present
+        as400.mark_uploaded_if_stale_by_txn.return_value = 1
+        indexing = MagicMock()
+        indexing.find_documents_by_txns.return_value = {"0000001": _document()}
+        mapping = MagicMock()
+        mapping.get_mapping.return_value = _mapping()
+        rec = _recovery(
+            uploaded=[_uploaded("0000001")], as400=as400, indexing=indexing, mapping=mapping
+        )
+        return rec, as400
+
+    def test_ausente_sigue_siendo_insert(self) -> None:
+        rec, as400 = self._recovery_for({})
+
+        result = rec.recover(apply=True)
+
+        assert result.recovered == ["0000001"]
+        assert result.updated == []
+        as400.insert_recovered_row.assert_called_once()
+        as400.mark_uploaded_if_stale_by_txn.assert_not_called()
+
+    @pytest.mark.parametrize("stscod", ["F", "I", "N"])
+    def test_presente_con_estado_desactualizado_se_actualiza(self, stscod: str) -> None:
+        rec, as400 = self._recovery_for({"0000001": _row("0000001", stscod=stscod)})
+
+        result = rec.recover(apply=True)
+
+        assert result.updated == ["0000001"]
+        assert result.recovered == []
+        assert result.consistent == []
+        # El UPDATE lleva el OBJIDN local y limpia el EERRMSG del fallo previo.
+        as400.mark_uploaded_if_stale_by_txn.assert_called_once_with(
+            trnnum="0000001", cm_object_id="cm-0000001"
+        )
+        as400.insert_recovered_row.assert_not_called()
+
+    def test_dry_run_no_emite_el_update_de_una_fila_desactualizada(self) -> None:
+        rec, as400 = self._recovery_for({"0000001": _row("0000001", stscod="F")})
+
+        result = rec.recover(apply=False)
+
+        assert result.updated == ["0000001"]  # el plan lo lista…
+        as400.mark_uploaded_if_stale_by_txn.assert_not_called()  # …pero no escribe
+
+    def test_presente_con_o_y_mismo_objidn_es_consistente(self) -> None:
+        rec, as400 = self._recovery_for({"0000001": _row("0000001")})
+
+        result = rec.recover(apply=True)
+
+        assert result.consistent == ["0000001"]
+        assert result.divergent == []
+        as400.insert_recovered_row.assert_not_called()
+        as400.mark_uploaded_if_stale_by_txn.assert_not_called()
+
+    def test_presente_con_o_y_otro_objidn_es_divergencia_y_no_se_toca(self) -> None:
+        """REQ-001: dos objetos en CM para un documento. Ninguna dirección
+        decide sola — se reporta y lo resuelve el operador."""
+        rec, as400 = self._recovery_for({"0000001": _row("0000001", objidn="cm-OTRO")})
+
+        result = rec.recover(apply=True)
+
+        assert [i.txn_num for i in result.divergent] == ["0000001"]
+        assert "cm-OTRO" in result.divergent[0].reason
+        assert result.consistent == []
+        assert result.updated == []
+        as400.insert_recovered_row.assert_not_called()
+        as400.mark_uploaded_if_stale_by_txn.assert_not_called()
+
+    def test_un_update_sin_filas_afectadas_es_no_recuperable(self) -> None:
+        """La guarda ``STSCOD <> 'O'`` no matcheó: otro proceso tocó la fila
+        entre nuestra lectura y el write. No se miente en el reporte."""
+        rec, as400 = self._recovery_for({"0000001": _row("0000001", stscod="F")})
+        as400.mark_uploaded_if_stale_by_txn.return_value = 0
+
+        result = rec.recover(apply=True)
+
+        assert result.updated == []
+        assert len(result.unrecoverable) == 1
+        assert result.unrecoverable[0].txn_num == "0000001"
+        assert "stale_update_no_rows" in result.unrecoverable[0].reason
+
+    def test_un_update_que_explota_no_aborta_el_resto(self) -> None:
+        as400 = MagicMock()
+        txns = ["0000001", "0000002", "0000003"]
+        as400.read_states_by_txns.return_value = {t: _row(t, stscod="F") for t in txns}
+
+        def update(*, trnnum: str, cm_object_id: str) -> int:  # noqa: ARG001
+            if trnnum == "0000002":
+                raise RuntimeError("AS400 boom")
+            return 1
+
+        as400.mark_uploaded_if_stale_by_txn.side_effect = update
+        rec = _recovery(
+            uploaded=[_uploaded(t) for t in txns],
+            as400=as400,
+            indexing=MagicMock(),
+            mapping=MagicMock(),
+        )
+
+        result = rec.recover(apply=True)
+
+        assert result.updated == ["0000001", "0000003"]
+        assert [i.txn_num for i in result.unrecoverable] == ["0000002"]
+
+    def test_los_desactualizados_no_van_a_rvabrep(self) -> None:
+        """Sólo los AUSENTES necesitan re-derivar DOCFRM / IMGTIP: el
+        UPDATE va por TRNNUM y no toca esas columnas."""
+        as400 = MagicMock()
+        as400.read_states_by_txns.return_value = {"0000001": _row("0000001", stscod="F")}
+        as400.mark_uploaded_if_stale_by_txn.return_value = 1
+        indexing = MagicMock()
+        rec = _recovery(
+            uploaded=[_uploaded("0000001")],
+            as400=as400,
+            indexing=indexing,
+            mapping=MagicMock(),
+        )
+
+        rec.recover(apply=True)
+
+        indexing.find_documents_by_txns.assert_not_called()
+
+    def test_los_cuatro_grupos_conviven_en_un_reporte(self) -> None:
+        as400 = MagicMock()
+        as400.mark_uploaded_if_stale_by_txn.return_value = 1
+        as400.read_states_by_txns.return_value = {
+            "0000002": _row("0000002", stscod="F"),  # stale
+            "0000003": _row("0000003"),  # consistent
+            "0000004": _row("0000004", objidn="cm-OTRO"),  # divergente
+        }
+        indexing = MagicMock()
+        indexing.find_documents_by_txns.return_value = {"0000001": _document()}
+        mapping = MagicMock()
+        mapping.get_mapping.return_value = _mapping()
+        rec = _recovery(
+            uploaded=[_uploaded(f"000000{i}") for i in (1, 2, 3, 4)],
+            as400=as400,
+            indexing=indexing,
+            mapping=mapping,
+        )
+
+        result = rec.recover(apply=True)
+
+        assert result.recovered == ["0000001"]
+        assert result.updated == ["0000002"]
+        assert result.consistent == ["0000003"]
+        assert [i.txn_num for i in result.divergent] == ["0000004"]
+        assert result.unrecoverable == []
 
 
 # ---------------------------------------------------------------------------

@@ -27,7 +27,7 @@ propagarse hacia arriba.
 
 from __future__ import annotations
 
-__all__ = ["SQLiteTrackingStore"]
+__all__ = ["EXTERNAL_IMPORT_BATCH", "SQLiteTrackingStore"]
 
 import logging
 import queue
@@ -103,7 +103,24 @@ _CENSUS_COLUMNS: tuple[str, ...] = ("reason_code", "id_rvi")
 
 # 096: batch_id sintético bajo el que el As400Reconciler importa docs
 # que otro sistema subió (no choca con UUIDs de corridas reales).
-_EXTERNAL_IMPORT_BATCH = "__as400_import__"
+#
+# 151 REQ-004: ``sync pull`` usa el MISMO batch — hay una sola convención
+# para "esto lo hizo otro programa", no dos. Va público porque el pull y
+# sus tests necesitan nombrarlo: un documento que subió (o rompió) otro
+# programa no es una exclusión nuestra y no puede ensuciar el censo de un
+# batch real.
+EXTERNAL_IMPORT_BATCH = "__as400_import__"
+_EXTERNAL_IMPORT_BATCH = EXTERNAL_IMPORT_BATCH
+
+# 151 REQ-004: los estados locales que afirman un desenlace FINAL de
+# subida. El pull los compara contra el ``STSCOD`` del AS400 para decidir
+# entre importar, no hacer nada, o reportar una divergencia.
+_TERMINAL_UPLOAD_STATUSES: tuple[str, ...] = ("S5_DONE", "S5_FAILED")
+
+# 151 REQ-004: tamaño de chunk del ``IN`` de ``terminal_states_by_txns``.
+# SQLite tiene tope de variables por sentencia (``SQLITE_MAX_VARIABLE_NUMBER``,
+# 999 en builds viejos) y el pull llega con lotes de la tabla entera.
+_IN_CHUNK_SIZE = 500
 
 _CREATE_MIGRATION_BATCH = """
 CREATE TABLE IF NOT EXISTS migration_batch (
@@ -693,6 +710,51 @@ class SQLiteTrackingStore(ITrackingStore):
             ),
         )
 
+    def record_external_failure(
+        self,
+        *,
+        txn_num: str,
+        file_name: str,
+        shortname: str,
+        cif: str,
+        system_id: str,
+        error_message: str,
+        id_rvi: str | None = None,
+    ) -> None:
+        """151 REQ-004: importa un doc que OTRO programa intentó y rompió.
+
+        Espejo de :meth:`record_external_upload` para las filas
+        ``STSCOD='F'`` de NIARVILOG: mismo batch sintético
+        (:data:`EXTERNAL_IMPORT_BATCH`), mismo ``INSERT OR IGNORE``
+        idempotente entre pasadas. Queda ``S5_FAILED`` con
+        ``reason_code = EXTERNAL_FAILURE`` (balde ``FALLO``) y el
+        ``EERRMSG`` del AS400 en ``error_message``.
+
+        REQ-001: esto sólo corre para documentos SIN fila terminal local
+        — el AS400 manda sobre lo que CMCourier nunca vio. Un doc que
+        nosotros procesamos no se pisa nunca desde acá."""
+        now = datetime.now().isoformat()
+        self._enqueue(
+            "INSERT OR IGNORE INTO migration_log ("
+            "trigger_shortname, trigger_cif, trigger_system_id, "
+            "rvabrep_txn_num, rvabrep_file_name, batch_id, status, created_at, "
+            "error_message, completed_at, reason_code, id_rvi"
+            ") VALUES (?, ?, ?, ?, ?, ?, 'S5_FAILED', ?, ?, ?, ?, ?)",
+            (
+                shortname,
+                cif,
+                system_id,
+                txn_num,
+                file_name,
+                EXTERNAL_IMPORT_BATCH,
+                now,
+                error_message,
+                now,
+                ReasonCode.EXTERNAL_FAILURE.value,
+                id_rvi,
+            ),
+        )
+
     def mark_stage_failed(
         self,
         txn_num: str,
@@ -761,16 +823,36 @@ class SQLiteTrackingStore(ITrackingStore):
     def uploaded_records(self, batch_id: str | None = None) -> list[UploadedRecord]:
         """099: devuelve los docs ``S5_DONE`` con los campos que la
         recuperación AS400 necesita. ``batch_id`` opcional para acotar
-        a un batch; ``None`` recorre todo el tracking."""
-        sql = (
-            "SELECT rvabrep_txn_num, cm_object_id, trigger_shortname, "
-            "trigger_cif, trigger_system_id, rvabrep_file_name, retry_count "
-            "FROM migration_log WHERE status = 'S5_DONE'"
-        )
+        a un batch; ``None`` recorre todo el tracking.
+
+        151 REQ-002: **una fila por TXN**. El índice único del tracking es
+        ``(rvabrep_txn_num, batch_id)``, así que el mismo documento
+        re-corrido en otro batch deja dos filas locales — y contra el
+        AS400 la PK es una sola. Sin deduplicar acá, ``recover`` armaba
+        dos INSERT contra la misma PK de NIARVILOG.
+
+        La elección es determinística: gana el ``completed_at`` más
+        reciente y, a igualdad, el ``id`` mayor. ``completed_at`` NULL
+        ordena último en ``DESC`` (semántica de SQLite), que es lo que
+        corresponde: una fila sin fecha de cierre no puede ganarle a una
+        que sí la tiene.
+        """
+        where = "status = 'S5_DONE'"
         params: tuple[object, ...] = ()
         if batch_id is not None:
-            sql += " AND batch_id = ?"
+            where += " AND batch_id = ?"
             params = (batch_id,)
+        sql = (
+            "SELECT rvabrep_txn_num, cm_object_id, trigger_shortname, "
+            "trigger_cif, trigger_system_id, rvabrep_file_name, retry_count FROM ("
+            "SELECT rvabrep_txn_num, cm_object_id, trigger_shortname, "
+            "trigger_cif, trigger_system_id, rvabrep_file_name, retry_count, id, "
+            "ROW_NUMBER() OVER ("
+            "PARTITION BY rvabrep_txn_num ORDER BY completed_at DESC, id DESC"
+            ") AS rn "
+            f"FROM migration_log WHERE {where}"
+            ") WHERE rn = 1 ORDER BY id"
+        )
         try:
             rows = self._read_pool.acquire().execute(sql, params).fetchall()
         except sqlite3.Error as exc:
@@ -787,6 +869,42 @@ class SQLiteTrackingStore(ITrackingStore):
             )
             for r in rows
         ]
+
+    def terminal_states_by_txns(self, txn_nums: list[str]) -> dict[str, str]:
+        """151 REQ-004: qué afirma el lado local sobre un lote de TXN.
+
+        Devuelve ``{txn: status}`` sólo para los que tienen una fila con
+        un desenlace FINAL de subida (:data:`_TERMINAL_UPLOAD_STATUSES`);
+        los que no aparecen son documentos que CMCourier nunca terminó de
+        procesar, y sobre esos manda el AS400 (REQ-001).
+
+        Cross-batch a propósito, igual que :meth:`is_uploaded`: el mismo
+        doc puede haber fallado en un batch y subido en otro. En ese caso
+        gana ``S5_DONE`` — el documento ESTÁ subido, y reportar una
+        divergencia contra un ``'O'`` del AS400 sería inventarla.
+
+        ``IN`` chunkeado (:data:`_IN_CHUNK_SIZE`): el pull llega con
+        lotes de la tabla entera y SQLite tiene tope de variables por
+        sentencia."""
+        result: dict[str, str] = {}
+        placeholders_status = ", ".join("?" * len(_TERMINAL_UPLOAD_STATUSES))
+        try:
+            conn = self._read_pool.acquire()
+            for start in range(0, len(txn_nums), _IN_CHUNK_SIZE):
+                chunk = txn_nums[start : start + _IN_CHUNK_SIZE]
+                sql = (
+                    "SELECT rvabrep_txn_num, MIN(status) FROM migration_log "
+                    f"WHERE status IN ({placeholders_status}) "
+                    f"AND rvabrep_txn_num IN ({', '.join('?' * len(chunk))}) "
+                    "GROUP BY rvabrep_txn_num"
+                )
+                rows = conn.execute(sql, (*_TERMINAL_UPLOAD_STATUSES, *chunk)).fetchall()
+                # ``MIN`` sobre los dos literales: 'S5_DONE' < 'S5_FAILED'
+                # alfabéticamente, así que DONE gana sin un CASE extra.
+                result.update({r[0]: r[1] for r in rows})
+        except sqlite3.Error as exc:
+            raise TrackingError("terminal_states_by_txns failed") from exc
+        return result
 
     def is_uploaded(self, txn_num: str) -> bool:
         try:

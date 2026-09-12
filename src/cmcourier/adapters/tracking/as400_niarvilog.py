@@ -40,7 +40,7 @@ __all__ = [
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, TypeVar
@@ -81,6 +81,15 @@ _MAX_BACKOFF_S = 300.0  # 5 minutos
 # 113: tamaño de chunk del ``IN`` de las lecturas batcheadas (paridad
 # con ``As400DataSource._IN_CHUNK_SIZE``).
 _READ_IN_CHUNK_SIZE = 1000
+
+# 151 REQ-004: filas por ``fetchmany`` en la lectura en streaming (paridad
+# con ``odbc_base._STREAM_BATCH_SIZE``, el patrón de la 148).
+_STREAM_BATCH_SIZE = 500
+
+# 151 REQ-004: los estados que ``sync pull`` trae. ``'I'`` y ``'N'`` quedan
+# FUERA a propósito: son estados en vuelo que cambian solos, e importarlos
+# sería fotografiar algo que ya no es cierto.
+_PULL_STATUSES: tuple[str, ...] = ("O", "F")
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,6 +452,40 @@ class As400NiarvilogStore:
                 result.setdefault(row.trnnum, row)
         return result
 
+    def stream_rows_by_status(
+        self, statuses: Sequence[str] = _PULL_STATUSES
+    ) -> Iterator[NiarvilogRow]:
+        """151 REQ-004: LISTA la tabla por ``STSCOD``, en streaming.
+
+        Es la primera lectura del AS400 que no parte de una lista de TXN
+        que el lado local ya conoce: hasta acá sólo se podía preguntar
+        "¿qué sabés de estos que yo ya tengo?", nunca "¿qué hay ahí?".
+        La usa ``sync pull`` para traer lo que hicieron los otros
+        programas de la migración.
+
+        **Sin rango y sin ``fetchall``.** El operador decidió traer todo,
+        pero "todo" no puede significar "todo en RAM": las filas salen de
+        a :data:`_STREAM_BATCH_SIZE` con ``fetchmany``, el mismo patrón
+        que ``odbc_base.query_stream``. El precedente es 148, donde
+        ``get_by_fields_in`` terminaba en ``fetchall()`` y por eso el
+        censo no podía barrer un sistema entero.
+
+        Sólo ``'O'`` y ``'F'`` por default: ``'I'`` y ``'N'`` son estados
+        EN VUELO que cambian solos, e importarlos sería fotografiar algo
+        que ya no es cierto.
+
+        Al ser un generator no ejecuta SQL hasta el primer ``next()``.
+        """
+        if not statuses:
+            return
+        c = self._cols
+        placeholders = ", ".join("?" * len(statuses))
+        sql = (
+            f"SELECT {c.select_list()} FROM {self._full_table()} "
+            f"WHERE {c.status} IN ({placeholders})"
+        )
+        yield from self._stream_read(sql, list(statuses), "niarvilog_stream_by_status")
+
     def mark_uploaded_by_txn(self, *, trnnum: str, cm_object_id: str) -> int:
         """Helper de fase 4 para ``sync resolve --prefer-local``.
 
@@ -459,6 +502,35 @@ class As400NiarvilogStore:
             f"WHERE {c.txn_num} = ?"
         )
         return self._execute_write(sql, [cm_object_id, trnnum], "niarvilog_mark_uploaded_by_txn")
+
+    def mark_uploaded_if_stale_by_txn(self, *, trnnum: str, cm_object_id: str) -> int:
+        """151 REQ-003: lleva a ``'O'`` una fila DESACTUALIZADA, por TRNNUM.
+
+        Hermano guardado de :meth:`mark_uploaded_by_txn`. Aquél es el
+        helper manual de ``sync resolve --prefer-local``: el operador pide
+        explícitamente pisar la fila y no lleva guarda de estado. El
+        ``recover`` es automático y masivo, así que necesita la guarda:
+
+        * ``STSCOD <> 'O'`` conserva la detección de race — si otro
+          programa llevó la fila a ``'O'`` entre nuestra lectura
+          batcheada y este write, ``rowcount == 0`` y el recover lo
+          reporta en vez de pisar el ``OBJIDN`` del otro productor;
+        * y hace el UPDATE idempotente: re-correr ``recover --apply`` no
+          vuelve a tocar lo que ya quedó bien.
+
+        Devuelve el row count (REQ-001: el lado local manda sobre los
+        documentos que CMCourier procesó — y estos son ``S5_DONE``
+        locales — pero "mandar" es corregir lo desactualizado, no pisar
+        un terminal ajeno)."""
+        c = self._cols
+        sql = (
+            f"UPDATE {self._full_table()} "
+            f"SET {c.status} = 'O', {c.cm_object_id} = ?, {c.error_message} = '' "
+            f"WHERE {c.txn_num} = ? AND {c.status} <> 'O'"
+        )
+        return self._execute_write(
+            sql, [cm_object_id, trnnum], "niarvilog_mark_uploaded_if_stale_by_txn"
+        )
 
     def insert_recovered_row(
         self,
@@ -622,6 +694,45 @@ class As400NiarvilogStore:
         except _pyodbc_error_type() as exc:
             # Error de pyodbc no transitorio — envolvemos y propagamos
             # inmediatamente.
+            raise As400CoordinationError(f"NIARVILOG {kind} failed: {exc}") from exc
+        finally:
+            cursor.close()
+
+    def _stream_read(self, sql: str, params: list[Any], kind: str) -> Iterator[NiarvilogRow]:
+        """151 REQ-004: lectura por ``fetchmany``, sin materializar.
+
+        A diferencia de :meth:`_execute_read` esto NO pasa por
+        ``_with_retry``, y es deliberado: un stream a medio consumir no se
+        puede reintentar sin re-entregar filas que el caller ya procesó.
+        Un ``OperationalError`` acá corta el pull con el error real — el
+        operador lo vuelve a correr, que es idempotente (REQ-001: el pull
+        sólo rellena huecos, nunca pisa un terminal local)."""
+        conn = self._connect()
+        cursor = conn.cursor()
+        t0 = time.monotonic()
+        yielded = 0
+        try:
+            cursor.execute(sql, params)
+            columns = [col[0] for col in cursor.description or []]
+            while True:
+                rows = cursor.fetchmany(_STREAM_BATCH_SIZE)
+                if not rows:
+                    _network_log.info(
+                        kind,
+                        extra={
+                            "kind": kind,
+                            "duration_ms": round((time.monotonic() - t0) * 1000.0, 3),
+                            "row_count": yielded,
+                            "sql_prefix": sql[:80],
+                        },
+                    )
+                    return
+                for raw in rows:
+                    yielded += 1
+                    yield self._row_from_dict(dict(zip(columns, raw, strict=False)))
+        except _pyodbc_operational_error_type() as exc:
+            raise As400UnreachableError(f"NIARVILOG {kind} unreachable: {exc}") from exc
+        except _pyodbc_error_type() as exc:
             raise As400CoordinationError(f"NIARVILOG {kind} failed: {exc}") from exc
         finally:
             cursor.close()

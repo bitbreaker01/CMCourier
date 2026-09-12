@@ -7,6 +7,7 @@ exit codes + the resolver's effect on SQLite.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
@@ -15,8 +16,10 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
+from cmcourier.adapters.tracking import SQLiteTrackingStore
 from cmcourier.adapters.tracking import as400_niarvilog as niarvilog_module
 from cmcourier.cli.app import main
+from cmcourier.domain.models import MigrationRecord, StageStatus
 
 pytestmark = pytest.mark.integration
 
@@ -55,6 +58,11 @@ class _FakeCursor:
         out = self._current_rows
         self._current_rows = []
         return out
+
+    def fetchmany(self, size: int) -> list[list[Any]]:
+        """151: la lectura en streaming de ``sync pull`` / ``sync status``."""
+        chunk, self._current_rows = self._current_rows[:size], self._current_rows[size:]
+        return chunk
 
     def fetchone(self) -> list[Any] | None:
         return self._current_rows.pop(0) if self._current_rows else None
@@ -220,6 +228,8 @@ class TestSyncHelp:
         assert result.exit_code == 0
         assert "resolve" in result.stdout
         assert "status" in result.stdout
+        assert "recover" in result.stdout
+        assert "pull" in result.stdout  # 151
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +253,199 @@ class TestSyncStatus:
         result = CliRunner().invoke(main, ["sync", "status", "--config", str(yaml_path)])
         assert result.exit_code == 0, result.stderr
         assert "stale_cleaned=0" in result.stdout
+
+    def test_reports_a_divergence_without_writing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """151 REQ-005: ``sync status`` decía reportar conflictos y sólo
+        limpiaba los ``'I'`` vencidos. Ahora los reporta de verdad."""
+        _set_as400_env(monkeypatch)
+        yaml_path = _write_yaml(tmp_path)
+        _seed_uploaded(tmp_path, txn="0000001", cm_object_id="cmis-abc")
+        cur = _FakeCursor()
+        cur.rowcount_queue = [0]
+        # 1) el cleanup de stale (UPDATE, sin filas); 2) el barrido, que
+        # devuelve la fila en 'F' mientras el tracking local dice S5_DONE.
+        cur.fetch_queue = [
+            ([], _COLUMNS),
+            ([_niarvilog_tuple(stscod="F")], _COLUMNS),
+        ]
+        _patch_pyodbc(monkeypatch, cur)
+
+        result = CliRunner().invoke(main, ["sync", "status", "--config", str(yaml_path)])
+
+        assert result.exit_code == 0, result.stderr
+        assert "divergentes=1" in result.stdout
+        assert "0000001" in result.output
+        # read-only: ni un INSERT ni un UPDATE al tracking (el único UPDATE
+        # que se ve es el cleanup de stale, que ya estaba).
+        selects = [e for e in cur.executions if e[0].lstrip().upper().startswith("SELECT")]
+        updates = [e for e in cur.executions if e[0].lstrip().upper().startswith("UPDATE")]
+        assert len(selects) == 1
+        assert len(updates) == 1 and "STSCOD = 'N'" in updates[0][0]
+
+
+# ---------------------------------------------------------------------------
+# 151 — sync pull y el ciclo completo de las dos direcciones
+# ---------------------------------------------------------------------------
+
+
+def _seed_uploaded(tmp_path: Path, *, txn: str, cm_object_id: str) -> None:
+    """Deja UN documento ``S5_DONE`` en el tracking local real."""
+    store = SQLiteTrackingStore(tmp_path / "tracking.db")
+    batch_id = store.start_batch(total_records=1)
+    record = MigrationRecord(
+        trigger_shortname="TESTCLIENT01",
+        trigger_cif="123456",
+        trigger_system_id="1",
+        rvabrep_txn_num=txn,
+        rvabrep_file_name="DAAAH9X4.001",
+        batch_id=batch_id,
+        status=StageStatus.S5_PENDING,
+        created_at=datetime(2026, 1, 1, 0, 0),
+    )
+    store.mark_stage_pending(record, StageStatus.S5_PENDING)
+    store.mark_stage_done(txn, batch_id, StageStatus.S5_DONE, cm_object_id=cm_object_id)
+    store.flush()
+    store.close()
+
+
+def _local_rows(tmp_path: Path) -> list[tuple[Any, ...]]:
+    conn = sqlite3.connect(tmp_path / "tracking.db")
+    rows = conn.execute(
+        "SELECT rvabrep_txn_num, status, batch_id, COALESCE(reason_code, ''), "
+        "COALESCE(cm_object_id, '') FROM migration_log ORDER BY rvabrep_txn_num"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+class TestSyncPull151:
+    def test_imports_what_another_program_did(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _set_as400_env(monkeypatch)
+        yaml_path = _write_yaml(tmp_path)
+        cur = _FakeCursor()
+        cur.fetch_queue = [
+            (
+                [
+                    _niarvilog_tuple(trnnum="0000009", stscod="O", objidn="cmis-otro"),
+                    _niarvilog_tuple(trnnum="0000010", stscod="F", objidn=""),
+                ],
+                _COLUMNS,
+            )
+        ]
+        _patch_pyodbc(monkeypatch, cur)
+
+        result = CliRunner().invoke(main, ["sync", "pull", "--config", str(yaml_path), "--apply"])
+
+        assert result.exit_code == 0, result.stderr
+        assert "importadas_ok=1" in result.stdout
+        assert "importadas_fallidas=1" in result.stdout
+        rows = _local_rows(tmp_path)
+        assert rows == [
+            ("0000009", "S5_DONE", "__as400_import__", "", "cmis-otro"),
+            ("0000010", "S5_FAILED", "__as400_import__", "EXTERNAL_FAILURE", ""),
+        ]
+
+    def test_dry_run_writes_nothing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _set_as400_env(monkeypatch)
+        yaml_path = _write_yaml(tmp_path)
+        cur = _FakeCursor()
+        cur.fetch_queue = [([_niarvilog_tuple(trnnum="0000009", stscod="O")], _COLUMNS)]
+        _patch_pyodbc(monkeypatch, cur)
+
+        result = CliRunner().invoke(main, ["sync", "pull", "--config", str(yaml_path)])
+
+        assert result.exit_code == 0, result.stderr
+        assert "[DRY-RUN]" in result.stdout
+        assert _local_rows(tmp_path) == []
+
+    def test_never_overwrites_a_local_terminal_state(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """REQ-001 de punta a punta: el AS400 dice ``'F'``, el tracking
+        local dice ``S5_DONE``. El pull NO lo pisa."""
+        _set_as400_env(monkeypatch)
+        yaml_path = _write_yaml(tmp_path)
+        _seed_uploaded(tmp_path, txn="0000001", cm_object_id="cmis-abc")
+        antes = _local_rows(tmp_path)
+        cur = _FakeCursor()
+        cur.fetch_queue = [([_niarvilog_tuple(stscod="F")], _COLUMNS)]
+        _patch_pyodbc(monkeypatch, cur)
+
+        result = CliRunner().invoke(main, ["sync", "pull", "--config", str(yaml_path), "--apply"])
+
+        assert result.exit_code == 0, result.stderr
+        assert "divergentes=1" in result.stdout
+        assert "importadas_ok=0" in result.stdout
+        assert _local_rows(tmp_path) == antes  # intacto
+
+
+class TestDosDireccionesE2E151:
+    def test_done_local_y_f_en_as400_queda_consistente_tras_recover_apply(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """El caso que motivó la spec, de punta a punta.
+
+        REQ-001: el lado local manda sobre los documentos que CMCourier
+        procesó. El doc está ``S5_DONE`` acá y quedó ``'F'`` allá, así que
+        ``recover`` lo ACTUALIZA (pre-151 lo contaba como
+        ``already_present`` y lo dejaba divergente para siempre). Después
+        de eso, las dos direcciones lo ven igual.
+        """
+        _set_as400_env(monkeypatch)
+        yaml_path = _write_yaml(tmp_path)
+        _seed_uploaded(tmp_path, txn="0000001", cm_object_id="cmis-abc")
+
+        # --- 1) recover --apply: la fila está, pero en 'F' → UPDATE a 'O'
+        cur = _FakeCursor()
+        cur.fetch_queue = [([_niarvilog_tuple(stscod="F")], _COLUMNS)]
+        cur.rowcount_queue = [0, 1]  # SELECT sin rowcount, UPDATE = 1 fila
+        _patch_pyodbc(monkeypatch, cur)
+
+        result = CliRunner().invoke(
+            main, ["sync", "recover", "--config", str(yaml_path), "--apply"]
+        )
+
+        assert result.exit_code == 0, result.stderr
+        assert "actualizadas=1" in result.stdout
+        assert "recuperadas=0" in result.stdout  # no era un INSERT: la fila estaba
+        update = next(e for e in cur.executions if e[0].lstrip().upper().startswith("UPDATE"))
+        assert "STSCOD = 'O'" in update[0]
+        assert "STSCOD <> 'O'" in update[0]  # la guarda: no pisa un terminal ajeno
+        assert update[1] == ["cmis-abc", "0000001"]
+
+        # --- 2) con el AS400 ya en 'O', las dos direcciones lo ven igual
+        cur2 = _FakeCursor()
+        cur2.fetch_queue = [
+            ([_niarvilog_tuple(stscod="O", objidn="cmis-abc")], _COLUMNS),  # recover
+            ([_niarvilog_tuple(stscod="O", objidn="cmis-abc")], _COLUMNS),  # pull
+        ]
+        _patch_pyodbc(monkeypatch, cur2)
+
+        recover_again = CliRunner().invoke(main, ["sync", "recover", "--config", str(yaml_path)])
+        pull_after = CliRunner().invoke(main, ["sync", "pull", "--config", str(yaml_path)])
+
+        assert recover_again.exit_code == 0, recover_again.stderr
+        assert "consistentes=1" in recover_again.stdout
+        assert "divergentes=0" in recover_again.stdout
+        assert pull_after.exit_code == 0, pull_after.stderr
+        assert "consistentes=1" in pull_after.stdout
+        assert "divergentes=0" in pull_after.stdout
 
 
 # ---------------------------------------------------------------------------

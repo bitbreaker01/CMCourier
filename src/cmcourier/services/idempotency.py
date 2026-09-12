@@ -328,7 +328,10 @@ class IdempotencyCoordinator:
                 "AS400 vs SQLite conflict on "
                 f"{len(conflicts)} txn(s): {', '.join(conflicts[:5])}"
                 + ("..." if len(conflicts) > 5 else "")
+                # 151 REQ-005: el ``(or --all)`` se fue. Ese flag no existe
+                # y nunca existió — mandar al operador a tipear algo
+                # imposible es peor que no decirle nada.
                 + ". Resolve with `cmcourier sync resolve <txn> "
-                "--prefer-as400|--prefer-local` (or --all)."
+                "--prefer-as400|--prefer-local`."
             )
         return report

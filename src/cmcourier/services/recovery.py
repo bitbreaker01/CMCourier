@@ -31,7 +31,7 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
-from cmcourier.adapters.tracking.as400_niarvilog import As400NiarvilogStore
+from cmcourier.adapters.tracking.as400_niarvilog import As400NiarvilogStore, NiarvilogRow
 from cmcourier.adapters.tracking.sqlite import SQLiteTrackingStore, UploadedRecord
 from cmcourier.domain.exceptions import IdentityResolutionError, IDRViNotMappedError
 from cmcourier.domain.models import RVABREPDocument
@@ -68,12 +68,40 @@ class RecoveryItem:
 class RecoveryResult:
     """Resultado de una corrida de recuperación.
 
-    En dry-run (``apply=False``), ``recovered`` lista los txn que se
-    insertarían — el INSERT no se ejecuta."""
+    En dry-run (``apply=False``), ``recovered`` y ``updated`` listan los
+    txn que se insertarían / actualizarían — no se escribe nada.
+
+    151 REQ-003: donde antes había dos grupos (``recovered`` /
+    ``already_present``) ahora hay cuatro. El viejo ``already_present``
+    mezclaba las filas consistentes con las DESACTUALIZADAS detrás de un
+    conteo que sonaba a éxito: un doc ``S5_DONE`` local que en el AS400
+    había quedado en ``'F'`` se reportaba como "ya presente" y se dejaba
+    divergente para siempre.
+
+    * ``recovered`` — ausentes en NIARVILOG: INSERT ``'O'``.
+    * ``updated`` — presentes con ``STSCOD != 'O'``: UPDATE a ``'O'``.
+    * ``consistent`` — presentes con ``'O'`` y el MISMO ``OBJIDN``: nada.
+    * ``divergent`` — presentes con ``'O'`` y OTRO ``OBJIDN``: dos
+      objetos en CM para el mismo documento. No se toca (REQ-001:
+      ninguna dirección decide sola), lo resuelve el operador.
+    """
 
     recovered: list[str] = field(default_factory=list)
-    already_present: list[str] = field(default_factory=list)
+    updated: list[str] = field(default_factory=list)
+    consistent: list[str] = field(default_factory=list)
+    divergent: list[RecoveryItem] = field(default_factory=list)
     unrecoverable: list[RecoveryItem] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class _Classified:
+    """151 REQ-003: el reparto de los docs ``S5_DONE`` locales contra el
+    estado real de NIARVILOG."""
+
+    missing: list[UploadedRecord] = field(default_factory=list)
+    stale: list[UploadedRecord] = field(default_factory=list)
+    consistent: list[str] = field(default_factory=list)
+    divergent: list[RecoveryItem] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +115,40 @@ class _InsertPlan:
     tipidn: str
     # 147 REQ-004: ``None`` ⇒ NULL. Nunca un ``0`` inventado.
     ctenum: int | None = None
+
+
+def _classify(records: list[UploadedRecord], present: dict[str, NiarvilogRow]) -> _Classified:
+    """151 REQ-003: reparte los ``S5_DONE`` locales según el ESTADO real de
+    NIARVILOG, no según la mera presencia de la clave.
+
+    ``read_states_by_txns`` siempre devolvió el ``STSCOD``; hasta 151 el
+    recover lo descartaba y sólo miraba ``txn in present``.
+
+    REQ-001 aplicado: el lado local manda sobre los documentos que
+    CMCourier procesó — y estos son todos ``S5_DONE`` locales —, así que
+    una fila ausente o desactualizada se corrige. Pero un ``'O'`` con OTRO
+    ``OBJIDN`` no es "desactualizado": es el AS400 afirmando que existe un
+    objeto en CM que no es el nuestro. Ahí ninguna dirección decide sola,
+    se reporta.
+    """
+    groups = _Classified()
+    for rec in records:
+        row = present.get(rec.txn_num)
+        if row is None:
+            groups.missing.append(rec)
+        elif row.stscod != "O":
+            groups.stale.append(rec)
+        elif row.objidn == rec.cm_object_id:
+            groups.consistent.append(rec.txn_num)
+        else:
+            groups.divergent.append(
+                RecoveryItem(
+                    rec.txn_num,
+                    f"objidn_mismatch: AS400 STSCOD='O' OBJIDN={row.objidn!r} "
+                    f"vs local cm_object_id={rec.cm_object_id!r}",
+                )
+            )
+    return groups
 
 
 class As400Recovery:
@@ -129,48 +191,66 @@ class As400Recovery:
         apply: bool = False,
         on_progress: Callable[[SyncProgress], None] | None = None,
     ) -> RecoveryResult:
-        """Reconcilia SQLite → AS400 por txn.
-
-        Para cada doc ``S5_DONE`` que NIARVILOG no tiene, re-deriva los
-        campos faltantes e inserta la fila terminal. ``apply=False``
-        (default) es dry-run: arma el plan sin escribir AS400.
-        ``on_progress`` (144) recibe un :class:`SyncProgress` al empezar
-        cada fase y, en ``insertando``, cada 50 docs y al final."""
+        """Reconcilia SQLite → AS400 por txn: INSERTa las filas ausentes
+        (re-derivando los campos que SQLite no guarda) y ACTUALIZA las
+        desactualizadas (151 REQ-003). ``apply=False`` (default) es
+        dry-run. ``on_progress`` (144) recibe un :class:`SyncProgress` al
+        empezar cada fase y, al escribir, cada 50 docs y al final."""
         emit = ProgressEmitter(on_progress)
         emit("leyendo tracking", 0, 0)
         records = self._sqlite.uploaded_records(batch_id)
-        # 118: el chequeo de existencia es batcheado (IN chunkeado, 113)
-        # — pre-118 era un SELECT por doc, y en el caso común (casi todo
-        # ya presente) ese chequeo era el ÚNICO trabajo por doc. Si AS400
-        # está caído, esto falla de entrada con el error real — mejor
-        # que 100k `unrecoverable` idénticos.
+        # 118: el chequeo de existencia es batcheado (IN chunkeado, 113) —
+        # pre-118 era un SELECT por doc. Si AS400 está caído, esto falla de
+        # entrada con el error real, no con 100k `unrecoverable` idénticos.
         emit("consultando NIARVILOG", 0, len(records))
         present = self._as400.read_states_by_txns([r.txn_num for r in records])
-        already_present = [r.txn_num for r in records if r.txn_num in present]
-        missing = [r for r in records if r.txn_num not in present]
-        # 144: las filas RVABREP de TODOS los faltantes en una llamada.
-        emit("consultando RVABREP", 0, len(missing))
+        # 151 REQ-003: se compara el ESTADO, no la presencia de la clave.
+        groups = _classify(records, present)
+        # 144: las filas RVABREP de TODOS los faltantes en una llamada. Los
+        # `stale` no pasan por acá: el UPDATE va por TRNNUM y no toca
+        # DOCFRM / IMGTIP, así que no hay nada que re-derivar.
+        emit("consultando RVABREP", 0, len(groups.missing))
         documents: dict[str, RVABREPDocument] = {}
-        if missing:
-            documents = self._indexing.find_documents_by_txns([r.txn_num for r in missing])
-        plans, unrecoverable = self._plan(missing, documents)
-        if apply:
-            recovered, failed = self._insert_all(plans, emit)
-            unrecoverable.extend(failed)
-        else:
-            recovered = [p.rec.txn_num for p in plans]
+        if groups.missing:
+            documents = self._indexing.find_documents_by_txns([r.txn_num for r in groups.missing])
+        plans, unrecoverable = self._plan(groups.missing, documents)
+        recovered, updated = self._write_or_plan(plans, groups.stale, unrecoverable, emit, apply)
         _log.info(
-            "recover: %d a recuperar, %d ya presentes, %d no recuperables (apply=%s)",
+            "recover: %d a insertar, %d a actualizar, %d consistentes, "
+            "%d divergentes, %d no recuperables (apply=%s)",
             len(recovered),
-            len(already_present),
+            len(updated),
+            len(groups.consistent),
+            len(groups.divergent),
             len(unrecoverable),
             apply,
         )
         return RecoveryResult(
             recovered=recovered,
-            already_present=already_present,
+            updated=updated,
+            consistent=groups.consistent,
+            divergent=groups.divergent,
             unrecoverable=unrecoverable,
         )
+
+    def _write_or_plan(
+        self,
+        plans: list[_InsertPlan],
+        stale: list[UploadedRecord],
+        unrecoverable: list[RecoveryItem],
+        emit: ProgressEmitter,
+        apply: bool,
+    ) -> tuple[list[str], list[str]]:
+        """Ejecuta (``apply=True``) o sólo enumera (dry-run) las dos
+        escrituras del recover. ``unrecoverable`` se extiende in-place con
+        los txn que fallaron — un txn malo no aborta al resto."""
+        if not apply:
+            return [p.rec.txn_num for p in plans], [r.txn_num for r in stale]
+        recovered, failed = self._insert_all(plans, emit)
+        unrecoverable.extend(failed)
+        updated, update_failed = self._update_all(stale, emit)
+        unrecoverable.extend(update_failed)
+        return recovered, updated
 
     def _plan(
         self, missing: list[UploadedRecord], documents: dict[str, RVABREPDocument]
@@ -225,26 +305,78 @@ class As400Recovery:
         tiene su conexión (``ThreadLocalConnectionPool``); la semántica
         sigue siendo por fila. ``recovered`` conserva el orden del
         tracking aunque los INSERT terminen desordenados."""
-        total = len(plans)
-        emit("insertando", 0, total)
+        return self._run_writes(
+            "insertando", [p.rec.txn_num for p in plans], lambda i: self._insert_one(plans[i]), emit
+        )
+
+    def _update_all(
+        self, stale: list[UploadedRecord], emit: ProgressEmitter
+    ) -> tuple[list[str], list[RecoveryItem]]:
+        """151 REQ-003: lleva a ``'O'`` las filas presentes pero
+        desactualizadas. Mismo pool acotado y misma semántica por fila que
+        los INSERT — un txn que falla no aborta al resto.
+
+        Sin filas `stale` no emite fase: el operador no tiene por qué ver
+        un ``actualizando 0/0`` en cada corrida."""
+        if not stale:
+            return [], []
+        return self._run_writes(
+            "actualizando", [r.txn_num for r in stale], lambda i: self._update_one(stale[i]), emit
+        )
+
+    def _run_writes(
+        self,
+        phase: str,
+        txns: list[str],
+        work: Callable[[int], RecoveryItem | None],
+        emit: ProgressEmitter,
+    ) -> tuple[list[str], list[RecoveryItem]]:
+        """144/151: el pool acotado que comparten INSERT y UPDATE.
+
+        ``work`` recibe el índice del ítem y devuelve ``None`` si salió
+        bien. La lista de OK conserva el orden del tracking aunque los
+        writes terminen desordenados — el reporte es determinista."""
+        total = len(txns)
+        emit(phase, 0, total)
         outcomes: list[RecoveryItem | None] = [None] * total
         done = 0
         with ThreadPoolExecutor(
             max_workers=min(self._write_workers, max(1, total)), thread_name_prefix="recover-w"
         ) as pool:
             futures: dict[Future[RecoveryItem | None], int] = {
-                pool.submit(self._insert_one, plan): i for i, plan in enumerate(plans)
+                pool.submit(work, i): i for i in range(total)
             }
             for future in as_completed(futures):
                 outcomes[futures[future]] = future.result()
                 done += 1
                 if done % _INSERT_PROGRESS_EVERY == 0:
-                    emit("insertando", done, total)
+                    emit(phase, done, total)
         if done % _INSERT_PROGRESS_EVERY != 0:
-            emit("insertando", done, total)
-        recovered = [p.rec.txn_num for p, o in zip(plans, outcomes, strict=True) if o is None]
+            emit(phase, done, total)
+        ok = [t for t, o in zip(txns, outcomes, strict=True) if o is None]
         failed = [o for o in outcomes if o is not None]
-        return recovered, failed
+        return ok, failed
+
+    def _update_one(self, rec: UploadedRecord) -> RecoveryItem | None:
+        """151 REQ-003: UN UPDATE guardado; ``None`` si salió bien.
+
+        ``rowcount == 0`` significa que la guarda ``STSCOD <> 'O'`` no
+        matcheó: otro proceso llevó la fila a ``'O'`` entre nuestra lectura
+        batcheada y este write. No es un éxito y no se reporta como tal."""
+        try:
+            rowcount = self._as400.mark_uploaded_if_stale_by_txn(
+                trnnum=rec.txn_num, cm_object_id=rec.cm_object_id
+            )
+        except Exception as exc:  # noqa: BLE001 — un txn malo no aborta el resto
+            _log.exception("recover: UPDATE de txn=%s falló inesperadamente", rec.txn_num)
+            return RecoveryItem(rec.txn_num, f"error: {exc}")
+        if rowcount < 1:
+            return RecoveryItem(
+                rec.txn_num,
+                "stale_update_no_rows: la fila dejó de estar desactualizada entre "
+                "la lectura y el UPDATE (otro proceso la tocó)",
+            )
+        return None
 
     def _insert_one(self, plan: _InsertPlan) -> RecoveryItem | None:
         """Un INSERT; ``None`` si salió bien. Nunca levanta: el fallo
