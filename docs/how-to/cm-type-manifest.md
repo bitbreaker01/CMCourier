@@ -157,7 +157,22 @@ Cruza manifest ↔ YAML (`metadata.field_sources`) ↔ CSV
   (valor fijo o patrón de validación) excede el `max_length` del CM;
   propiedad `usar` de tipo `datetime`/`integer`/`boolean` cuya fuente es
   un valor fijo que no parsea; un `field_aliases` colgado (más abajo).
-- **INFO**: entradas de `field_sources` que ningún tipo **auditado** usa.
+- **INFO**: entradas de `field_sources` que ningún tipo **auditado** usa;
+  un `default_value` que —ya formateado con el `format` de campo— no
+  matchea NINGÚN `allowed_pattern` de sus fuentes (149). Este último es
+  INFO y no WARNING a propósito: un default deliberadamente distinto de
+  los datos reales (un marcador `000000` que después se busca y se
+  corrige) es una técnica legítima. El check informa, no juzga. Sale una
+  vez por campo, con los patrones listados en orden de config:
+
+  ```
+  metadata.field_sources.BAC_Num_Cuenta_Tarjeta: el default '000000' no matchea
+  ningún allowed_pattern de sus fuentes ('^[0-9]{14,16}$')
+  ```
+
+  Es la red de seguridad que 149 le sacó al runtime, donde el default se
+  validaba en silencio contra el patrón de la PRIMERA fuente y mataba
+  documentos por un error de config.
 
 #### Qué tipos se auditan: `--scope`
 

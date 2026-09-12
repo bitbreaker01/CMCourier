@@ -319,8 +319,8 @@ Todo verde. El batch quedó cerrado, idempotente, auditable.
 | `RVABREPDeletedError` | S1 | Doc tiene código de borrado — no es fallo, va a `S1_FILTERED` | Es por diseño; nada que hacer |
 | `RVABREPDuplicateError` | S1 | Múltiples filas matchean | Limpiar RVABREP o filtrar por más columnas |
 | `IDRViNotMappedError` | S2 | El código RVI no está en el mapping CSV | Agregarlo al `MapeoRVI_CM.csv` |
-| `SourceFailedError` | S3 | Una fuente de metadata falló | Chequear conectividad / paths |
-| `DefaultValidationFailedError` | S3 | Una propiedad no resolvió y no hay `default_value` | Agregar default o arreglar la cadena |
+| `SourceFailedError` | S3 | Toda la cadena de una propiedad falló y no hay `default_value` | Agregar default o arreglar la cadena |
+| `DefaultValidationFailedError` | S3 | **Deprecada (149)**: el runtime ya no la levanta — el `default_value` no se valida | Nada. Si el default no matchea los patrones de sus fuentes, `types check` lo dice como INFO |
 | `SourceFileMissingError` | S4 | El archivo no existe en `source_root` | Restaurar el archivo o ajustar el path |
 | `PDFAssemblyFailedError` | S4 | `img2pdf`/`Pillow`/`PyPDF2` rompió | Logs te dan el detalle; TIFFs rotos típicamente |
 | `CMISClientError` | S5 | 4xx del CMIS (auth, permisos, tipo inexistente) | `doctor --check cm-targets`; chequear credenciales |

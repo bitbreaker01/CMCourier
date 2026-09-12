@@ -17,7 +17,7 @@ CMCourier separa el ciclo de vida en **siete stages explícitos**, con contratos
 | S0 | Trigger acquisition | Sacar triggers de la fuente (CSV/RVABREP/local-scan) | `S0Strategy` (4 implementaciones) | `TriggerError` |
 | S1 | Indexing | Querear RVABREP, descartar borrados (`ABACST`), expandir a `RVABREPDocument`s | `IndexingService` | `RVABREPNotFoundError`, `RVABREPDeletedError`, `RVABREPDuplicateError` |
 | S2 | Mapping | Resolver ID RVI → CM type + folder destino | `MappingService` | `IDRViNotMappedError` |
-| S3 | Metadata resolution | Resolver cada campo por la cascada de fuentes | `MetadataService` | `SourceFailedError`, `DefaultValidationFailedError` |
+| S3 | Metadata resolution | Resolver cada campo por la cascada de fuentes | `MetadataService` | `SourceFailedError` |
 | S4 | Assembly | Validar archivos fuente y ensamblar el PDF | `PdfAssembler` (+ `ProcessPoolExecutor` post-066) | `SourceFileMissingError`, `PDFAssemblyFailedError` |
 | S5 | Upload | POST a CMIS Browser Binding con retry/circuit breaker | `CmisUploader` (httpx HTTP/2) | `CMISClientError`, `CMISServerError`, `RetriesExhaustedError` |
 | S6 | Tracking | Escribir estado a SQLite (y opcionalmente AS400 NIARVILOG) | `SQLiteTrackingStore`, `As400NiarvilogSync` | `TrackingError` (no propaga) |
@@ -136,7 +136,7 @@ Se evaluó y se descartó darle etapa propia (una "S1.5") por costo: habría sig
 
 ### S3 — Metadata resolution
 
-**Qué hace**: cada campo del `cm_object_type` resultante de S2 tiene una lista de **fuentes** y un valor por defecto. Las fuentes se prueban en orden — la primera que devuelve un valor válido gana. Si todas fallan, se prueba el default. Si el default tampoco pasa validación, se levanta `DefaultValidationFailedError`.
+**Qué hace**: cada campo del `cm_object_type` resultante de S2 tiene una lista de **fuentes** y un valor por defecto. Las fuentes se prueban en orden — la primera que devuelve un valor válido gana. Si todas fallan se usa el `default_value`, al que se le aplica el `format` de campo (146) pero **no se lo valida contra nada** (149): el default lo escribe una persona a mano en el YAML, así que un default malo es un error de CONFIG y se arregla editando el archivo, no abortando documentos en producción. Si no hay `default_value`, se levanta `SourceFailedError`. La red de seguridad la corre `types check`, que informa (INFO) cuando el default ya formateado no matchea ningún `allowed_pattern` de sus fuentes.
 
 Las fuentes pueden ser:
 - `trigger:<campo>` — sacar del trigger original.
@@ -150,7 +150,7 @@ Con `prefetch_enabled: True` (default), los CSV de metadatos se pre-cargan en me
 
 **Dónde corre**: mismo thread que S1/S2. Es mixto — CSV es en memoria (rápido), AS400 es red (lento). De ahí que el cache exista.
 
-**Qué tira**: `SourceFailedError`, `DefaultValidationFailedError`, `MetadataError`.
+**Qué tira**: `SourceFailedError`, `MetadataError`. (`DefaultValidationFailedError` quedó deprecada en 149: el runtime ya no la levanta.)
 
 **Qué deja en tracking**: `S3_PENDING` / `S3_DONE` / `S3_FAILED`.
 

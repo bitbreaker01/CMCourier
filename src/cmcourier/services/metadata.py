@@ -41,7 +41,6 @@ from typing import Literal
 from cmcourier.config.schema import split_field_reference, split_lookup_source_type
 from cmcourier.domain.exceptions import (
     ConfigurationError,
-    DefaultValidationFailedError,
     MetadataError,
     SourceFailedError,
 )
@@ -656,13 +655,27 @@ class MetadataService:
         fsc: FieldSourceConfig,
         attempts: list[str] | None = None,
     ) -> str:
-        """El `default` del campo, ya formateado (146).
+        """El `default` del campo, ya formateado (146) y SIN validar (149).
 
-        El orden es formatear y DESPUÉS validar, y es deliberado: el
-        default se valida contra el patrón de la PRIMERA fuente, así que
-        un ``default_value: "0"`` con un ``format`` de campo
-        ``pad_left: {width: 9}`` llega como ``"000000000"`` y pasa un
-        ``^\\d{9}$`` que crudo lo mataría.
+        149 REQ-001: el default se FORMATEA pero no se valida contra nada.
+        Pre-149 se validaba contra el patrón de la PRIMERA fuente, y eso
+        estaba mal por tres motivos: era magia implícita (nada en el YAML
+        decía que el default se validaba, ni contra qué), era un
+        acoplamiento POSICIONAL (reordenar las fuentes —algo que se hace
+        por rendimiento o por prioridad de negocio— cambiaba en silencio
+        contra qué se juzgaba el default) y mataba documentos en
+        producción por un error de CONFIG, que se arregla editando un
+        archivo y no abortando a las tres de la mañana.
+
+        El ``format`` de campo SÍ se sigue aplicando (146 REQ-003):
+        formatear es una transformación que el operador DECLARÓ, validar
+        es un juicio sobre un dato ajeno. Un ``default_value: "0"`` con
+        ``format: {pad_left: {width: 9}}`` sigue saliendo ``"000000000"``.
+
+        La red de seguridad se mudó a ``types check`` (149 REQ-002), que
+        emite un INFO cuando el default —ya formateado— no matchea ningún
+        ``allowed_pattern`` de sus fuentes. Sin ``default_value`` el
+        contrato no cambia: ``SourceFailedError``.
         """
         if fsc.default_value is None:
             _logger.warning(
@@ -673,14 +686,6 @@ class MetadataService:
                 attempts.append(f"{canonical_field} <- default: none configured")
             raise SourceFailedError(field_name=canonical_field, source=_ALL_SOURCES_SENTINEL)
         default = apply_format(fsc.default_value, fsc.format)
-        first_validation = fsc.sources[0].validation if fsc.sources else None
-        if not _validates(default, first_validation):
-            if attempts is not None:
-                attempts.append(f"{canonical_field} <- default: failed validation")
-            raise DefaultValidationFailedError(
-                field_name=canonical_field,
-                default_value=default,
-            )
         if attempts is not None:
             attempts.append(f"{canonical_field} <- default: used")
         return default

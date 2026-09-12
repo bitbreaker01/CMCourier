@@ -281,7 +281,7 @@ Tres cosas que se confunden seguido, y que el schema te va a rebotar al cargar p
 2. **Las fuentes de `metadata.sources` se identifican con `alias`, no con `name`,** y el CSV va en `csv_path`, no en `path`. No existe `key_columns`.
 3. **El prefijo tiene que coincidir con el `kind` de la fuente.** Si declarás `clientes` con `kind: csv`, `source_type: "mssql:clientes"` es error de carga — el schema lo valida (130), porque la resolución es por alias y un prefijo mentiroso no avisaría nunca en runtime.
 
-`source_type` puede ser `"trigger"`, `"rvabrep"`, `"csv:<alias>"`, `"as400:<alias>"` o `"mssql:<alias>"`. Si la cadena entera no resuelve y hay `default_value`, se usa ese; si no hay default, S3 falla con `DefaultValidationFailedError`.
+`source_type` puede ser `"trigger"`, `"rvabrep"`, `"csv:<alias>"`, `"as400:<alias>"` o `"mssql:<alias>"`. Si la cadena entera no resuelve y hay `default_value`, se usa ese —se le aplica el `format` de campo (146) y **no se lo valida contra nada** (149)—; si no hay default, S3 falla con `SourceFailedError`. Si tu default es a propósito distinto de los datos reales (un marcador tipo `000000`), `cmcourier types check` te lo informa con un INFO, no te lo bloquea.
 
 ### `lookup_value_source` — de dónde sale la clave de búsqueda (084)
 

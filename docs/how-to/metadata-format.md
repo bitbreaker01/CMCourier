@@ -40,6 +40,15 @@ metadata:
 
 Las dos son opcionales e independientes.
 
+> **El `default_value` se FORMATEA pero no se VALIDA (149).** Son cosas
+> distintas: formatear es una transformación que vos declaraste en el
+> YAML, validar es un juicio sobre un dato ajeno. El default lo escribís
+> vos a mano — si está mal, es un error de config y se arregla editando
+> el archivo, no abortando documentos a las tres de la mañana. La red de
+> seguridad vive en `cmcourier types check`, que te avisa con un **INFO**
+> cuando el default —ya formateado— no matchea ningún `allowed_pattern`
+> de sus fuentes. Ver [El default y los patrones](#el-default-y-los-patrones-149).
+
 ## El orden es fijo
 
 No es una lista de pasos configurable — un orden libre vuelve el YAML
@@ -83,9 +92,9 @@ Reglas de borde que conviene tener presentes:
 ```
 
 el `1000` no valida, la fuente se descarta y el pipeline cae al
-fallback: **se pierde un valor bueno por un tema de relleno**. Y el
-`default_value: "0"` tampoco salva nada — se valida contra el patrón de
-la PRIMERA fuente, así que muere con `DefaultValidationFailedError`.
+fallback: **se pierde un valor bueno por un tema de relleno**. Y pre-149
+el `default_value: "0"` tampoco salvaba nada — se validaba contra el
+patrón de la PRIMERA fuente y moría con `DefaultValidationFailedError`.
 
 La única salida pre-146 era aflojar el patrón a `^\d{1,9}$`: renunciar a
 validar el largo, y que a CM llegue `1000` en unos documentos y
@@ -119,9 +128,9 @@ Qué pasa ahora, paso a paso:
 | `"ABC"` | `"000000ABC"` | no → fuente descartada | cae al default |
 | (nada) | — | — | default `"0"` → `format` de campo → `"000000000"` |
 
-Fijate en la última fila: el default **se formatea y DESPUÉS se valida**.
-Ese `"0"` que antes mataba la corrida ahora llega como `"000000000"` y
-pasa el `^\d{9}$` sin tocar el patrón.
+Fijate en la última fila: el default **se formatea** (y desde 149, nunca
+se valida). Ese `"0"` que antes mataba la corrida ahora llega como
+`"000000000"` sin tocar el patrón.
 
 **Verificalo antes de correr:**
 
@@ -184,6 +193,74 @@ espacio por default:
 
 Ojo con esto último: `types check` te va a avisar si esos 20 caracteres
 no entran en el `max_length` que declara CM.
+
+---
+
+## El default y los patrones (149)
+
+**El `default_value` se formatea, pero NUNCA se valida.**
+
+Pre-149 el resolver validaba el default contra el `allowed_pattern` de la
+**primera** fuente del campo. Eso estaba mal por tres motivos:
+
+1. **Era magia implícita.** Nada en el YAML decía que el default se
+   validaba, ni contra qué.
+2. **Era un acoplamiento posicional.** Reordenar las fuentes de un campo
+   —algo que se hace por rendimiento o por prioridad de negocio— cambiaba
+   en silencio contra qué se juzgaba el default.
+3. **Mataba documentos en producción por un error de config.** El
+   `default_value` lo escribís vos a mano. Si está mal, se corrige
+   editando el archivo.
+
+El caso que lo destapó: una cuenta de tarjeta con un marcador de seis
+ceros y una fuente validada con catorce a dieciséis dígitos.
+
+```yaml
+    BAC_Num_Cuenta_Tarjeta:
+      sources:
+        - source_type: "as400:tarjetas"
+          lookup_value_column: NROTAR
+          lookup_key_column: CIF
+          validation:
+            allowed_pattern: '^[0-9]{14,16}$'
+      default_value: "000000"      # el marcador que después se busca y se corrige
+```
+
+Pre-149 esto cargaba sin quejarse y el primer documento que caía al
+default se moría con `DefaultValidationFailedError`. La configuración que
+el negocio pedía era, literalmente, inexpresable. Hoy sube `000000` y
+listo.
+
+### La red de seguridad está en `types check`
+
+```bash
+cmcourier types check
+```
+
+```
+INFO (1):
+  metadata.field_sources.BAC_Num_Cuenta_Tarjeta: el default '000000' no matchea
+  ningún allowed_pattern de sus fuentes ('^[0-9]{14,16}$')
+```
+
+Tres cosas para leer bien ese hallazgo:
+
+- **Es INFO, no WARNING.** Un default deliberadamente distinto de los
+  datos reales —un marcador como `000000` que después buscás en CM y
+  corregís— es una técnica legítima y frecuente. El check te informa, no
+  te juzga.
+- **Compara el default YA FORMATEADO.** Un `default_value: "0"` con
+  `format: {pad_left: {width: 9, char: "0"}}` se juzga como `"000000000"`,
+  que es lo que va a llegar a CM. Contra un `^\d{9}$` no sale ningún
+  hallazgo.
+- **Alcanza con que matchee UNA fuente.** El default no tiene por qué
+  matchear todos los patrones del campo; los que se listan en el mensaje
+  van en orden de config.
+
+Un campo sin `default_value`, o sin ninguna fuente con
+`allowed_pattern`, no produce el hallazgo. Y sin `default_value`, cuando
+toda la cadena falla el documento sigue muriendo con `SourceFailedError`:
+eso 149 no lo toca.
 
 ---
 

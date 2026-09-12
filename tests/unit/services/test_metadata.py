@@ -19,7 +19,6 @@ import pytest
 from cmcourier.adapters.sources import TabularDataSource
 from cmcourier.domain.exceptions import (
     ConfigurationError,
-    DefaultValidationFailedError,
     SourceFailedError,
 )
 from cmcourier.domain.models import CMMapping, RVABREPDocument, TriggerRecord
@@ -359,10 +358,15 @@ class TestFallbackChain:
         assert exc.value.field_name == "BAC_X"
         assert exc.value.source == "<all>"
 
-    def test_default_validation_fails_raises(
+    def test_default_is_used_even_if_it_fails_the_first_source_pattern_149(
         self, sources_registry: dict[str, IDataSource]
     ) -> None:
-        # Default "abc" fails ^\d{6}$.
+        # 149 REQ-001: pre-149 the default was validated against the FIRST
+        # source's pattern and "abc" died with DefaultValidationFailedError.
+        # That coupling was implicit, positional (reordering the sources
+        # silently changed what the default was checked against) and killed
+        # documents in production over a CONFIG typo. The default is now
+        # returned as-is; `types check` informs about the mismatch.
         cfg = MetadataConfig(
             field_aliases={},
             field_sources={
@@ -380,10 +384,35 @@ class TestFallbackChain:
         )
         svc = MetadataService(cfg, sources_registry)
         trigger = TriggerRecord(shortname="X", cif=None, system_id="1")
-        with pytest.raises(DefaultValidationFailedError) as exc:
-            svc.resolve(trigger, _make_document(), _make_mapping("BAC_X"))
-        assert exc.value.field_name == "BAC_X"
-        assert exc.value.default_value == "abc"
+        result = svc.resolve(trigger, _make_document(), _make_mapping("BAC_X"))
+        assert result.metadata["BAC_X"] == "abc"
+
+    def test_reordering_the_sources_does_not_change_the_default_149(
+        self, sources_registry: dict[str, IDataSource]
+    ) -> None:
+        # The booby trap of 149: pre-149 swapping two sources swapped which
+        # pattern the default was judged by. Now both orders agree.
+        strict = SourceConfig(
+            source_type="trigger",
+            lookup_value_column="cif",
+            validation=ValidationConfig(allowed_pattern=r"^\d{14,16}$"),
+        )
+        loose = SourceConfig(
+            source_type="rvabrep",
+            lookup_value_column="index3",
+            validation=ValidationConfig(allowed_pattern=r"^\d{6}$"),
+        )
+        trigger = TriggerRecord(shortname="X", cif=None, system_id="1")
+        for sources in ((strict, loose), (loose, strict)):
+            cfg = MetadataConfig(
+                field_aliases={},
+                field_sources={
+                    "BAC_X": FieldSourceConfig(sources=sources, default_value="000000"),
+                },
+            )
+            svc = MetadataService(cfg, sources_registry)
+            result = svc.resolve(trigger, _make_document(index3=""), _make_mapping("BAC_X"))
+            assert result.metadata["BAC_X"] == "000000"
 
 
 # ---------------------------------------------------------------------------

@@ -48,7 +48,7 @@ odbcinst -q -d
        csv_path: "sample/cache/niarvilog-latest.csv"
    ```
    Cuidado con la frescura: si el CSV es viejo, vas a perder triggers nuevos. Esto te desbloquea para cerrar batches en vuelo, no para abrir batches productivos a ciegas.
-3. **Si tu trigger source es CSV pero la pipeline igual habla con AS400** (porque `metadata.sources[*].kind == "as400"`): no podés switchear tan fácil. Desactivá esas fuentes temporalmente comentando los `field_sources` que dependen de `as400:*` — pero **solo** si los campos que dependen tienen `default_value` válido. Sin default, S3 va a tirar `DefaultValidationFailedError` para cada doc.
+3. **Si tu trigger source es CSV pero la pipeline igual habla con AS400** (porque `metadata.sources[*].kind == "as400"`): no podés switchear tan fácil. Desactivá esas fuentes temporalmente comentando los `field_sources` que dependen de `as400:*` — pero **solo** si los campos que dependen tienen `default_value`. Sin default, S3 va a tirar `SourceFailedError` para cada doc. El default no se valida contra nada (149), así que un marcador tipo `"000000"` sirve para desbloquear la corrida: `types check` lo informa con un INFO y después lo buscás en CM para corregirlo.
 
 ## Resolución
 

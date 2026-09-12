@@ -258,7 +258,7 @@ En modo manifest, las columnas requeridas de `MapeoRVI_CM.csv` son sólo `IDRVI`
 | Field | Type | Default | Constraint | Description |
 |-------|------|---------|------------|-------------|
 | `sources` | `list[FieldSourceItem]` (required) | — | `min_length=1` | Cadena de fallback. |
-| `default_value` | `str \| None` | `None` | — | Si todas las sources fallan. |
+| `default_value` | `str \| None` | `None` | — | Si todas las sources fallan. Se FORMATEA y **nunca se valida** (149). Sin él, toda la cadena fallando es `SourceFailedError`. |
 | `format` | `ValueFormatModel \| None` | `None` | — | (146) Formato POR CAMPO: corre sobre el valor ganador **y sobre `default_value`**, justo antes del wire. |
 
 ### `FieldSourceItem`
@@ -331,11 +331,11 @@ Reglas de borde:
 - **`strip_leading_zeros` nunca devuelve vacío**: `"00000"` → `"0"`. Un vacío significa "esta fuente no dio" y borraría un valor legítimo.
 - **`pad_*` nunca recorta**: un valor ya más largo que `width` vuelve intacto. Para recortar está `truncate`, que es explícito.
 - **El resultado vacío corta la fuente**: si después de formatear el valor queda `""` (el `CHAR(n)` de AS400 todo espacios con `trim: true`), la fuente se trata como "no dio" y se pasa a la siguiente.
-- **El `default_value` se formatea y DESPUÉS se valida** (contra el patrón de la PRIMERA fuente). Un `default_value: "0"` con `format: {pad_left: {width: 9}}` llega como `"000000000"` y pasa un `^\d{9}$`.
+- **El `default_value` se formatea y NUNCA se valida** (149). El `format` por campo se le aplica igual que al valor ganador —un `default_value: "0"` con `format: {pad_left: {width: 9}}` llega como `"000000000"`—, pero no se lo juzga contra ningún patrón. Pre-149 se validaba contra el `allowed_pattern` de la PRIMERA fuente: magia que el YAML no declaraba, acoplamiento POSICIONAL (reordenar las fuentes cambiaba en silencio contra qué se validaba) y documentos muertos en producción por un error de config. La red de seguridad está en `types check`, que emite un **INFO** cuando el default ya formateado no matchea ningún `allowed_pattern` de sus fuentes. Ver [`../how-to/metadata-format.md`](../how-to/metadata-format.md).
 - El `format` por campo corre DESPUÉS de la validación de la fuente: si rompe el patrón, es decisión del operador y `types check` lo avisa (nunca el resolver).
 - **Validador de schema** (`_truncate_not_below_pad`): `truncate` menor que `pad_left.width` o que `pad_right.width` falla al CARGAR el YAML — rellenar para después cortar no tiene lectura sensata.
 
-`types check` cruza este bloque con el manifest: el largo que declara el `format` (`truncate`, si no el mayor de los `pad_*`) contra el `max_length` de CM — y ese largo REEMPLAZA al deducido del `allowed_pattern`, nunca los dos warnings para la misma propiedad. Un `case: upper` contra `choices` donde ninguna opción está en mayúsculas también avisa.
+`types check` cruza este bloque con el manifest: el largo que declara el `format` (`truncate`, si no el mayor de los `pad_*`) contra el `max_length` de CM — y ese largo REEMPLAZA al deducido del `allowed_pattern`, nunca los dos warnings para la misma propiedad. Un `case: upper` contra `choices` donde ninguna opción está en mayúsculas también avisa. Y (149) un `default_value` ya formateado que no matchea ningún `allowed_pattern` de sus fuentes sale como INFO —una vez por campo, liste los patrones en orden de config— porque un default deliberadamente distinto de los datos reales es una técnica legítima: el check informa, no juzga.
 
 #### `PadLeftModel` / `PadRightModel`
 

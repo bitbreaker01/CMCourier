@@ -1423,6 +1423,10 @@ class StagedPipeline:
                         item.mapping,
                         seed=item.identity_fields,
                     )
+                # 149 REQ-001: `DefaultValidationFailedError` quedó sin uso en
+                # el runtime (el `default_value` ya no se valida). Se deja en
+                # el `except` un ciclo mientras la excepción sigue deprecada;
+                # sacarla no cambia comportamiento.
                 except (SourceFailedError, DefaultValidationFailedError) as exc:
                     timer.mark_failed()
                     if not self._tracking_store.is_stage_done(txn, batch_id, StageStatus.S3_DONE):

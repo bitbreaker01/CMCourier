@@ -232,7 +232,25 @@ class SourceFailedError(MetadataError):
 
 
 class DefaultValidationFailedError(MetadataError):
-    """Todas las fuentes fallaron Y el valor por default configurado no pasó la validación."""
+    """Todas las fuentes fallaron Y el valor por default configurado no pasó la validación.
+
+    .. deprecated:: 149
+       **El runtime ya no la levanta.** 149 REQ-001 eliminó la validación
+       implícita del ``default_value`` contra el patrón de la PRIMERA
+       fuente: era magia que el YAML no declaraba, un acoplamiento
+       posicional (reordenar las fuentes cambiaba en silencio contra qué
+       se juzgaba el default) y mataba documentos en producción por un
+       error de CONFIG. La red de seguridad se mudó a ``types check``,
+       que informa con un INFO cuando el default —ya formateado— no
+       matchea ningún ``allowed_pattern`` de sus fuentes.
+
+       Se mantiene un ciclo porque
+       :mod:`cmcourier.orchestrators.staged` todavía la nombra en el
+       ``except`` de S3 (junto a :class:`SourceFailedError`, que sí sigue
+       viva) y porque es parte de la superficie pública re-exportada por
+       :mod:`cmcourier.domain`. Nada la levanta: sacarla del ``except``
+       no cambia comportamiento.
+    """
 
     def __init__(self, *, field_name: str, default_value: str) -> None:
         super().__init__(

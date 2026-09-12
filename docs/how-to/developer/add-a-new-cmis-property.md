@@ -108,7 +108,7 @@ def test_bac_opdt_resuelve_desde_rvabrep_primero(tmp_path: Path) -> None:
     # ... resto del test con TabularDataSource real sobre fixture CSV
 ```
 
-Casos a cubrir mínimo: hit en el primer source, miss → hit en el segundo, miss en todos → `default_value`, miss en todos sin default → `SourceFailedError`, validación regex que falla → `DefaultValidationFailedError`.
+Casos a cubrir mínimo: hit en el primer source, miss → hit en el segundo, miss en todos → `default_value` (formateado con el `format` de campo y **sin validar**, 149), miss en todos sin default → `SourceFailedError`, y una fuente cuyo valor no pasa su `allowed_pattern` → se descarta esa fuente y sigue la cadena.
 
 ### 6. Validá con doctor
 

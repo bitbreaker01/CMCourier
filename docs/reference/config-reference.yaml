@@ -233,7 +233,13 @@ metadata:
 
   # field_sources  (REQUIRED) — per CM property, an ordered list of where to
   # pull its value from. First source that yields a value wins; if none do,
-  # `default_value` is used (or the doc fails if there is no default).
+  # `default_value` is used (or the doc fails with SourceFailedError if there
+  # is no default). The default is FORMATTED with the per-field `format` but
+  # NEVER validated (149): a bad default is a CONFIG error, fixed by editing
+  # this file, not by killing documents in production. `types check` emits an
+  # INFO when the formatted default matches none of its sources'
+  # `allowed_pattern`s — it informs, it does not judge (a deliberate marker
+  # like "000000" is a legitimate technique).
   field_sources:
     BAC_CIF:
       sources:                             # (REQUIRED) min 1 item
@@ -302,8 +308,8 @@ metadata:
             allowed_pattern: '^\d{9}$'          # strict: the format already normalised it
       default_value: "0"
       format:                                   # (b) PER FIELD (default: null)
-        pad_left:                               # the default is formatted, THEN validated:
-          width: 9                              # "0" → "000000000" passes ^\d{9}$
+        pad_left:                               # applies to the default too (146), which
+          width: 9                              # is never validated (149): "0" → "000000000"
           char: "0"
     BAC_Short_Name:
       sources:

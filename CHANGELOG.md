@@ -289,6 +289,58 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Fixed
 
+- **El `default_value` ya no se valida en runtime (149).** El caso que lo
+  destapó es de manual: el operador necesita
+  `BAC_Num_Cuenta_Tarjeta` con `default_value: "000000"` —un marcador que
+  después busca en CM y corrige— y una fuente validada con
+  `^[0-9]{14,16}$`. Seis dígitos contra un patrón de catorce a dieciséis:
+  el YAML **cargaba sin quejarse** y el primer documento que caía al
+  default se moría con `DefaultValidationFailedError`. La configuración
+  que el negocio pedía era, literalmente, **inexpresable**.
+
+  El bug no era ese default: era que
+  `MetadataService._resolve_one` validaba el default contra el
+  `allowed_pattern` de la **PRIMERA** fuente del campo. Dos motivos
+  estructurales, además del documento muerto:
+
+  - **Era magia implícita.** Nada en el YAML decía que el default se
+    validaba, ni contra qué. Un acoplamiento que nadie escribió y que
+    nadie podía leer en el archivo.
+  - **Era un acoplamiento POSICIONAL.** Reordenar las fuentes de un campo
+    —algo que se hace por rendimiento o por prioridad de negocio— cambiaba
+    en silencio contra qué se validaba el default. Un booby trap: la misma
+    config, con las mismas fuentes, pasaba o moría según el orden en que
+    quedaron escritas.
+
+  Y encima, matar documentos en producción por esto es la respuesta
+  equivocada: el `default_value` lo escribe una persona a mano en el YAML,
+  así que un default malo es un **error de config** — se corrige editando
+  el archivo, no abortando documentos a las tres de la mañana.
+
+  Lo que NO cambia: el `format` de campo (146 REQ-003) se le sigue
+  aplicando al default. Formatear y validar son cosas distintas — la
+  primera es una transformación que el operador DECLARÓ, la segunda un
+  juicio sobre un dato ajeno. Un `default_value: "0"` con
+  `format: {pad_left: {width: 9, char: "0"}}` sigue saliendo
+  `"000000000"`. Sin `default_value`, toda la cadena fallando sigue siendo
+  `SourceFailedError`.
+
+  La red de seguridad se **mudó a `types check`**, que es donde
+  corresponde: el operador está sentado, con tiempo, leyendo un reporte.
+  Un default que —ya formateado— no matchea NINGÚN `allowed_pattern` de
+  sus fuentes sale como **INFO**, una vez por campo, con los patrones en
+  orden de config:
+
+  ```
+  metadata.field_sources.BAC_Num_Cuenta_Tarjeta: el default '000000' no matchea
+  ningún allowed_pattern de sus fuentes ('^[0-9]{14,16}$')
+  ```
+
+  INFO y no WARNING a propósito: un default deliberadamente distinto de
+  los datos reales es una técnica legítima y frecuente. El check informa,
+  no juzga. `DefaultValidationFailedError` queda **deprecada** un ciclo
+  (nada la levanta; sigue nombrada en el `except` de S3 y en los
+  re-exports de `cmcourier.domain`).
 - **Los ~200 uploads perdidos (148).** En streaming, una excepción
   no-CMIS caía en un `except BaseException` que incrementaba el tally y
   **no persistía nada**; como `mark_stage_pending` es

@@ -903,3 +903,169 @@ class TestWarningCaseUpperContraChoices:
             _fmt_field(),
         )
         assert report.findings == ()
+
+
+# ---------------------------------------------------------------------------
+# 149 — el default contra los `allowed_pattern` de sus fuentes
+#
+# 149 REQ-001 sacó del RUNTIME la validación del `default_value` (que se
+# hacía contra el patrón de la PRIMERA fuente: magia implícita y
+# acoplamiento posicional). Lo que se pierde ahí se gana acá, que es donde
+# corresponde: el operador está sentado, con tiempo, leyendo un reporte.
+#
+# INFO y no WARNING a propósito: un default deliberadamente distinto de los
+# datos reales —un marcador como `000000` que después se busca y se
+# corrige— es una técnica legítima. El check informa, no juzga.
+# ---------------------------------------------------------------------------
+
+
+def _default_field(
+    default: str | None,
+    *patterns: str | None,
+    fmt: ValueFormat | None = None,
+) -> FieldSourceConfig:
+    """Un campo con una fuente por patrón (``None`` = fuente sin validación)."""
+    return FieldSourceConfig(
+        sources=tuple(_source(p) for p in patterns),
+        default_value=default,
+        format=fmt,
+    )
+
+
+def _infos(report: CheckReport, part: str) -> list[str]:
+    return [f.message for f in report.infos if part in f.message]
+
+
+class TestInfoDefaultSinPatron149:
+    def test_el_default_que_no_matchea_ningun_patron_informa(self) -> None:
+        # El caso del operador: seis ceros contra catorce-a-dieciséis.
+        prop = _prop("clbNonGroup.BAC_Num_Cuenta_Tarjeta")
+        manifest = _manifest(_entry("DC01", props=(prop,)))
+        report = run_manifest_check(
+            _mapping(manifest, "DC01"),
+            manifest,
+            {"BAC_Num_Cuenta_Tarjeta": _default_field("000000", r"^[0-9]{14,16}$")},
+        )
+        assert not report.has_critical
+        assert report.infos[0].severity == "INFO"
+        assert report.infos[0].message == (
+            "metadata.field_sources.BAC_Num_Cuenta_Tarjeta: el default '000000' no "
+            "matchea ningún allowed_pattern de sus fuentes ('^[0-9]{14,16}$')"
+        )
+
+    def test_lista_los_patrones_en_orden_de_fuente(self) -> None:
+        prop = _prop("clbNonGroup.BAC_X")
+        manifest = _manifest(_entry("DC01", props=(prop,)))
+        report = run_manifest_check(
+            _mapping(manifest, "DC01"),
+            manifest,
+            {"BAC_X": _default_field("zzz", r"^\d{6}$", None, r"^[A-Z]{3}$")},
+        )
+        assert _infos(report, "BAC_X: el default") == [
+            "metadata.field_sources.BAC_X: el default 'zzz' no matchea ningún "
+            "allowed_pattern de sus fuentes ('^\\d{6}$', '^[A-Z]{3}$')"
+        ]
+
+    def test_un_default_que_matchea_alguno_no_informa(self) -> None:
+        # Alcanza con UNA fuente: el default no tiene por qué matchearlas todas.
+        prop = _prop("clbNonGroup.BAC_X")
+        manifest = _manifest(_entry("DC01", props=(prop,)))
+        report = run_manifest_check(
+            _mapping(manifest, "DC01"),
+            manifest,
+            {"BAC_X": _default_field("ABC", r"^\d{6}$", r"^[A-Z]{3}$")},
+        )
+        assert report.findings == ()
+
+    def test_ninguna_fuente_con_patron_no_informa(self) -> None:
+        prop = _prop("clbNonGroup.BAC_X")
+        manifest = _manifest(_entry("DC01", props=(prop,)))
+        report = run_manifest_check(
+            _mapping(manifest, "DC01"), manifest, {"BAC_X": _default_field("000000", None, None)}
+        )
+        assert report.findings == ()
+
+    def test_sin_default_no_informa(self) -> None:
+        prop = _prop("clbNonGroup.BAC_X")
+        manifest = _manifest(_entry("DC01", props=(prop,)))
+        report = run_manifest_check(
+            _mapping(manifest, "DC01"), manifest, {"BAC_X": _default_field(None, r"^\d{6}$")}
+        )
+        assert report.findings == ()
+
+    def test_el_default_se_compara_ya_formateado(self) -> None:
+        # 146 REQ-003 + 149: el `format` de campo se le aplica al default,
+        # así que el check tiene que juzgar el valor que SALE, no el crudo.
+        # "0" + pad_left(9) = "000000000", que sí matchea ^\d{9}$.
+        prop = _prop("clbNonGroup.BAC_X")
+        manifest = _manifest(_entry("DC01", props=(prop,)))
+        report = run_manifest_check(
+            _mapping(manifest, "DC01"),
+            manifest,
+            {
+                "BAC_X": _default_field(
+                    "0", r"^\d{9}$", fmt=ValueFormat(pad_left=PadConfig(width=9, char="0"))
+                )
+            },
+        )
+        assert report.findings == ()
+
+    def test_el_mensaje_nombra_el_valor_formateado(self) -> None:
+        prop = _prop("clbNonGroup.BAC_X")
+        manifest = _manifest(_entry("DC01", props=(prop,)))
+        report = run_manifest_check(
+            _mapping(manifest, "DC01"),
+            manifest,
+            {
+                "BAC_X": _default_field(
+                    "ABC", r"^\d{9}$", fmt=ValueFormat(pad_left=PadConfig(width=9, char="0"))
+                )
+            },
+        )
+        assert "el default '000000ABC'" in report.infos[0].message
+
+    def test_se_emite_una_sola_vez_aunque_dos_tipos_usen_el_campo(self) -> None:
+        # El hallazgo es sobre `field_sources`, no sobre un tipo auditado.
+        prop = _prop("clbNonGroup.BAC_X")
+        manifest = _manifest(_entry("DC01", props=(prop,)), _entry("DC02", props=(prop,)))
+        report = run_manifest_check(
+            _mapping(manifest, "DC01", "DC02"),
+            manifest,
+            {"BAC_X": _default_field("000000", r"^[0-9]{14,16}$")},
+        )
+        assert len(_infos(report, "no matchea ningún allowed_pattern")) == 1
+
+    def test_no_lleva_id_corto_ni_prop_id(self) -> None:
+        prop = _prop("clbNonGroup.BAC_X")
+        manifest = _manifest(_entry("DC01", props=(prop,)))
+        report = run_manifest_check(
+            _mapping(manifest, "DC01"), manifest, {"BAC_X": _default_field("zz", r"^\d{6}$")}
+        )
+        assert (report.infos[0].id_corto, report.infos[0].prop_id) == (None, None)
+
+    def test_un_campo_que_nadie_usa_igual_se_informa(self) -> None:
+        # Como el WARNING de alias colgado: es un hallazgo del YAML, no del
+        # cruce con el manifest. El INFO de "no lo usa ningún tipo" sale
+        # además, y son dos cosas distintas que el operador arregla distinto.
+        prop = _prop("clbNonGroup.BAC_CIF")
+        manifest = _manifest(_entry("DC01", props=(prop,)))
+        field_sources = {
+            "BAC_CIF": FieldSourceConfig(sources=(_source(),)),
+            "BAC_Huerfano": _default_field("000000", r"^[0-9]{14,16}$"),
+        }
+        report = run_manifest_check(_mapping(manifest, "DC01"), manifest, field_sources)
+        assert len(_infos(report, "no matchea ningún allowed_pattern")) == 1
+        assert len(_infos(report, "no lo usa ningún tipo auditado")) == 1
+
+    def test_el_orden_es_estable_entre_campos(self) -> None:
+        prop = _prop("clbNonGroup.BAC_CIF")
+        manifest = _manifest(_entry("DC01", props=(prop,)))
+        field_sources = {
+            "BAC_Z": _default_field("zz", r"^\d{6}$"),
+            "BAC_A": _default_field("aa", r"^\d{6}$"),
+        }
+        report = run_manifest_check(_mapping(manifest, "DC01"), manifest, field_sources)
+        ordered = _infos(report, "no matchea ningún allowed_pattern")
+        assert len(ordered) == 2
+        assert "BAC_A" in ordered[0]
+        assert "BAC_Z" in ordered[1]

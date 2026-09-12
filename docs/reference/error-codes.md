@@ -18,7 +18,7 @@ CMCourierError
 │   └── IDRViNotMappedError
 ├── MetadataError                       (S3, base)
 │   ├── SourceFailedError
-│   └── DefaultValidationFailedError
+│   └── DefaultValidationFailedError    (deprecada en 149 — nada la levanta)
 ├── AssemblyError                       (S4, base)
 │   ├── SourceFileMissingError          (pickle-safe via __reduce__)
 │   └── PDFAssemblyFailedError          (pickle-safe via __reduce__)
@@ -44,7 +44,7 @@ CMCourierError
 | `IDRViNotMappedError` | `MappingError` | S2 | El `id_rvi` (`ABAHCD`) no está en el Modelo Documental. | `cmcourier inspect mapping <id_rvi>`. Agregar fila a `MapeoRVI_CM.csv` o filtrar en RVABREP. |
 | `MetadataError` | `CMCourierError` | S3 | Base. | — |
 | `SourceFailedError` | `MetadataError` | S3 | Una fuente de metadata lanzó excepción o devolvió sin valor y no hay fallback. `field_name` + `source`. | Revisar CSV/AS400 source. Considerar agregar `default_value`. |
-| `DefaultValidationFailedError` | `MetadataError` | S3 | Todas las sources fallaron y el `default_value` configurado no pasó la `validation.allowed_pattern`. | Ajustar `default_value` o relajar el regex. |
+| `DefaultValidationFailedError` | `MetadataError` | S3 | **Deprecada en 149: el runtime ya no la levanta.** Pre-149 el `default_value` se validaba contra el `allowed_pattern` de la PRIMERA fuente — magia que el YAML no declaraba y acoplamiento posicional. Hoy el default se formatea y se devuelve. | Ninguna. Si el default no matchea ningún patrón de sus fuentes, `types check` lo reporta como **INFO** (no bloquea: un marcador deliberado como `000000` es legítimo). |
 | `AssemblyError` | `CMCourierError` | S4 | Base. | — |
 | `SourceFileMissingError` | `AssemblyError` | S4 | El archivo en `assembly.source_root` no está. `file_path` lo identifica. **Tiene `__reduce__` para que cruce `ProcessPoolExecutor`.** | Verificar `assembly.source_root` y permisos. Recover desde tape / file server. |
 | `PDFAssemblyFailedError` | `AssemblyError` | S4 | img2pdf / Pillow / PyPDF2 lanzó excepción. `txn_num` + `reason`. **Tiene `__reduce__`.** | Inspeccionar el archivo fuente (puede estar corrupto). Re-correr con `--from-stage 4`. |

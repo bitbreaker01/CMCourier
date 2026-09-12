@@ -28,7 +28,7 @@ from typing import Any, Literal
 
 from cmcourier.domain.cm_types import CmPropertyDef, CmTypeEntry, CmTypeManifest, canonical_name
 from cmcourier.services.mapping import MappingService
-from cmcourier.services.metadata import FieldSourceConfig, ValueFormat
+from cmcourier.services.metadata import FieldSourceConfig, ValueFormat, apply_format
 
 Severity = Literal["CRITICAL", "WARNING", "INFO"]
 
@@ -477,6 +477,70 @@ def _dangling_alias_findings(
     ]
 
 
+def _source_patterns(fsc: FieldSourceConfig) -> tuple[str, ...]:
+    """Los ``allowed_pattern`` de las fuentes del campo, en ORDEN DE CONFIG.
+
+    Deduplicados: dos fuentes con el mismo patrón son una sola cosa que
+    juzgar, y repetirlo en el mensaje sería ruido.
+    """
+    patterns: list[str] = []
+    for src in fsc.sources:
+        pattern = src.validation.allowed_pattern if src.validation else None
+        if pattern is not None and pattern not in patterns:
+            patterns.append(pattern)
+    return tuple(patterns)
+
+
+def _default_pattern_findings(
+    field_sources: Mapping[str, FieldSourceConfig],
+) -> list[CheckFinding]:
+    """149 REQ-002: el default contra los ``allowed_pattern`` de sus fuentes.
+
+    149 REQ-001 sacó del RUNTIME la validación del ``default_value`` (que
+    se hacía contra el patrón de la PRIMERA fuente: magia implícita y
+    acoplamiento posicional, y mataba documentos por un error de config).
+    Lo que se pierde ahí se gana acá, que es donde corresponde: el
+    operador está sentado, con tiempo, leyendo un reporte.
+
+    **INFO y no WARNING a propósito**: un default deliberadamente distinto
+    de los datos reales —un marcador como ``000000`` que después se busca
+    y se corrige— es una técnica legítima y frecuente. El check informa,
+    no juzga.
+
+    El default se compara YA FORMATEADO con el ``format`` de campo (146
+    REQ-003), reusando :func:`~cmcourier.services.metadata.apply_format`:
+    lo que hay que juzgar es el valor que SALE, no el crudo del YAML. La
+    semántica de match es ``re.fullmatch``, la misma de ``_validates`` en
+    el resolver.
+
+    El hallazgo es sobre ``field_sources``, no sobre un tipo auditado: se
+    emite UNA vez por campo (aunque diez tipos lo usen) y es independiente
+    del *scope*, igual que el WARNING de alias colgado. Alcanza con que el
+    default matchee UNA fuente — no tiene por qué matchearlas a todas.
+    """
+    out: list[CheckFinding] = []
+    for name, fsc in sorted(field_sources.items()):
+        if fsc.default_value is None:
+            continue
+        patterns = _source_patterns(fsc)
+        if not patterns:
+            continue
+        default = apply_format(fsc.default_value, fsc.format)
+        if any(re.fullmatch(pattern, default) is not None for pattern in patterns):
+            continue
+        listed = ", ".join(f"'{pattern}'" for pattern in patterns)
+        out.append(
+            CheckFinding(
+                "INFO",
+                None,
+                None,
+                f"metadata.field_sources.{name}: el default '{default}' no matchea "
+                f"ningún allowed_pattern de sus fuentes ({listed})",
+            )
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Entrada pública
 # ---------------------------------------------------------------------------
@@ -508,8 +572,12 @@ def run_manifest_check(
     tipos mapeados; ampliar el alcance no lo multiplica. El orden es
     estable: los códigos que faltan, los tipos mapeados (ordenados), los
     tipos extra que suma el scope (ordenados), los ID cortos
-    compartidos, los alias colgados y al final las entradas de
-    ``field_sources`` que no usa ningún tipo AUDITADO.
+    compartidos, los alias colgados, las entradas de ``field_sources``
+    que no usa ningún tipo AUDITADO y al final los INFO de 149 (un
+    default que no matchea ningún ``allowed_pattern`` de sus fuentes).
+
+    Los tres últimos bloques son hallazgos del YAML, no del cruce con el
+    manifest: salen ordenados por nombre e independientes del *scope*.
 
     *field_aliases* es ``metadata.field_aliases`` tal cual: una propiedad
     del manifest puede llegar a su ``field_sources`` a través de un alias
@@ -549,4 +617,5 @@ def run_manifest_check(
         )
         for name in sorted(set(field_sources) - used)
     )
+    findings.extend(_default_pattern_findings(field_sources))
     return CheckReport(findings=tuple(findings))

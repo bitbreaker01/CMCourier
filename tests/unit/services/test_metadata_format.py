@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from cmcourier.domain.exceptions import DefaultValidationFailedError, SourceFailedError
+from cmcourier.domain.exceptions import SourceFailedError
 from cmcourier.domain.models import CMMapping, RVABREPDocument, TriggerRecord
 from cmcourier.services.metadata import (
     FieldSourceConfig,
@@ -278,7 +278,13 @@ class TestFormatoPorCampo:
 
 
 class TestFormatoSobreElDefault:
-    """El default se FORMATEA y DESPUÉS se valida."""
+    """El default se FORMATEA y NUNCA se valida (146 REQ-003 + 149 REQ-001).
+
+    Formatear y validar son cosas distintas: la primera es una
+    transformación que el operador DECLARÓ en el YAML, la segunda un
+    juicio sobre un dato ajeno. 149 mató la segunda sobre el default; la
+    primera sigue viva y estos tests la clavan.
+    """
 
     def test_el_default_cero_sobrevive_al_patron_de_nueve_digitos(self) -> None:
         # Pre-146 esto moría con DefaultValidationFailedError: el default
@@ -299,29 +305,66 @@ class TestFormatoSobreElDefault:
         )
         assert value == "000000000"
 
-    def test_un_default_que_sigue_sin_validar_despues_de_formatear_explota(self) -> None:
-        config = MetadataConfig(
-            field_aliases={},
-            field_sources={
-                "BAC_Num_Cuenta": FieldSourceConfig(
-                    sources=(
-                        SourceConfig(
-                            source_type="rvabrep",
-                            lookup_value_column="index3",
-                            validation=_NUEVE_DIGITOS,
-                        ),
+    def test_un_default_que_no_matchea_el_patron_igual_sale_formateado_149(self) -> None:
+        # Pre-149 esto moría con DefaultValidationFailedError. 149 REQ-001:
+        # el default NO se valida — pero el `format` de campo se le sigue
+        # aplicando, así que lo que llega al wire es "000000ABC".
+        value = _resolve(
+            FieldSourceConfig(
+                sources=(
+                    SourceConfig(
+                        source_type="rvabrep",
+                        lookup_value_column="index3",
+                        validation=_NUEVE_DIGITOS,
                     ),
-                    default_value="ABC",
-                    format=ValueFormat(pad_left=PadConfig(width=9, char="0")),
-                )
-            },
-            prefetch_enabled=False,
+                ),
+                default_value="ABC",
+                format=ValueFormat(pad_left=PadConfig(width=9, char="0")),
+            ),
+            _document(index3=""),
         )
-        service = MetadataService(config, sources_registry={})
-        with pytest.raises(DefaultValidationFailedError) as exc:
-            service.resolve(_trigger(), _document(index3=""), _mapping("BAC_Num_Cuenta"))
-        # El valor reportado es el FORMATEADO: es el que no validó.
-        assert exc.value.default_value == "000000ABC"
+        assert value == "000000ABC"
+
+    def test_el_caso_del_operador_seis_ceros_contra_catorce_digitos_149(self) -> None:
+        # 149: `BAC_Num_Cuenta_Tarjeta` con default "000000" y una fuente
+        # validada con ^[0-9]{14,16}$. Seis dígitos contra catorce-a-
+        # dieciséis: pre-149 la config que el negocio pide era literalmente
+        # inexpresable — el YAML cargaba y el primer documento que caía al
+        # default se moría.
+        value = _resolve(
+            FieldSourceConfig(
+                sources=(
+                    SourceConfig(
+                        source_type="rvabrep",
+                        lookup_value_column="index3",
+                        validation=ValidationConfig(allowed_pattern=r"^[0-9]{14,16}$"),
+                    ),
+                ),
+                default_value="000000",
+            ),
+            _document(index3=""),
+        )
+        assert value == "000000"
+
+    def test_el_format_de_campo_se_le_aplica_al_default_aunque_no_valide_149(self) -> None:
+        # El lock explícito de 146 REQ-003 bajo el régimen de 149: un
+        # `default_value: "0"` con `pad_left: {width: 9}` sale "000000000"
+        # AUNQUE la fuente valide con un patrón que ese default no matchea.
+        value = _resolve(
+            FieldSourceConfig(
+                sources=(
+                    SourceConfig(
+                        source_type="rvabrep",
+                        lookup_value_column="index3",
+                        validation=ValidationConfig(allowed_pattern=r"^[0-9]{14,16}$"),
+                    ),
+                ),
+                default_value="0",
+                format=ValueFormat(pad_left=PadConfig(width=9, char="0")),
+            ),
+            _document(index3=""),
+        )
+        assert value == "000000000"
 
     def test_sin_sources_el_default_igual_se_formatea(self) -> None:
         value = _resolve(

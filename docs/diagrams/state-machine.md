@@ -22,7 +22,7 @@ stateDiagram-v2
 
     S2_DONE --> S3_PENDING: hand off
     S3_PENDING --> S3_DONE: metadata resuelta
-    S3_PENDING --> S3_FAILED: SourceFailedError / DefaultValidationFailedError
+    S3_PENDING --> S3_FAILED: SourceFailedError
 
     S3_DONE --> S4_PENDING: hand off
     S4_PENDING --> S4_DONE: PDF ensamblado

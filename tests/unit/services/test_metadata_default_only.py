@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from cmcourier.domain.exceptions import DefaultValidationFailedError
+from cmcourier.domain.exceptions import SourceFailedError
 from cmcourier.domain.models import CMMapping, RVABREPDocument, TriggerRecord
 from cmcourier.services.metadata import (
     FieldSourceConfig,
@@ -121,7 +121,35 @@ class TestPrefetchSkipsEmptySources:
 
 
 class TestStillRaisesWhenSourcesFailAndNoDefault:
-    def test_invalid_default_with_first_source_validation_raises(self) -> None:
+    def test_no_default_at_all_still_raises_source_failed(self) -> None:
+        # 149 no toca este camino: sin `default_value` no hay nada que
+        # devolver y el documento tiene que fallar.
+        config = MetadataConfig(
+            field_aliases={},
+            field_sources={
+                "BAC_X": FieldSourceConfig(
+                    sources=(
+                        SourceConfig(
+                            source_type="trigger",
+                            lookup_value_column="cif",
+                            validation=ValidationConfig(allowed_pattern=r"^\d{6}$"),
+                        ),
+                    ),
+                    default_value=None,
+                ),
+            },
+            prefetch_enabled=False,
+        )
+        service = MetadataService(config, sources_registry={})
+        with pytest.raises(SourceFailedError) as exc:
+            service.resolve(_trigger(cif=None), _document(), _mapping("BAC_X"))
+        assert exc.value.field_name == "BAC_X"
+
+
+class TestElDefaultNoSeValida149:
+    """149 REQ-001: el default deja de validarse contra la PRIMERA fuente."""
+
+    def test_invalid_default_with_first_source_validation_is_returned(self) -> None:
         config = MetadataConfig(
             field_aliases={},
             field_sources={
@@ -139,8 +167,10 @@ class TestStillRaisesWhenSourcesFailAndNoDefault:
             prefetch_enabled=False,
         )
         service = MetadataService(config, sources_registry={})
-        # El trigger sin CIF hace que el source no devuelva valor; el
-        # motor cae al default "notdigits", que no pasa la validación
-        # ^\d{6}$ → DefaultValidationFailedError.
-        with pytest.raises(DefaultValidationFailedError):
-            service.resolve(_trigger(cif=None), _document(), _mapping("BAC_X"))
+        # El trigger sin CIF hace que el source no devuelva valor; el motor
+        # cae al default. Pre-149 "notdigits" moría contra ^\d{6}$ —una
+        # validación que nadie escribió en el YAML y que dependía de en qué
+        # POSICIÓN quedó esa fuente—; ahora se devuelve tal cual y la red
+        # de seguridad vive en `types check`.
+        result = service.resolve(_trigger(cif=None), _document(), _mapping("BAC_X"))
+        assert result.metadata.properties["BAC_X"] == "notdigits"

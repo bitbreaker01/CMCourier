@@ -181,7 +181,7 @@ stateDiagram-v2
 | `S2_FAILED` | S2 | sí (hasta retry) | `IDRViNotMappedError`. |
 | `S3_PENDING` | S3 | no | En metadata resolution. |
 | `S3_DONE` | S3 | no | Propiedades resueltas. |
-| `S3_FAILED` | S3 | sí (hasta retry) | `SourceFailedError` / `DefaultValidationFailedError`. |
+| `S3_FAILED` | S3 | sí (hasta retry) | `SourceFailedError` (toda la cadena falló y no hay `default_value`). |
 | `S4_PENDING` | S4 | no | En assembly. |
 | `S4_DONE` | S4 | no | PDF listo. |
 | `S4_FAILED` | S4 | sí (hasta retry) | `SourceFileMissingError` / `PDFAssemblyFailedError`. |
