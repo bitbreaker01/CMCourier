@@ -85,6 +85,23 @@ es grande, no es un problema: es la prueba de que tus filtros funcionan.
 | `DELETED_AT_SOURCE` | La fila RVABREP trae código de baja (`ABACST`) | Nada. El origen lo dio de baja |
 | `ALREADY_UPLOADED` | Ya estaba en `S5_DONE` en un batch previo | Nada. Es la idempotencia cross-batch haciendo su trabajo |
 | `OUT_OF_SCOPE_RESUME` | Quedó fuera del alcance del `resume` que corriste | Nada, **si el alcance era el que querías**. Si no, re-corré el resume con el alcance correcto |
+| `CLIENT_NOT_ACTIVE` (150) | El cliente no está en la lista de clientes con producto activo | **Nada. Es la directiva de negocio.** Content Manager no tiene espacio para todo RVABREP y sólo se migran los clientes activos |
+
+> **`CLIENT_NOT_ACTIVE` no es un error ni una falta de configuración.** Es la
+> directiva de negocio funcionando. Si este balde es enorme, está bien: ése
+> era el punto. Lo que SÍ conviene chequear es **qué lista** lo decidió —
+> `batch show` la imprime debajo del censo, con su ruta, su fecha de
+> modificación y su cantidad de filas:
+>
+> ```
+> Lista de activos (150): C:\ruta\clientes-activos.csv
+>   modificada: 2026-08-31T09:15:00 · filas: 412339
+> ```
+>
+> Si el conteo de filas te parece bajo, la lista puede estar incompleta.
+> (Una lista **vacía** nunca llega hasta acá: la corrida aborta antes del
+> primer documento — ver
+> [`../client-eligibility.md`](../client-eligibility.md).)
 
 > **Ojo con `EXCLUDED_BY_FILTER`.** Desde 148, `filters.document_types` ya no
 > recorta la consulta al origen: el documento **viene igual** y se cuenta. Por

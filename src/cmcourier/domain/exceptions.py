@@ -32,6 +32,7 @@ __all__ = [
     "CMISServerError",
     "ConfigurationError",
     "DefaultValidationFailedError",
+    "EligibilityListError",
     "IDRViNotMappedError",
     "IdentityResolutionError",
     "IndexingError",
@@ -81,6 +82,24 @@ class CMCourierError(Exception):
 
 class ConfigurationError(CMCourierError):
     """La configuración es inválida o le faltan campos requeridos."""
+
+
+class EligibilityListError(ConfigurationError):
+    """150 REQ-002: la lista de clientes activos no se puede consultar.
+
+    Se lanza en el PREFLIGHT de la corrida —antes del primer documento— y
+    **aborta**: no se falla documento por documento, no se arranca.
+
+    Una lista que no abre, a la que le falta una columna declarada o que
+    tiene cero filas NO significa "nadie está activo": significa que no
+    podemos responder la pregunta. Si el pipeline siguiera, produciría un
+    censo impecable diciendo que 200.000 documentos se excluyeron por
+    cliente inactivo — un reporte prolijo y completamente falso. Una lista
+    vacía no puede significar "no migres nada": eso es un accidente
+    disfrazado de decisión.
+
+    El mensaje nombra SIEMPRE la fuente y el problema concreto.
+    """
 
 
 # ---------------------------------------------------------------------------

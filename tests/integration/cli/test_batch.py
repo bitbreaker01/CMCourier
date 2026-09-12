@@ -514,3 +514,85 @@ class TestCensoEnBatchShow148:
         assert census["accounted"] == 5
         assert census["reconciles"] is True
         assert census["by_bucket"] == {"EXCLUIDO": 3, "BLOQUEADO": 1, "FALLO": 1}
+
+
+# ---------------------------------------------------------------------------
+# 150 REQ-005 — "¿activo según qué lista?"
+# ---------------------------------------------------------------------------
+
+
+def _seed_eligibility_batch(db_path: Path) -> str:
+    """Un batch con dos documentos excluidos por cliente inactivo y la
+    auditoría de la lista que se usó para decidirlo."""
+    from datetime import datetime
+
+    from cmcourier.domain.models import MigrationRecord, ReasonCode
+
+    store = SQLiteTrackingStore(db_path)
+    try:
+        batch_id = store.start_batch(total_records=0)
+        store.increment_source_total(batch_id, 2)
+        for n in (1, 2):
+            txn = f"TXN_INACT_{n}"
+            store.mark_stage_pending(
+                MigrationRecord(
+                    trigger_shortname="NOESTA01",
+                    trigger_cif="000000",
+                    trigger_system_id="1",
+                    rvabrep_txn_num=txn,
+                    rvabrep_file_name=f"{txn}.001",
+                    batch_id=batch_id,
+                    status=StageStatus.S2_PENDING,
+                    created_at=datetime(2026, 1, 1, 0, 0),
+                    id_rvi="CC03",
+                ),
+                StageStatus.S2_PENDING,
+            )
+            store.mark_stage_terminal(
+                txn,
+                batch_id,
+                StageStatus.S2_FAILED,
+                "client_not_active",
+                reason_code=ReasonCode.CLIENT_NOT_ACTIVE,
+            )
+        store.record_eligibility_audit(
+            batch_id,
+            source_path="C:/ruta/clientes-activos.csv",
+            modified_at="2026-08-31T09:15:00",
+            row_count=412339,
+        )
+        store.complete_batch(batch_id)
+        store.flush()
+    finally:
+        store.close()
+    return batch_id
+
+
+class TestElegibilidadEnBatchShow150:
+    def test_el_censo_cuenta_los_inactivos_en_el_balde_excluido(self, tmp_path: Path) -> None:
+        yaml_path = _write_yaml(tmp_path)
+        batch_id = _seed_eligibility_batch(tmp_path / "tracking.db")
+        result = CliRunner().invoke(main, ["batch", "show", "-c", str(yaml_path), batch_id])
+        assert result.exit_code == 0, result.output
+        line = next(ln for ln in result.stdout.splitlines() if "CLIENT_NOT_ACTIVE" in ln)
+        assert line.split()[:4] == ["EXCLUIDO", "CLIENT_NOT_ACTIVE", "CC03", "2"]
+        assert "DESCUADRE" not in result.stdout
+
+    def test_muestra_que_lista_se_uso(self, tmp_path: Path) -> None:
+        """REQ-005: sin esto, el censo dice "inactivo" y nadie puede decir
+        según qué foto."""
+        yaml_path = _write_yaml(tmp_path)
+        batch_id = _seed_eligibility_batch(tmp_path / "tracking.db")
+        result = CliRunner().invoke(main, ["batch", "show", "-c", str(yaml_path), batch_id])
+        assert result.exit_code == 0, result.output
+        assert "C:/ruta/clientes-activos.csv" in result.stdout
+        assert "2026-08-31T09:15:00" in result.stdout
+        assert "412339" in result.stdout
+
+    def test_sin_lista_no_se_muestra_el_bloque(self, tmp_path: Path) -> None:
+        """Una corrida con la perilla apagada no gana ninguna línea nueva."""
+        yaml_path = _write_yaml(tmp_path)
+        batch_id = _seed_batch(tmp_path / "tracking.db")
+        result = CliRunner().invoke(main, ["batch", "show", "-c", str(yaml_path), batch_id])
+        assert result.exit_code == 0, result.output
+        assert "Lista de activos" not in result.stdout

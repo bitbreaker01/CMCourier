@@ -344,6 +344,13 @@ class MultiBatchOrchestrator:
         ``total`` (033) acota la cantidad de triggers luego del acquire.
         Se aplica de manera uniforme a los paths N=1 y N=2.
         """
+        # 150 REQ-002: la lista de activos se verifica antes del primer
+        # documento, y una sola vez para todos los `chunk`s. ``getattr``
+        # defensivo — paridad con el patrón de los pools para los fakes de
+        # test.
+        preflight = getattr(self._pipeline, "preflight", None)
+        if preflight is not None:
+            preflight()
         try:
             if resume_batch_id is not None or batches_in_flight == 1 or from_stage > 1:
                 # Resume + single-in-flight + from_stage no default fuerzan

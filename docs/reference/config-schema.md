@@ -19,6 +19,7 @@ Convenciones de los rangos:
 | `mapping` | `MappingConfig` (required) | — | — | Modelo Documental (S2). |
 | `metadata` | `MetadataConfigModel` (required) | — | — | Resolución de propiedades (S3). |
 | `identity` | `IdentityConfigModel` | factory | — | (147) Qué campo alimenta el shortname / CIF / sistema del cliente. Todos los slots opcionales; sin declarar nada, comportamiento pre-147. |
+| `eligibility` | `EligibilityConfigModel` | factory | — | (150) Sólo se migran los clientes con producto activo. `enabled: false` (default) es byte-equivalente a que el bloque no exista. |
 | `assembly` | `AssemblyConfig` (required) | — | — | Fuentes + temp dir para S4. |
 | `cmis` | `CmisConfigModel` (required) | — | — | Conexión + retries de S5. |
 | `tracking` | `TrackingConfig` (required) | — | — | SQLite + AS400 sync. |
@@ -461,6 +462,100 @@ Validadores de schema (fallan al CARGAR, no en runtime):
 
 El check `as400_column_widths` del `doctor` (147 REQ-006) cruza `max_digits`
 contra la precisión REAL de la columna antes de que arranque el batch.
+
+---
+
+## Eligibility (`eligibility`, 150)
+
+Directiva de negocio: Content Manager no tiene espacio para todo RVABREP, así
+que **sólo se migran los documentos de clientes con producto activo** —
+alguna cuenta, algún certificado de depósito, alguna tarjeta o algún afiliado
+activo. El banco produce un CSV con el `Shortname` y el `CIF` de esos
+clientes.
+
+Lo que NO se hace es filtrar a oscuras: un documento excluido por esta
+directiva aparece en el censo (148) como `CLIENT_NOT_ACTIVE`, balde
+`EXCLUIDO`. Ver [`how-to/client-eligibility.md`](../how-to/client-eligibility.md).
+
+```yaml
+metadata:
+  sources:
+    - kind: csv
+      alias: clientes_activos
+      csv_path: C:\ruta\clientes-activos.csv
+
+eligibility:
+  enabled: true                               # la perilla
+  source: "csv:clientes_activos"
+  match_any:                                  # cualquiera que matchee ⇒ activo
+    - {field: BAC_Shortname, column: Shortname}
+    - {field: BAC_CIF,       column: CIF}
+```
+
+### `EligibilityConfigModel`
+
+| Field | Type | Default | Constraint | Description |
+|-------|------|---------|------------|-------------|
+| `enabled` | bool | `False` | — | La perilla. Apagada ⇒ **byte-equivalente a que el bloque no exista**. |
+| `source` | `str \| None` | `None` | `"<kind>:<alias>"`, required si `enabled` | La lista de activos, contra un alias de `metadata.sources`. |
+| `match_any` | `tuple[EligibilityMatchModel, ...]` | `()` | no vacía si `enabled` | Criterios. **Basta con que UNO matchee.** |
+
+### `EligibilityMatchModel`
+
+| Field | Type | Default | Constraint | Description |
+|-------|------|---------|------------|-------------|
+| `field` | str (required) | — | clave de `metadata.field_sources` | El valor YA RESUELTO que se busca. |
+| `column` | str (required) | — | columna de la fuente | Dónde se lo busca. |
+
+Validadores de schema (fallan al CARGAR, no en runtime) — **todos detrás de
+la perilla**, porque un bloque a medio escribir no puede romper una corrida
+que ni lo va a mirar:
+
+- `enabled: true` sin `source`.
+- `source` que no tiene la forma `"<kind>:<alias>"`, o cuyo alias no está
+  declarado en `metadata.sources`, o cuyo prefijo de kind miente sobre esa
+  fuente (mismo criterio que 130).
+- `match_any` vacío.
+- Un `match_any[].field` que no es clave de `metadata.field_sources`.
+
+**`match_any` es OR, y eso es deliberado**: el CSV trae las dos columnas, y
+una fila a la que le falte una no debería costar la exclusión del cliente
+entero. Un valor vacío nunca cuenta como match.
+
+### Una lista rota NO es "nadie está activo"
+
+Con `enabled: true`, **antes de procesar el primer documento** se verifica que
+la fuente abra, tenga las columnas declaradas y tenga **al menos una fila**.
+Si algo falla, la corrida **aborta** con un mensaje que nombra la fuente y el
+problema concreto. No se falla documento por documento: no se arranca.
+
+Si el pipeline siguiera, produciría un censo impecable diciendo que 200.000
+documentos se excluyeron por cliente inactivo: un reporte prolijo y
+completamente falso. Una lista vacía no puede significar "no migres nada" —
+eso es un accidente disfrazado de decisión.
+
+El mismo chequeo corre como check `eligibility_list` del `doctor` (grupo
+`mapping`, **SKIP** con la perilla apagada).
+
+### Dónde corre, y qué cuesta
+
+Corre en S2, **inmediatamente después de resolver la identidad** (147) y antes
+de `get_mapping`: para saber si el cliente está activo hay que saber primero
+quién es el cliente.
+
+**Este filtro ahorra espacio en Content Manager, no tiempo de proceso.** Un
+documento de un cliente inactivo paga igual toda la cadena de resolución
+(afiliado hijo → padre → shortname → CIF) antes de poder descartarse. Lo hace
+tolerable el memo por corrida: el primer documento de un cliente inactivo paga
+los saltos, los demás del mismo cliente van gratis. Las búsquedas contra la
+lista se memoizan con la clave `(fuente, columna, valor)`.
+
+### Precedencia
+
+`IDENTITY_UNRESOLVED` **le gana** a `CLIENT_NOT_ACTIVE`: un documento cuya
+identidad no se resuelve nunca llega a evaluarse contra la lista. Sale
+`IDENTITY_UNRESOLVED` (BLOQUEADO), no inactivo — no sabemos si su cliente está
+activo porque no sabemos quién es.
 
 ---
 

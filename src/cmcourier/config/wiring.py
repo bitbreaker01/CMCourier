@@ -9,6 +9,8 @@ Constitución (separación de capas).
 from __future__ import annotations
 
 __all__ = [
+    "build_eligibility_config",
+    "build_eligibility_service",
     "build_identity_config",
     "build_identity_resolver",
     "build_metadata_config",
@@ -17,6 +19,7 @@ __all__ = [
 ]
 
 import atexit
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 
 from cmcourier.adapters.assembly import (
@@ -41,11 +44,13 @@ from cmcourier.config.schema import (
     CsvMetadataSourceConfig,
     CsvRvabrepSource,
     CsvTriggerConfig,
+    EligibilityConfigModel,
     IdentityConfigModel,
     IdentitySlotModel,
     IndexingColumnsModel,
     LocalScanTriggerConfig,
     MetadataConfigModel,
+    MetadataSourceConfig,
     MssqlConnectionConfig,
     MssqlMetadataSourceConfig,
     NiarvilogColumnsModel,
@@ -53,6 +58,7 @@ from cmcourier.config.schema import (
     RvabrepTriggerConfig,
     SingleDocTriggerConfig,
     ValueFormatModel,
+    split_lookup_source_type,
 )
 from cmcourier.config.schema import (
     MappingConfig as MappingConfigModel,
@@ -65,6 +71,11 @@ from cmcourier.observability.system_metrics import (
 )
 from cmcourier.orchestrators.staged import StagedPipeline
 from cmcourier.services.document_cache import DocumentCacheService
+from cmcourier.services.eligibility import (
+    EligibilityConfig,
+    EligibilityMatch,
+    EligibilityService,
+)
 from cmcourier.services.idempotency import IdempotencyCoordinator
 from cmcourier.services.identity import (
     IdentityConfig,
@@ -249,6 +260,11 @@ def build_pipeline(
         # de la cadena vive adentro del servicio, así que un CIF resuelto en
         # S2 sale gratis cuando S3 pide el mismo salto.
         identity_resolver=build_identity_resolver(config, metadata_service),
+        # 150 REQ-001: ``None`` con la perilla apagada — sin servicio, S2 no
+        # tiene a quién preguntarle y la lista de activos ni se abre.
+        eligibility_service=build_eligibility_service(
+            config.eligibility, config.metadata.sources, metadata_service
+        ),
     )
 
 
@@ -728,6 +744,63 @@ def _identity_slot_from_schema(model: IdentitySlotModel | None) -> IdentitySlotC
         max_digits=model.max_digits,
         default_value=model.default_value,
     )
+
+
+def _eligibility_source_path(alias: str, sources: Sequence[MetadataSourceConfig]) -> str:
+    """150 REQ-005: la coordenada legible de la lista, para la auditoría.
+
+    Un CSV tiene ruta; una tabla AS400 / MSSQL tiene tabla o query. No
+    participa de la decisión de elegibilidad: sirve para que dentro de seis
+    meses alguien pueda responder *"¿activo según qué lista?"*.
+    """
+    source = next((s for s in sources if s.alias == alias), None)
+    if source is None:  # pragma: no cover — el schema ya lo rechazó al cargar
+        return ""
+    if isinstance(source, CsvMetadataSourceConfig):
+        return str(source.csv_path)
+    return source.table or source.query or ""
+
+
+def build_eligibility_config(
+    model: EligibilityConfigModel,
+    sources: Sequence[MetadataSourceConfig],
+) -> EligibilityConfig:
+    """150 REQ-001: ``EligibilityConfigModel`` → :class:`EligibilityConfig`.
+
+    Con la perilla apagada devuelve la config apagada y nada más: no se
+    resuelve el alias, no se toca ninguna fuente.
+    """
+    if not model.enabled or model.source is None:
+        return EligibilityConfig()
+    lookup = split_lookup_source_type(model.source)
+    alias = lookup[1] if lookup is not None else ""
+    return EligibilityConfig(
+        enabled=True,
+        source=model.source,
+        match_any=tuple(EligibilityMatch(field=m.field, column=m.column) for m in model.match_any),
+        source_path=_eligibility_source_path(alias, sources),
+    )
+
+
+def build_eligibility_service(
+    model: EligibilityConfigModel,
+    sources: Sequence[MetadataSourceConfig],
+    metadata_service: MetadataService,
+) -> EligibilityService | None:
+    """150 REQ-001: el servicio de elegibilidad, o ``None`` con la perilla abajo.
+
+    Devolver ``None`` es lo que vuelve LITERAL el "byte-equivalente a que el
+    bloque no exista": sin servicio, S2 no tiene a quién preguntarle y la
+    lista no se abre ni una vez.
+
+    Comparte la instancia de :class:`MetadataService` con S3 y con el
+    resolver de identidad (147): el memo por corrida vive adentro del
+    servicio, así que las búsquedas contra la lista se memoizan con la misma
+    disciplina que los saltos de la cadena.
+    """
+    if not model.enabled:
+        return None
+    return EligibilityService(build_eligibility_config(model, sources), metadata_service)
 
 
 def build_identity_config(model: IdentityConfigModel) -> IdentityConfig:

@@ -284,6 +284,7 @@ class TestRunDoctorHappyPath:
             "as400_column_widths",  # 147
             "mapping_completeness",
             "cm_manifest",  # 145
+            "eligibility_list",  # 150
             "metadata_sources",
             "cm_type_alignment",
             "cmis_folders_exist",
@@ -634,7 +635,7 @@ class TestDoctorCheckFilter:
         config = load_config(_write_yaml(tmp_path))
         report = run_doctor(config, _secrets(), selected="mapping")
         names = [r.name for r in report.results]
-        assert names == ["mapping_completeness", "cm_manifest"]
+        assert names == ["mapping_completeness", "cm_manifest", "eligibility_list"]
 
     @respx.mock
     def test_metadata_runs_metadata_sources_and_dry_run(self, tmp_path: Path) -> None:
@@ -672,6 +673,7 @@ class TestDoctorCheckFilter:
                 "as400_column_widths",  # 147
                 "mapping_completeness",
                 "cm_manifest",  # 145
+                "eligibility_list",  # 150
                 "metadata_sources",
                 "cm_type_alignment",
                 "cmis_folders_exist",

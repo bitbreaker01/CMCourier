@@ -114,13 +114,22 @@ También chequea idempotencia cross-batch acá: si `tracking.is_uploaded(txn_num
 
 ### S2 — Mapping
 
-**Qué hace**: dos cosas, en este orden.
+**Qué hace**: tres cosas, en este orden.
 
 **(1) Resuelve la identidad del cliente** (147). RVABREP no siempre la trae: a veces viene sólo el shortname, a veces sólo el CIF, a veces ninguno de los dos y lo único disponible es un afiliado hijo. El bloque `identity:` del YAML declara qué campo alimenta cada slot (`shortname` / `cif` / `system_id`) y esos campos se resuelven con el **mismo motor de `field_sources`** que usa S3, así que un slot puede llegar después de tres saltos encadenados (hijo → padre → shortname → CIF). El resultado es un `ResolvedIdentity` frozen que se cuelga del `_StageItem` y viaja con el documento hasta las tres escrituras: la fila de `migration_log`, `CTECIF`/`CTENUM` del log de AS400 y la clave del mapeo de acá abajo.
 
 Los tres slots son opcionales, y un slot ausente deja el comportamiento pre-147 (el valor se lee del trigger, sin cadena). Ver [`how-to/identity-chain.md`](../how-to/identity-chain.md).
 
-**(2) Traduce el `ID RVI`** (un identificador del modelo documental de RVI) al `cm_object_type` y la `cm_folder` correspondientes en Content Manager. La traducción se carga al startup desde un CSV (`MapeoRVI_CM.csv`) que mantiene el banco. Es un lookup en un dict.
+**(2) Evalúa la elegibilidad del cliente** (150). Content Manager no tiene espacio para todo RVABREP: la directiva de negocio es migrar sólo los documentos de clientes **con producto activo**, y el banco produce un CSV con el `Shortname` y el `CIF` de esos clientes. El bloque `eligibility:` declara contra qué fuente se la consulta y por qué columnas (`match_any`: basta con que UNA matchee). Corre **inmediatamente después de la identidad y antes del mapeo** — para saber si el cliente está activo hay que saber primero quién es el cliente. Un cliente que no está en la lista deja `CLIENT_NOT_ACTIVE` (balde `EXCLUIDO`) y **no avanza a S3**.
+
+Es opcional entero: `enabled: false` (el default) es byte-equivalente a que el bloque no exista. Ver [`how-to/client-eligibility.md`](../how-to/client-eligibility.md).
+
+Dos consecuencias que conviene tener presentes:
+
+- **Una lista rota no significa "nadie está activo".** Con la perilla prendida, el **preflight de la corrida** verifica que la fuente abra, tenga las columnas declaradas y tenga al menos una fila; si algo falla, la corrida **aborta** antes del primer documento. No se falla documento por documento: no se arranca. Si siguiera, emitiría un censo impecable diciendo que 200.000 documentos se excluyeron por cliente inactivo — un reporte prolijo y completamente falso. El mismo chequeo vive como check `eligibility_list` del `doctor`.
+- **Ahorra espacio en Content Manager, no tiempo de proceso.** Un documento de un cliente inactivo paga igual toda la cadena del paso (1) antes de poder descartarse. Lo hace tolerable el memo por corrida: el primero de cada cliente paga los saltos, los demás van gratis. Las búsquedas contra la lista se memoizan con la clave `(fuente, columna, valor)`.
+
+**(3) Traduce el `ID RVI`** (un identificador del modelo documental de RVI) al `cm_object_type` y la `cm_folder` correspondientes en Content Manager. La traducción se carga al startup desde un CSV (`MapeoRVI_CM.csv`) que mantiene el banco. Es un lookup en un dict.
 
 En modo **manifest** (145, recomendado) el lookup es por `(sistema, ID RVI)`, no sólo por `ID RVI`: `MappingService.get_mapping` primero busca la fila específica del sistema que trajo el trigger (`domain/models.py:trigger_system_id`) y, si no hay, cae al comodín (`IDSistema` vacío). Esto permite que el mismo `ID RVI` resuelva a clases CM distintas según de qué sistema vino el documento — algo que los modos consolidado y split no soportan (ahí todo el mapeo vive bajo un único comodín implícito, sin distinguir sistema). El resto de `CMMapping` (tipo, carpeta, propiedades requeridas) sale del manifest JSON de tipos CM en vez de columnas del CSV — ver [`how-to/cm-type-manifest.md`](../how-to/cm-type-manifest.md).
 

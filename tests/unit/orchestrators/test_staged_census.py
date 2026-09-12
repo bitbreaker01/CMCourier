@@ -536,6 +536,8 @@ def test_every_reason_wp2_writes_has_a_bucket() -> None:
         ReasonCode.CLAIM_LOST,
         ReasonCode.CRASHED,
         ReasonCode.CANCELLED,
+        # 150 REQ-004: lo escribe S2, después de resolver la identidad.
+        ReasonCode.CLIENT_NOT_ACTIVE,
     }
     assert written == set(ReasonCode)
     assert all(isinstance(c.bucket, ReasonBucket) for c in written)

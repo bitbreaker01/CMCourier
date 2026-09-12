@@ -109,6 +109,16 @@ CREATE TABLE IF NOT EXISTS migration_batch (
 | `started_at` | TEXT (ISO-8601) | NO | — |
 | `completed_at` | TEXT (ISO-8601) | YES | `NULL` mientras el batch está en vuelo. |
 
+Más las columnas **aditivas de auditoría** (`PRAGMA table_info` + `ALTER TABLE`,
+idempotente al abrir): las de 124 (`operator`, `station`, `pipeline_kind`,
+`environment`, `config_hash`, `overrides_json`, `doctor_verdict`, `outcome`) y
+las de **150** (`eligibility_source_path`, `eligibility_modified_at`,
+`eligibility_rows`) — la ruta, la fecha de modificación y la cantidad de filas
+de la lista de clientes activos que decidió los `CLIENT_NOT_ACTIVE` de este
+batch. El CSV de activos es una foto de un momento, y sin estas tres columnas
+nadie puede responder *"¿activo según qué lista?"* leyendo el censo seis meses
+después. `NULL` en las corridas con la perilla apagada y en las filas legacy.
+
 ---
 
 ## Table `document_cache` (037, opcional)

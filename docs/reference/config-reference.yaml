@@ -428,6 +428,39 @@ identity:                                  # (default: every slot null)
 
 
 # -----------------------------------------------------------------------------
+# eligibility  (OPTIONAL, 150)  — only clients with an ACTIVE product migrate.
+#
+# Business directive: Content Manager has no room for the whole of RVABREP, so
+# only documents of clients with an active product are migrated — an account, a
+# certificate of deposit, a card or an active affiliate. The bank produces a CSV
+# with the Shortname and the CIF of those clients.
+#
+# `enabled: false` (the default) is BYTE-EQUIVALENT to the block not existing:
+# nothing is validated, nothing is evaluated, no reason is emitted.
+#
+# A BROKEN LIST IS NOT "nobody is active". With the knob on, the source must
+# open, have the declared columns and have AT LEAST ONE ROW — checked BEFORE the
+# first document. If any of that fails the run ABORTS, naming the source and the
+# concrete problem. Carrying on would emit a tidy census claiming 200,000
+# documents were excluded for an inactive client: a clean report that is
+# entirely false. Same check runs as the `eligibility_list` doctor check.
+#
+# IT SAVES SPACE, NOT TIME: a document of an inactive client still pays the whole
+# identity chain (child affiliate -> parent -> shortname -> CIF) before it can be
+# discarded. The per-run memo is what makes that tolerable.
+# -----------------------------------------------------------------------------
+eligibility:                               # (default: disabled)
+  enabled: false                           # (default: false) THE KNOB
+  source: "csv:clientes_activos"           # (REQUIRED if enabled) "<kind>:<alias>"
+  # match_any — ANY criterion that matches makes the client active. The CSV
+  # carries both columns, and a row missing one of them should not cost the
+  # exclusion of the whole client. An empty value NEVER counts as a match.
+  match_any:                               # (REQUIRED if enabled) min 1 item
+    - {field: BAC_Shortname, column: Shortname}   # field: key of metadata.field_sources
+    - {field: BAC_CIF, column: CIF}               # column: column of the source
+
+
+# -----------------------------------------------------------------------------
 # assembly  (REQUIRED)  — S4: turning RVABREP page files into a single doc.
 # -----------------------------------------------------------------------------
 assembly:

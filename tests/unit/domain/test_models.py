@@ -417,6 +417,9 @@ _SPEC_TABLE: dict[str, tuple[str, ...]] = {
         "DELETED_AT_SOURCE",
         "ALREADY_UPLOADED",
         "OUT_OF_SCOPE_RESUME",
+        # 150 REQ-004: decisión de negocio (el cliente no tiene producto
+        # activo), no un error ni una falta de configuración.
+        "CLIENT_NOT_ACTIVE",
     ),
     "BLOQUEADO": (
         "CODE_NOT_MAPPED",

@@ -420,6 +420,14 @@ class StreamingOrchestrator:
                 "each run uses a fresh batch_id"
             )
 
+        # 150 REQ-002: la lista de activos se verifica antes de adquirir el
+        # primer trigger. Si está rota, la corrida no arranca. ``getattr``
+        # defensivo — paridad con el patrón del reconciler para los dobles de
+        # test del pipeline.
+        preflight = getattr(self._pipeline, "preflight", None)
+        if preflight is not None:
+            preflight()
+
         triggers: Iterator[Trigger] = self._pipeline._trigger_strategy.acquire(  # noqa: SLF001
             source_descriptor
         )
@@ -428,6 +436,9 @@ class StreamingOrchestrator:
         trigger_iter = _TriggerIter(triggers)
 
         batch_id = self._pipeline._tracking_store.start_batch(total_records=0)  # noqa: SLF001
+        record_audit = getattr(self._pipeline, "record_eligibility_audit", None)
+        if record_audit is not None:
+            record_audit(batch_id)
         recorder = self._build_run_recorder()
         recorder.start_batch(pipeline=self._pipeline.pipeline_name, batch_id=batch_id)
         bucket: queue.Queue[_StageItem | object] = queue.Queue(maxsize=self._bucket_size)

@@ -28,6 +28,15 @@ _AUDIT_COLS = {
     "outcome",
 }
 
+# 150 REQ-005: qué lista de clientes activos se usó. Mismo patrón ADITIVO de
+# 124 — las DBs pre-150 las adquieren al reabrirse, con las filas viejas en
+# NULL.
+_ELIGIBILITY_COLS = {
+    "eligibility_source_path",
+    "eligibility_modified_at",
+    "eligibility_rows",
+}
+
 
 def _cols(db: Path) -> set[str]:
     conn = sqlite3.connect(str(db))
@@ -62,6 +71,49 @@ class TestAuditSchema:
             # la fila legacy sobrevive con audit en NULL
             batches = store.list_batches()
             assert any(b.batch_id == "legacy" for b in batches)
+        finally:
+            store.close()
+
+
+class TestEligibilityAudit150:
+    """REQ-005: el CSV de activos es una foto de un momento. Dentro de seis
+    meses alguien va a leer el censo y preguntar "¿activo según qué lista?"."""
+
+    def test_fresh_store_has_the_eligibility_columns(self, tmp_path: Path) -> None:
+        store = SQLiteTrackingStore(tmp_path / "t.db")
+        store.close()
+        assert _cols(tmp_path / "t.db") >= _ELIGIBILITY_COLS
+
+    def test_pre_150_db_migrates_on_reopen(self, tmp_path: Path) -> None:
+        db = tmp_path / "old.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE migration_batch (batch_id TEXT PRIMARY KEY, "
+            "total_records INTEGER NOT NULL, started_at TEXT NOT NULL, completed_at TEXT)"
+        )
+        conn.commit()
+        conn.close()
+        store = SQLiteTrackingStore(db)
+        try:
+            assert _cols(db) >= _ELIGIBILITY_COLS
+        finally:
+            store.close()
+
+    def test_record_eligibility_audit_roundtrip(self, tmp_path: Path) -> None:
+        store = SQLiteTrackingStore(tmp_path / "t.db")
+        try:
+            batch_id = store.start_batch(total_records=10)
+            store.record_eligibility_audit(
+                batch_id,
+                source_path="C:/ruta/clientes-activos.csv",
+                modified_at="2026-08-31T09:15:00",
+                row_count=412_339,
+            )
+            store.flush()
+            audit = store.batch_audit(batch_id)
+            assert audit["eligibility_source_path"] == "C:/ruta/clientes-activos.csv"
+            assert audit["eligibility_modified_at"] == "2026-08-31T09:15:00"
+            assert audit["eligibility_rows"] == "412339"
         finally:
             store.close()
 

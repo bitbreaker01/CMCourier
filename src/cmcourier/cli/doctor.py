@@ -77,20 +77,23 @@ from cmcourier.config.schema import (
     MssqlMetadataSourceConfig,
     PipelineConfig,
     SingleDocTriggerConfig,
+    split_lookup_source_type,
 )
 from cmcourier.config.wiring import (
+    build_eligibility_service,
     build_identity_config,
     build_mapping_service,
     build_metadata_config,
     build_pipeline,
     niarvilog_columns_from_schema,
 )
+from cmcourier.domain.exceptions import EligibilityListError
 from cmcourier.domain.models import ExcludedTrigger, trigger_system_id
 from cmcourier.domain.ports import S0Strategy
 from cmcourier.services.indexing import IndexingService
 from cmcourier.services.manifest_check import run_manifest_check
 from cmcourier.services.mapping import MappingService
-from cmcourier.services.metadata import MetadataService
+from cmcourier.services.metadata import MetadataConfig, MetadataService
 
 _log = logging.getLogger(__name__)
 
@@ -174,7 +177,10 @@ _CHECK_GROUPS: dict[str, frozenset[str]] = {
     "tracking": frozenset({"tracking_openable", "as400_sync", "as400_column_widths"}),
     # 145 REQ-005: `cm_manifest` es OFFLINE (manifest + YAML + CSV), por eso
     # vive con el resto del mapping y no bajo `cm-targets`, que necesita CMIS.
-    "mapping": frozenset({"mapping_completeness", "cm_manifest"}),
+    # 150 REQ-002: `eligibility_list` es OFFLINE para el caso normal (un CSV
+    # del banco) y responde la misma pregunta que el preflight de la corrida,
+    # así que vive con el resto del mapping.
+    "mapping": frozenset({"mapping_completeness", "cm_manifest", "eligibility_list"}),
     "metadata": frozenset({"metadata_sources", "sample_dry_run"}),
     "cm-types": frozenset({"cm_type_alignment"}),
     # 038: `cm-targets` es el paraguas nuevo; `cm-types` queda por back-compat.
@@ -201,6 +207,7 @@ CHECK_NAMES: tuple[str, ...] = (
     "as400_column_widths",  # 147
     "mapping_completeness",
     "cm_manifest",  # 145
+    "eligibility_list",  # 150
     "metadata_sources",
     "cm_type_alignment",
     "cmis_folders_exist",
@@ -308,6 +315,8 @@ def run_doctor(
         results.append(_check_mapping_completeness(config))
     if _selected("cm_manifest", selected):
         results.append(_check_cm_manifest(config))
+    if _selected("eligibility_list", selected):
+        results.append(_check_eligibility_list(config, secrets))
     if _selected("metadata_sources", selected):
         results.append(_check_metadata_sources(config, secrets))
     if _selected("cm_type_alignment", selected):
@@ -970,6 +979,78 @@ def _check_mapping_completeness(config: PipelineConfig) -> CheckResult:
         status=CheckStatus.PASS,
         message=f"Modelo Documental has {count} mappings",
         details=_frozen({"mapping_count": str(count)}),
+    )
+
+
+def _check_eligibility_list(config: PipelineConfig, secrets: Secrets) -> CheckResult:
+    """150 REQ-002: la lista de clientes activos, el lunes a la mañana.
+
+    Corre EXACTAMENTE la misma verificación que el preflight de la corrida
+    (``EligibilityService.verify_list``) — que abra, que tenga las columnas
+    declaradas y que tenga al menos una fila— para que el doctor y el
+    pipeline no puedan discrepar. FAIL con la fuente y el problema concreto.
+
+    SKIP con la perilla apagada: sin bloque ``eligibility`` no hay lista, y el
+    veredicto de una config pre-150 no cambia ni un poco.
+    """
+    name = "eligibility_list"
+    cfg = config.eligibility
+    if not cfg.enabled or cfg.source is None:
+        return _skip(name, "disabled (eligibility.enabled=false)")
+    lookup = split_lookup_source_type(cfg.source)
+    alias = lookup[1] if lookup is not None else ""
+    source_cfg = next((s for s in config.metadata.sources if s.alias == alias), None)
+    if source_cfg is None:  # pragma: no cover — el schema ya lo rechazó al cargar
+        return CheckResult(
+            name=name,
+            status=CheckStatus.FAIL,
+            message=f"eligibility.source {cfg.source!r} is not declared in metadata.sources",
+        )
+    details = {"source": cfg.source}
+    try:
+        source = _open_metadata_source(config, source_cfg, secrets)
+    except Exception as exc:  # noqa: BLE001
+        return _fail(name, exc, details)
+    try:
+        service = build_eligibility_service(
+            cfg,
+            config.metadata.sources,
+            # Registro de UNA fuente y sin prefetch: este check sólo pregunta
+            # por la lista, no resuelve metadata de ningún documento.
+            MetadataService(
+                MetadataConfig(field_aliases={}, field_sources={}, prefetch_enabled=False),
+                {alias: source},
+            ),
+        )
+        assert service is not None  # noqa: S101 — la perilla ya se chequeó arriba
+        snapshot = service.verify_list()
+    except EligibilityListError as exc:
+        return CheckResult(
+            name=name,
+            status=CheckStatus.FAIL,
+            message=str(exc),
+            details=_frozen({**details, **{k: str(v) for k, v in exc.context.items()}}),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _fail(name, exc, details)
+    finally:
+        with contextlib.suppress(Exception):
+            source.close()
+    return CheckResult(
+        name=name,
+        status=CheckStatus.PASS,
+        message=(
+            f"{cfg.source}: {snapshot.row_count} clientes activos, "
+            f"{len(cfg.match_any)} criterio(s) de match"
+        ),
+        details=_frozen(
+            {
+                **details,
+                "path": snapshot.path,
+                "modified_at": snapshot.modified_at,
+                "rows": str(snapshot.row_count),
+            }
+        ),
     )
 
 

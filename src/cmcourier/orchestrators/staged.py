@@ -84,6 +84,7 @@ from cmcourier.observability.system_metrics import SystemMetricsSampler
 from cmcourier.services.auto_tune import AutoTuneController
 from cmcourier.services.cancellation import CancellationToken
 from cmcourier.services.document_cache import DocumentCacheService
+from cmcourier.services.eligibility import EligibilityService, EligibilitySnapshot
 from cmcourier.services.identity import IdentityResolver, ResolvedIdentity
 from cmcourier.services.indexing import EnrichOutcome, IndexingService
 from cmcourier.services.lane_controller import LaneController
@@ -220,8 +221,16 @@ class StagedPipeline:
         keep_staged_files: bool = False,
         s4_smart_routing: bool = False,
         identity_resolver: IdentityResolver | None = None,
+        eligibility_service: EligibilityService | None = None,
     ) -> None:
         self._trigger_strategy = trigger_strategy
+        # 150 REQ-001/003: sin servicio (la perilla apagada) S2 se comporta
+        # byte-idéntico al pre-150 y la lista de activos NO SE ABRE ni una
+        # vez. El servicio comparte la instancia de ``metadata_service``, así
+        # que las búsquedas contra la lista se memoizan por corrida igual que
+        # los saltos de la cadena de identidad.
+        self._eligibility = eligibility_service
+        self._eligibility_snapshot: EligibilitySnapshot | None = None
         # 147 REQ-003: sin resolver, S2 se comporta byte-idéntico al pre-147.
         # El resolver comparte la instancia de ``metadata_service`` (el memo
         # de la cadena vive adentro), así que lo que S2 consulta S3 no lo
@@ -591,6 +600,10 @@ class StagedPipeline:
         """
         start = time.monotonic()
         self._validate_parameters(batch_size, from_stage, batch_id)
+        # 150 REQ-002: la lista de activos se verifica ANTES de que exista el
+        # `batch`. Si está rota, la corrida no arranca — ni siquiera deja una
+        # fila de batch a medio empezar.
+        self.preflight()
         resolved_batch_id = self._resolve_batch_id(batch_id, from_stage, batch_size)
         self._metrics.start_batch(pipeline=self._pipeline_name, batch_id=resolved_batch_id)
 
@@ -703,10 +716,55 @@ class StagedPipeline:
             if doc.reason_code != ReasonCode.OUT_OF_SCOPE_RESUME.value
         }
 
+    def preflight(self) -> EligibilitySnapshot | None:
+        """150 REQ-002: verifica la lista de activos antes del primer documento.
+
+        Levanta :class:`~cmcourier.domain.exceptions.EligibilityListError` —y
+        aborta la corrida— cuando la fuente no abre, le falta una columna
+        declarada o tiene cero filas. NO se falla documento por documento: no
+        se arranca. Una lista rota no significa "nadie está activo", significa
+        que no podemos responder la pregunta; seguir produciría un censo
+        impecable y completamente falso.
+
+        Con la perilla apagada es un no-op que devuelve ``None`` y no toca
+        ninguna fuente. Idempotente: la verificación corre una sola vez por
+        instancia de pipeline.
+        """
+        if self._eligibility is None or self._eligibility_snapshot is not None:
+            return self._eligibility_snapshot
+        self._eligibility_snapshot = self._eligibility.verify_list()
+        return self._eligibility_snapshot
+
+    def record_eligibility_audit(self, batch_id: str) -> None:
+        """150 REQ-005: deja en ``migration_batch`` QUÉ lista se usó.
+
+        El CSV de activos es una foto de un momento. Dentro de seis meses
+        alguien va a leer el censo y preguntar *"¿activo según qué lista?"* —
+        sin la ruta, la fecha y el conteo de filas no hay forma de contestar.
+
+        ``getattr`` defensivo con el precedente de 124: los dobles de test y
+        los stores que sólo implementan el port no tienen por qué exponer el
+        método de auditoría.
+        """
+        snapshot = self._eligibility_snapshot
+        if snapshot is None:
+            return
+        record = getattr(self._tracking_store, "record_eligibility_audit", None)
+        if record is None:
+            return
+        record(
+            batch_id,
+            source_path=snapshot.path or snapshot.source,
+            modified_at=snapshot.modified_at,
+            row_count=snapshot.row_count,
+        )
+
     def _resolve_batch_id(self, batch_id: str | None, from_stage: int, batch_size: int) -> str:
         if batch_id is not None:
+            self.record_eligibility_audit(batch_id)
             return batch_id
         new_batch_id = self._tracking_store.start_batch(total_records=batch_size)
+        self.record_eligibility_audit(new_batch_id)
         # 148 REQ-005: ``batch_size`` es una perilla de memoria, NO un conteo
         # del origen. Se siembra en 0 y S1 lo arma documento por documento —
         # si no, el denominador arranca mintiendo y el censo nunca cierra.
@@ -1280,6 +1338,17 @@ class StagedPipeline:
         ) as timer:
             try:
                 self._resolve_identity(item)
+                # 150 REQ-003: la elegibilidad va INMEDIATAMENTE después de la
+                # identidad y ANTES del mapeo — para saber si el cliente está
+                # activo hay que saber primero quién es el cliente. Que
+                # ``_resolve_identity`` levante antes es la precedencia de
+                # REQ-004: un documento cuya identidad no resuelve nunca llega
+                # a evaluarse contra la lista.
+                if not self._client_is_active(item):
+                    self._record_terminal_reason(
+                        item, batch_id, StageStatus.S2_FAILED, ReasonCode.CLIENT_NOT_ACTIVE
+                    )
+                    return None, False
                 # 145 REQ-001: la clave del mapping es ``(sistema, IDRVI)``.
                 mapping = self._mapping_service.get_mapping(
                     item.document.index7, self._s2_system_id(item)
@@ -1340,6 +1409,20 @@ class StagedPipeline:
         outcome = self._identity_resolver.resolve_outcome(item.trigger, item.document)
         item.identity = outcome.identity
         item.identity_fields = outcome.fields
+
+    def _client_is_active(self, item: _StageItem) -> bool:
+        """150 REQ-003: ¿el cliente de este documento tiene producto activo?
+
+        Sin servicio cableado (la perilla apagada) devuelve SIEMPRE ``True``
+        sin consultar nada: byte-equivalente al pre-150.
+
+        Se le pasan los campos que la resolución de identidad ya resolvió
+        (147 REQ-003) como semilla; lo que un ``match_any`` pida de más lo
+        resuelve el mismo motor de ``field_sources``, memoizado por corrida.
+        """
+        if self._eligibility is None:
+            return True
+        return self._eligibility.is_active(item.trigger, item.document, item.identity_fields)
 
     def _s2_system_id(self, item: _StageItem) -> str | None:
         """La primera mitad de la clave del mapeo.

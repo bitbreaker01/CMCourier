@@ -27,6 +27,11 @@ from cmcourier.adapters.sources import TabularDataSource
 from cmcourier.adapters.tracking import SQLiteTrackingStore
 from cmcourier.adapters.upload.cmis_uploader import CmisConfig, CmisUploader
 from cmcourier.orchestrators.staged import StagedPipeline
+from cmcourier.services.eligibility import (
+    EligibilityConfig,
+    EligibilityMatch,
+    EligibilityService,
+)
 from cmcourier.services.indexing import IndexingColumnsConfig, IndexingService
 from cmcourier.services.mapping import MappingColumnsConfig, MappingService
 from cmcourier.services.metadata import (
@@ -121,9 +126,13 @@ def pipeline_harness(tmp_path: Path) -> Iterator[PipelineHarness]:
 
     indexing_service = IndexingService(rvabrep_src, _friendly_indexing_config())
     mapping_service = MappingService(modelo_src, MappingColumnsConfig())
+    # 150: el registro se mantiene MUTABLE y compartido con el servicio para
+    # que un test pueda sumarle la lista de clientes activos sin rearmar el
+    # grafo entero de adapters.
+    sources_registry: dict[str, TabularDataSource] = {"clients": clients_src}
     metadata_service = MetadataService(
         config=_build_metadata_config(),
-        sources_registry={"clients": clients_src},
+        sources_registry=sources_registry,
     )
     assembler = PdfAssembler(
         AssemblerConfig(source_root=_ASSEMBLY_FIXTURES, temp_dir=tmp_path / "staging")
@@ -147,10 +156,28 @@ def pipeline_harness(tmp_path: Path) -> Iterator[PipelineHarness]:
         *,
         prep_workers: int = 1,
         s4_process_pool: object | None = None,
+        eligibility_csv: Path | None = None,
     ) -> StagedPipeline:
         trigger_src = TabularDataSource(triggers_csv)
         opened.append(trigger_src)
         trigger_strategy = CsvTriggerStrategy(trigger_src, CsvTriggerColumnsConfig())
+        # 150: la lista de clientes activos entra por el MISMO registro de
+        # sources del MetadataService, así que el memo por corrida la cubre
+        # igual que a cualquier otro lookup. Sin CSV, ``None`` ⇒ pre-150.
+        eligibility = None
+        if eligibility_csv is not None:
+            activos_src = TabularDataSource(eligibility_csv)
+            opened.append(activos_src)
+            sources_registry["clientes_activos"] = activos_src
+            eligibility = EligibilityService(
+                EligibilityConfig(
+                    enabled=True,
+                    source="csv:clientes_activos",
+                    match_any=(EligibilityMatch(field="BAC_CIF", column="CIF"),),
+                    source_path=str(eligibility_csv),
+                ),
+                metadata_service,
+            )
         return StagedPipeline(
             trigger_strategy=trigger_strategy,
             indexing_service=indexing_service,
@@ -161,6 +188,7 @@ def pipeline_harness(tmp_path: Path) -> Iterator[PipelineHarness]:
             tracking_store=tracking_store,
             prep_workers=prep_workers,
             s4_process_pool=s4_process_pool,  # type: ignore[arg-type]
+            eligibility_service=eligibility,
         )
 
     def _register_cmis_for_docs(txn_nums: list[str], object_id_prefix: str = "cm-id-") -> None:

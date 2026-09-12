@@ -35,6 +35,8 @@ __all__ = [
     "CsvMetadataSourceConfig",
     "CsvRvabrepSource",
     "CsvTriggerConfig",
+    "EligibilityConfigModel",
+    "EligibilityMatchModel",
     "FieldConfig",
     "FieldSourceItem",
     "HeavyLightLanesConfig",
@@ -914,6 +916,67 @@ class IdentityConfigModel(BaseModel):
         return self
 
 
+class EligibilityMatchModel(BaseModel):
+    """150 REQ-001: un criterio de ``match_any``.
+
+    ``field`` es el nombre canónico de ``metadata.field_sources`` cuyo valor
+    YA RESUELTO se busca; ``column``, la columna de la lista de activos donde
+    se lo busca. Basta con que UNO de los criterios matchee.
+    """
+
+    model_config = _STRICT
+    field: str
+    column: str
+
+
+class EligibilityConfigModel(BaseModel):
+    """150 REQ-001: bloque top-level ``eligibility:``.
+
+    Directiva de negocio: Content Manager no tiene espacio para todo RVABREP,
+    así que sólo se migran los documentos de clientes **con producto activo**.
+    El banco produce un CSV con el ``Shortname`` y el ``CIF`` de esos
+    clientes; este bloque declara contra qué fuente se lo consulta.
+
+    ``enabled: false`` (default) es **byte-equivalente a que el bloque no
+    exista**: no se valida nada, no se evalúa nada y no se emite ninguna
+    razón. Por eso la validación entera está detrás de la perilla — un bloque
+    a medio escribir no puede romper una corrida que ni lo va a mirar.
+
+    Prendida, en cambio, el YAML no puede mentir: sin ``source``, con
+    ``match_any`` vacío, con un alias no declarado en ``metadata.sources`` o
+    con un ``field`` que no existe en ``metadata.field_sources``, el error
+    sale al CARGAR (las dos últimas las valida :class:`PipelineConfig`, que
+    es quien ve los dos bloques).
+    """
+
+    model_config = _STRICT
+    enabled: bool = False
+    source: str | None = None
+    match_any: tuple[EligibilityMatchModel, ...] = ()
+
+    @model_validator(mode="after")
+    def _enabled_requires_a_usable_list(self) -> EligibilityConfigModel:
+        if not self.enabled:
+            return self
+        if self.source is None:
+            raise ValueError(
+                "eligibility.enabled is true but there is no `source`: "
+                "there is no list to check the client against"
+            )
+        if split_lookup_source_type(self.source) is None:
+            raise ValueError(
+                f"eligibility.source {self.source!r} must be '<kind>:<alias>' "
+                f"(one of {', '.join(LOOKUP_SOURCE_KINDS)}) against an alias "
+                "declared in metadata.sources"
+            )
+        if not self.match_any:
+            raise ValueError(
+                "eligibility.enabled is true but `match_any` is empty: "
+                "no criterion could ever mark a client as active"
+            )
+        return self
+
+
 class SyntheticBandConfig(BaseModel):
     """102: una clase de tamaño del generador sintético.
 
@@ -1328,6 +1391,10 @@ class PipelineConfig(BaseModel):
     # 147 REQ-002: bloque opcional. Ausente ⇒ comportamiento pre-147 (la
     # identidad se lee del trigger, sin cadena).
     identity: IdentityConfigModel = Field(default_factory=IdentityConfigModel)
+    # 150 REQ-001: bloque opcional con perilla. Ausente —o con ``enabled:
+    # false``— ⇒ comportamiento pre-150: no se evalúa elegibilidad y no se
+    # emite ninguna razón.
+    eligibility: EligibilityConfigModel = Field(default_factory=EligibilityConfigModel)
     assembly: AssemblyConfig
     cmis: CmisConfigModel
     tracking: TrackingConfig
@@ -1365,6 +1432,47 @@ class PipelineConfig(BaseModel):
                 raise ValueError(
                     f"identity.{name}.field {slot.field!r} is not a key of "
                     f"metadata.field_sources (declared: {sorted(known) or 'none'})"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _eligibility_references_exist(self) -> PipelineConfig:
+        """150 REQ-001: la lista de activos tiene que existir en el YAML.
+
+        Un alias no declarado en ``metadata.sources``, un prefijo de kind que
+        miente sobre esa fuente (mismo criterio que 130) o un ``field`` que no
+        es clave de ``metadata.field_sources`` son errores de CONFIG, y el
+        root model es el único que ve los dos bloques a la vez.
+
+        Todo detrás de la perilla: con ``enabled: false`` el bloque es
+        byte-equivalente a no existir (REQ-001).
+        """
+        cfg = self.eligibility
+        if not cfg.enabled or cfg.source is None:
+            return self
+        lookup = split_lookup_source_type(cfg.source)
+        if lookup is None:  # pragma: no cover — EligibilityConfigModel ya lo rechazó
+            return self
+        prefix, alias = lookup
+        kinds = {source.alias: source.kind for source in self.metadata.sources}
+        declared = kinds.get(alias)
+        if declared is None:
+            raise ValueError(
+                f"eligibility.source {cfg.source!r} references alias {alias!r}, "
+                f"which is not declared in metadata.sources "
+                f"(declared: {sorted(kinds) or 'none'})"
+            )
+        if declared != prefix:
+            raise ValueError(
+                f"eligibility.source {cfg.source!r} but metadata.sources[{alias}] "
+                f"is kind {declared!r}"
+            )
+        known = self.metadata.field_sources
+        for index, match in enumerate(cfg.match_any):
+            if match.field not in known:
+                raise ValueError(
+                    f"eligibility.match_any[{index}].field {match.field!r} is not a key "
+                    f"of metadata.field_sources (declared: {sorted(known) or 'none'})"
                 )
         return self
 

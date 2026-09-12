@@ -59,6 +59,7 @@ Orientados a **problemas específicos**. Recetas: pre-requisitos → pasos → v
 | [`how-to/cm-type-manifest.md`](how-to/cm-type-manifest.md) | Descubrir/revisar/verificar el manifest de tipos CM, reemplazo de `MetadatosCM.csv` (145) |
 | [`how-to/metadata-format.md`](how-to/metadata-format.md) | Normalizar el valor de un metadato con `format`: ceros a la izquierda y `CHAR(n)` de AS400 (146) |
 | [`how-to/identity-chain.md`](how-to/identity-chain.md) | Resolver shortname / CIF con una cadena de saltos (hijo → padre → shortname → CIF → nombre), `identity:` y el ancho real de `CTENUM` (147) |
+| [`how-to/client-eligibility.md`](how-to/client-eligibility.md) | Migrar sólo los clientes con producto activo: el bloque `eligibility:`, el preflight de la lista y `CLIENT_NOT_ACTIVE` en el censo (150) |
 | [`how-to/build-offline-installer.md`](how-to/build-offline-installer.md) | Armar el bundle air-gapped para la estación del banco (101, 142) |
 
 Índice: [`how-to/operator/README.md`](how-to/operator/README.md).

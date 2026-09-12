@@ -61,6 +61,7 @@ Guías más densas, cada una atada a una feature concreta del sistema.
 | [`cm-type-manifest.md`](cm-type-manifest.md) | Manifest de tipos CM: `types discover`/`review`/`check`/`update`, reemplazo de `MetadatosCM.csv` (145) |
 | [`metadata-format.md`](metadata-format.md) | Normalizar el valor de un metadato con `format` — ceros a la izquierda, `CHAR(n)` de AS400 (146) |
 | [`identity-chain.md`](identity-chain.md) | Resolver el shortname / CIF del cliente con una cadena de saltos: hijo → padre → shortname → CIF → nombre (147) |
+| [`client-eligibility.md`](client-eligibility.md) | Migrar sólo los clientes con producto activo: armar el CSV, prender la perilla, leer el resultado en el censo (150) |
 | [`cmis-target-preflight.md`](cmis-target-preflight.md) | Pre-flight CMIS folders + properties (038, modo split) |
 | [`staging-dry-run.md`](staging-dry-run.md) | Dry-run con datos reales |
 | [`local-staging-simulation.md`](local-staging-simulation.md) | Alfresco + Docker para simular CMIS |

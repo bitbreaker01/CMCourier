@@ -167,6 +167,14 @@ _AUDIT_COLUMNS: tuple[str, ...] = (
     "overrides_json",
     "doctor_verdict",
     "outcome",
+    # 150 REQ-005: QUÉ lista de clientes activos se usó — ruta, fecha de
+    # modificación y cantidad de filas. El CSV de activos es una foto de un
+    # momento; sin esto, dentro de seis meses nadie puede responder "¿activo
+    # según qué lista?" leyendo el censo. Mismo patrón aditivo de 124: NULL
+    # en las filas legacy y en toda corrida con la perilla apagada.
+    "eligibility_source_path",
+    "eligibility_modified_at",
+    "eligibility_rows",
 )
 
 
@@ -481,6 +489,21 @@ class SQLiteTrackingStore(ITrackingStore):
                 doctor_verdict,
                 batch_id,
             ),
+        )
+
+    def record_eligibility_audit(
+        self,
+        batch_id: str,
+        *,
+        source_path: str,
+        modified_at: str,
+        row_count: int,
+    ) -> None:
+        """150 REQ-005: qué lista de clientes activos se usó en este batch."""
+        self._enqueue(
+            "UPDATE migration_batch SET eligibility_source_path = ?, "
+            "eligibility_modified_at = ?, eligibility_rows = ? WHERE batch_id = ?",
+            (source_path, modified_at, str(row_count), batch_id),
         )
 
     def batch_audit(self, batch_id: str) -> dict[str, str]:

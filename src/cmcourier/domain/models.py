@@ -189,6 +189,11 @@ class ReasonCode(StrEnum):
     DELETED_AT_SOURCE = "DELETED_AT_SOURCE"  # código de borrado en RVABREP
     ALREADY_UPLOADED = "ALREADY_UPLOADED"  # ya S5_DONE en un batch previo
     OUT_OF_SCOPE_RESUME = "OUT_OF_SCOPE_RESUME"  # fuera del alcance del resume
+    # 150 REQ-004: el cliente no tiene producto activo (no está en la lista
+    # de elegibilidad). Es una DECISIÓN DE NEGOCIO —Content Manager no tiene
+    # espacio para todo RVABREP—, no un error ni una falta de configuración:
+    # por eso vive en EXCLUIDO y no hay nada que el operador deba arreglar.
+    CLIENT_NOT_ACTIVE = "CLIENT_NOT_ACTIVE"
 
     # --- BLOQUEADO --------------------------------------------------
     CODE_NOT_MAPPED = "CODE_NOT_MAPPED"  # IDRVI sin fila en MapeoRVI_CM.csv
@@ -241,6 +246,7 @@ REASON_BUCKETS: Mapping[ReasonCode, ReasonBucket] = MappingProxyType(
         ReasonCode.DELETED_AT_SOURCE: ReasonBucket.EXCLUIDO,
         ReasonCode.ALREADY_UPLOADED: ReasonBucket.EXCLUIDO,
         ReasonCode.OUT_OF_SCOPE_RESUME: ReasonBucket.EXCLUIDO,
+        ReasonCode.CLIENT_NOT_ACTIVE: ReasonBucket.EXCLUIDO,
         ReasonCode.CODE_NOT_MAPPED: ReasonBucket.BLOQUEADO,
         ReasonCode.TYPE_NOT_IN_MANIFEST: ReasonBucket.BLOQUEADO,
         ReasonCode.IDENTITY_UNRESOLVED: ReasonBucket.BLOQUEADO,

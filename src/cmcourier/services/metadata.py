@@ -334,6 +334,9 @@ class MetadataService:
         # cliente dentro de la misma corrida. Memoiza también los misses: un
         # cliente que no está en la tabla no se vuelve a preguntar.
         self._lookup_memo: dict[tuple[str, str, str, str, str], str | None] = {}
+        # 150 REQ-003: memo de EXISTENCIA, clave ``(fuente, columna, valor)``.
+        # Vive al lado del de la cadena y con la misma vida de corrida.
+        self._exists_memo: dict[tuple[str, str, str], bool] = {}
         self._memo_hits = 0
         if config.prefetch_enabled:
             self._prefetch_csv_sources()
@@ -342,6 +345,52 @@ class MetadataService:
     def memo_hits(self) -> int:
         """147 REQ-005: cuántos saltos de cadena se ahorraron por el memo."""
         return self._memo_hits
+
+    # --- 150: el mismo camino de lookup, para preguntas de EXISTENCIA -----
+
+    def lookup_source(self, source_type: str) -> IDataSource:
+        """La fuente detrás de un ``"<kind>:<alias>"`` del registro.
+
+        150 REQ-002: el preflight de elegibilidad necesita la fuente misma
+        (contarle las filas, mirarle las columnas). Sale del MISMO registro
+        por alias que usan las cadenas de ``field_sources`` — un alias que no
+        está acá no está en ninguna parte.
+        """
+        lookup = split_lookup_source_type(source_type)
+        if lookup is None:
+            raise ConfigurationError(
+                "source_type must be '<kind>:<alias>'",
+                source_type=source_type,
+            )
+        kind_label, alias = lookup
+        if alias not in self._sources_registry:
+            raise ConfigurationError(
+                f"unknown {kind_label} alias at resolution time",
+                alias=alias,
+            )
+        return self._sources_registry[alias]
+
+    def lookup_exists(self, source_type: str, column: str, value: str) -> bool:
+        """150 REQ-003: ¿hay alguna fila en *source_type* con ``column == value``?
+
+        Hermano del memo de la cadena (147 REQ-005) y con su misma vida de
+        corrida, pero con la clave que pide la spec 150: ``(fuente, columna,
+        valor)``. No hay campo canónico acá — la pregunta no es "¿cuánto vale
+        este campo?" sino "¿está este cliente en la lista?".
+
+        Memoiza el hit Y el miss: el documento de un cliente INACTIVO es
+        justamente el caso caro (paga toda la cadena de identidad antes de
+        poder descartarse), y sería absurdo que fuera el único sin memo.
+        """
+        memo_key = (source_type, column, value)
+        cached = self._exists_memo.get(memo_key)
+        if cached is not None:
+            self._memo_hits += 1
+            return cached
+        source = self.lookup_source(source_type)
+        found = bool(source.get_by_fields({column: value}))
+        self._exists_memo[memo_key] = found
+        return found
 
     # --- construcción --------------------------------------------------
 

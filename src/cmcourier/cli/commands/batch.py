@@ -127,6 +127,9 @@ def batch_show_command(config_path: Path, batch_id: str) -> None:
     store = SQLiteTrackingStore(config.tracking.db_path)
     try:
         details = store.get_batch_details(batch_id)
+        # 150 REQ-005: "¿activo según qué lista?" — la respuesta vive en las
+        # columnas de auditoría del batch, no en el censo.
+        audit = store.batch_audit(batch_id)
     finally:
         store.close()
     if details is None:
@@ -148,7 +151,27 @@ def batch_show_command(config_path: Path, batch_id: str) -> None:
     click.echo("")
     _echo_stage_table(details)
     _echo_census(details)
+    _echo_eligibility(audit)
     _echo_failures(details)
+
+
+def _echo_eligibility(audit: Mapping[str, str]) -> None:
+    """150 REQ-005: qué lista de clientes activos decidió las exclusiones.
+
+    El CSV de activos es una foto de un momento: sin la ruta, la fecha y el
+    conteo de filas, un ``CLIENT_NOT_ACTIVE`` leído dentro de seis meses no
+    se puede auditar. Sin corrida con elegibilidad no se imprime nada — una
+    config pre-150 no gana ninguna línea.
+    """
+    path = audit.get("eligibility_source_path")
+    if not path:
+        return
+    click.echo("")
+    click.echo("Lista de activos (150): " + path)
+    click.echo(
+        f"  modificada: {audit.get('eligibility_modified_at') or '-'} · "
+        f"filas: {audit.get('eligibility_rows') or '-'}"
+    )
 
 
 def _echo_stage_table(details: BatchDetails) -> None:

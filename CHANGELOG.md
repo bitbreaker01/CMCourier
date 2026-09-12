@@ -12,6 +12,58 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- **Elegibilidad: sólo los clientes con producto activo (150).** Content
+  Manager no tiene espacio para todo RVABREP, así que la directiva de
+  negocio es migrar únicamente los documentos de clientes **con producto
+  activo** — alguna cuenta, algún certificado de depósito, alguna tarjeta
+  o algún afiliado activo. El banco produce un CSV con el `Shortname` y el
+  `CIF` de esos clientes, y el bloque nuevo `eligibility:` declara contra
+  qué fuente se lo consulta y por qué columnas (`match_any`: **basta con
+  que UNA matchee**, porque el CSV trae las dos y una fila a la que le
+  falte una no debería costar la exclusión del cliente entero).
+
+  Lo que NO se hace es **filtrar a oscuras**, que es lo que el sistema
+  hacía antes del censo (148). Un documento excluido por esta directiva
+  aparece en el censo con todas las letras: `ReasonCode.CLIENT_NOT_ACTIVE`,
+  balde `EXCLUIDO` — decisión de negocio, no un error ni una falta de
+  configuración, y no hay nada que el operador deba arreglar.
+
+  **Una lista rota NO es "nadie está activo": la corrida no arranca.** Con
+  la perilla prendida, antes de procesar el primer documento se verifica
+  que la fuente abra, tenga las columnas declaradas y tenga **al menos una
+  fila**; si algo de eso falla, la corrida **aborta** con un mensaje que
+  nombra la fuente y el problema concreto. No se falla documento por
+  documento: no se arranca. Si el pipeline siguiera, produciría un censo
+  impecable diciendo que 200.000 documentos se excluyeron por cliente
+  inactivo — un reporte prolijo y completamente falso. Una lista vacía no
+  puede significar "no migres nada": eso es un accidente disfrazado de
+  decisión. El mismo chequeo vive como check `eligibility_list` del
+  `doctor` (grupo `mapping`, SKIP con la perilla apagada).
+
+  Corre en S2, **inmediatamente después de resolver la identidad** (147) y
+  antes de `get_mapping`: para saber si el cliente está activo hay que
+  saber primero quién es el cliente. Consecuencia que se documenta
+  explícita porque la intuición dice lo contrario: **este filtro ahorra
+  espacio en Content Manager, no tiempo de proceso.** Un documento de un
+  cliente inactivo paga igual toda la cadena de resolución (afiliado hijo
+  → padre → shortname → CIF) antes de poder descartarse; lo hace tolerable
+  el memo por corrida de 147, y las búsquedas contra la lista se memoizan
+  con la clave `(fuente, columna, valor)`, hits y misses por igual.
+
+  `IDENTITY_UNRESOLVED` **le gana** a `CLIENT_NOT_ACTIVE`: un documento
+  cuya identidad no resuelve nunca llega a evaluarse contra la lista — no
+  sabemos si su cliente está activo porque no sabemos quién es.
+
+  `migration_batch` gana tres columnas aditivas (`eligibility_source_path`,
+  `eligibility_modified_at`, `eligibility_rows`, mismo patrón que la 124) y
+  `batch show` las muestra junto al conteo de `CLIENT_NOT_ACTIVE`: el CSV
+  de activos es una foto de un momento, y dentro de seis meses alguien va a
+  leer el censo y preguntar *"¿activo según qué lista?"*.
+
+  **`enabled: false` es el default y es byte-equivalente a que el bloque no
+  exista**: no se valida nada, no se evalúa nada, la lista no se abre ni
+  una vez y no se emite ninguna razón.
+
 - **Censo del origen: todo documento termina con una razón (148).** El
   operador no podía responder *"¿qué había en el origen y qué pasó con
   cada cosa?"* — sólo *"¿qué procesé?"*. Son preguntas distintas y la
