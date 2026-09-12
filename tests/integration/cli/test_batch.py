@@ -596,3 +596,56 @@ class TestElegibilidadEnBatchShow150:
         result = CliRunner().invoke(main, ["batch", "show", "-c", str(yaml_path), batch_id])
         assert result.exit_code == 0, result.output
         assert "Lista de activos" not in result.stdout
+
+
+class TestRetryFailedNoTocaElBaldeExcluido150:
+    """El operador corre `retry-failed` y los inactivos NO vuelven al ruedo."""
+
+    def test_reintenta_bloqueado_y_fallo_pero_no_excluido(self, tmp_path: Path) -> None:
+        yaml_path = _write_yaml(tmp_path)
+        batch_id = _seed_eligibility_batch(tmp_path / "tracking.db")
+        _seed_extra_failures(tmp_path / "tracking.db", batch_id)
+
+        result = CliRunner().invoke(
+            main, ["batch", "retry-failed", "-c", str(yaml_path), "--batch", batch_id]
+        )
+        assert result.exit_code == 0, result.output
+        # Los dos inactivos quedan afuera; se reintentan sólo los otros dos.
+        assert "Reset 2 FAILED" in result.stdout
+
+        show = CliRunner().invoke(main, ["batch", "show", "-c", str(yaml_path), batch_id])
+        assert "CLIENT_NOT_ACTIVE" in show.stdout
+        assert "CODE_NOT_MAPPED" not in show.stdout
+        assert "CM_TIMEOUT" not in show.stdout
+
+
+def _seed_extra_failures(db_path: Path, batch_id: str) -> None:
+    """Un BLOQUEADO y un FALLO sobre un batch que ya tiene inactivos."""
+    from datetime import datetime
+
+    from cmcourier.domain.models import MigrationRecord, ReasonCode
+
+    store = SQLiteTrackingStore(db_path)
+    try:
+        for txn, stage, reason in (
+            ("TXN_UNMAPPED", StageStatus.S2_FAILED, ReasonCode.CODE_NOT_MAPPED),
+            ("TXN_TIMEOUT", StageStatus.S5_FAILED, ReasonCode.CM_TIMEOUT),
+        ):
+            store.mark_stage_pending(
+                MigrationRecord(
+                    trigger_shortname="TESTUSER001",
+                    trigger_cif="000000",
+                    trigger_system_id="1",
+                    rvabrep_txn_num=txn,
+                    rvabrep_file_name=f"{txn}.001",
+                    batch_id=batch_id,
+                    status=StageStatus.S2_PENDING,
+                    created_at=datetime(2026, 1, 1, 0, 0),
+                    id_rvi="CC03",
+                ),
+                StageStatus.S2_PENDING,
+            )
+            store.mark_stage_failed(txn, batch_id, stage, "synthetic", reason_code=reason)
+        store.flush()
+    finally:
+        store.close()

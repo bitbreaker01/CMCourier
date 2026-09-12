@@ -937,16 +937,28 @@ class EligibilityConfigModel(BaseModel):
     El banco produce un CSV con el ``Shortname`` y el ``CIF`` de esos
     clientes; este bloque declara contra qué fuente se lo consulta.
 
-    ``enabled: false`` (default) es **byte-equivalente a que el bloque no
-    exista**: no se valida nada, no se evalúa nada y no se emite ninguna
-    razón. Por eso la validación entera está detrás de la perilla — un bloque
-    a medio escribir no puede romper una corrida que ni lo va a mirar.
+    **Estructura y comportamiento se separan a propósito**:
 
-    Prendida, en cambio, el YAML no puede mentir: sin ``source``, con
-    ``match_any`` vacío, con un alias no declarado en ``metadata.sources`` o
-    con un ``field`` que no existe en ``metadata.field_sources``, el error
-    sale al CARGAR (las dos últimas las valida :class:`PipelineConfig`, que
-    es quien ve los dos bloques).
+    * La **ESTRUCTURA** (que haya ``source``, que tenga la forma
+      ``"<kind>:<alias>"``, que el alias esté declarado en
+      ``metadata.sources`` con ese kind, que ``match_any`` no esté vacío y
+      que cada ``field`` exista en ``metadata.field_sources``) se valida
+      **SIEMPRE**, aunque la perilla esté apagada. Un alias mal escrito es un
+      error de config esté la perilla donde esté; validarlo no cambia ningún
+      comportamiento y evita que el operador prenda la perilla en producción
+      y recién ahí descubra el typo. Mismo criterio que el registro de
+      conexiones de 129, que valida el alias de un ``as400_sync`` apagado.
+    * El **COMPORTAMIENTO** (abrir la fuente, el preflight de filas y
+      columnas, evaluar documentos) sigue detrás de ``enabled``. Con la
+      perilla apagada la fuente NO se abre ni una vez y no se emite ninguna
+      razón: ahí sigue siendo byte-equivalente al pre-150.
+
+    Un bloque que no dice NADA —ausente, o ``enabled: false`` a secas— no
+    tiene estructura que validar: ver :attr:`declares_a_list`.
+
+    Las dos validaciones que necesitan ver otro bloque (el alias contra
+    ``metadata.sources`` y los ``field`` contra ``metadata.field_sources``)
+    viven en :class:`PipelineConfig`, que es quien ve los dos.
     """
 
     model_config = _STRICT
@@ -954,13 +966,25 @@ class EligibilityConfigModel(BaseModel):
     source: str | None = None
     match_any: tuple[EligibilityMatchModel, ...] = ()
 
+    @property
+    def declares_a_list(self) -> bool:
+        """¿El bloque DICE algo, más allá de ``enabled: false``?
+
+        Es el interruptor de la validación estructural. ``eligibility: {}`` o
+        ``eligibility: {enabled: false}`` a secas son exactamente el bloque
+        ausente y no hay nada que verificar; en cuanto aparece un ``source``,
+        un ``match_any`` o la perilla en alto, el YAML está afirmando algo y
+        se lo valida entero.
+        """
+        return self.enabled or self.source is not None or bool(self.match_any)
+
     @model_validator(mode="after")
-    def _enabled_requires_a_usable_list(self) -> EligibilityConfigModel:
-        if not self.enabled:
+    def _a_declared_list_must_be_usable(self) -> EligibilityConfigModel:
+        if not self.declares_a_list:
             return self
         if self.source is None:
             raise ValueError(
-                "eligibility.enabled is true but there is no `source`: "
+                "eligibility declares a list but there is no `source`: "
                 "there is no list to check the client against"
             )
         if split_lookup_source_type(self.source) is None:
@@ -971,7 +995,7 @@ class EligibilityConfigModel(BaseModel):
             )
         if not self.match_any:
             raise ValueError(
-                "eligibility.enabled is true but `match_any` is empty: "
+                "eligibility declares a list but `match_any` is empty: "
                 "no criterion could ever mark a client as active"
             )
         return self
@@ -1444,11 +1468,16 @@ class PipelineConfig(BaseModel):
         es clave de ``metadata.field_sources`` son errores de CONFIG, y el
         root model es el único que ve los dos bloques a la vez.
 
-        Todo detrás de la perilla: con ``enabled: false`` el bloque es
-        byte-equivalente a no existir (REQ-001).
+        Es validación **ESTRUCTURAL**, así que corre aunque la perilla esté
+        apagada: un alias mal escrito es un error de config esté la perilla
+        donde esté, y detectarlo acá evita que el operador lo descubra recién
+        al prenderla en producción. Lo que sí queda detrás de ``enabled`` es
+        el COMPORTAMIENTO — abrir la fuente y evaluar documentos. Un bloque
+        que no declara ninguna lista (ausente, o ``enabled: false`` a secas)
+        no tiene nada que verificar.
         """
         cfg = self.eligibility
-        if not cfg.enabled or cfg.source is None:
+        if not cfg.declares_a_list or cfg.source is None:
             return self
         lookup = split_lookup_source_type(cfg.source)
         if lookup is None:  # pragma: no cover — EligibilityConfigModel ya lo rechazó

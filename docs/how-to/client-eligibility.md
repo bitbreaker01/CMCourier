@@ -21,8 +21,9 @@ otra exclusión.
   por esta directiva, y de qué códigos.
 
 Si migrás todo RVABREP, **no necesitás nada de esto**. El bloque
-`eligibility:` es opcional entero y su default (`enabled: false`) es
-**byte-equivalente a que el bloque no exista**.
+`eligibility:` es opcional entero, y con su default (`enabled: false`) no se
+abre ninguna fuente ni se evalúa ningún documento: el pipeline se comporta
+exactamente como antes de 150.
 
 ## Pre-requisitos
 
@@ -78,9 +79,19 @@ eligibility:
 
 Todo esto se valida **al cargar el YAML**: sin `source`, con `match_any`
 vacío, con un alias no declarado o con un `field` que no existe en
-`field_sources`, el pipeline no arranca. Con la perilla apagada no se valida
-nada — un bloque a medio escribir no puede romper una corrida que ni lo va a
-mirar.
+`field_sources`, el pipeline no arranca.
+
+**Y se valida aunque la perilla esté apagada.** Un alias mal escrito es un
+error de config esté la perilla donde esté; verificarlo no abre ninguna fuente
+ni cambia ningún comportamiento, y te evita prender la perilla en producción
+para recién ahí descubrir el typo. Lo único que no se valida es el bloque que
+no dice nada: sin `eligibility:`, con `eligibility: {}` o con
+`eligibility: {enabled: false}` a secas, no hay lista declarada y no hay nada
+que verificar.
+
+Lo que sí queda detrás de la perilla es el **comportamiento**: con
+`enabled: false` la lista no se abre ni una vez, no corre el preflight del
+paso 4 y no se evalúa ningún documento.
 
 ## 3. Verificar antes de lanzar
 

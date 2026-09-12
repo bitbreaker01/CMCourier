@@ -97,15 +97,12 @@ class TestPerilla150:
         assert sin_bloque.eligibility == apagado.eligibility
         assert apagado.eligibility == EligibilityConfigModel()
 
-    def test_apagada_no_valida_nada(self, root_data: dict[str, Any]) -> None:
-        """Con la perilla abajo no hay lista que verificar: un bloque a medio
-        escribir no rompe una corrida que ni lo va a mirar."""
-        data = {
-            **root_data,
-            "eligibility": {"enabled": False, "source": "csv:no_declarado", "match_any": []},
-        }
+    def test_solo_la_perilla_apagada_no_declara_nada(self, root_data: dict[str, Any]) -> None:
+        """``eligibility: {enabled: false}`` a secas no dice nada que validar —
+        es exactamente el bloque ausente."""
+        data = {**root_data, "eligibility": {"enabled": False}}
         config = PipelineConfig.model_validate(data)
-        assert config.eligibility.enabled is False
+        assert config.eligibility == EligibilityConfigModel()
 
     def test_bloque_completo(self, root_data: dict[str, Any]) -> None:
         config = PipelineConfig.model_validate({**root_data, "eligibility": _FULL_BLOCK})
@@ -167,3 +164,63 @@ class TestValidacionAlCargar150:
         data = {**root_data, "eligibility": {**_FULL_BLOCK, "unknown_knob": 1}}
         with pytest.raises(ValidationError):
             PipelineConfig.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# La ESTRUCTURA se valida siempre; el COMPORTAMIENTO va detrás de la perilla
+# ---------------------------------------------------------------------------
+
+
+class TestEstructuraSeValidaConLaPerillaApagada150:
+    """Un alias mal escrito es un error de config esté la perilla donde esté.
+
+    Validarlo no cambia NINGÚN comportamiento —con la perilla abajo la fuente
+    sigue sin abrirse— y evita que el operador prenda la perilla en producción
+    y recién ahí descubra el typo. Mismo criterio que el registro de
+    conexiones de 129, que valida los alias de un ``as400_sync`` apagado.
+    """
+
+    @staticmethod
+    def _off(**overrides: Any) -> dict[str, Any]:
+        return {**_FULL_BLOCK, "enabled": False, **overrides}
+
+    def test_alias_no_declarado_falla_igual(self, root_data: dict[str, Any]) -> None:
+        data = {**root_data, "eligibility": self._off(source="csv:no_declarado")}
+        with pytest.raises(ValidationError, match="no_declarado"):
+            PipelineConfig.model_validate(data)
+
+    def test_kind_que_miente_falla_igual(self, root_data: dict[str, Any]) -> None:
+        data = {**root_data, "eligibility": self._off(source="mssql:clientes_activos")}
+        with pytest.raises(ValidationError, match="csv"):
+            PipelineConfig.model_validate(data)
+
+    def test_source_mal_formado_falla_igual(self, root_data: dict[str, Any]) -> None:
+        data = {**root_data, "eligibility": self._off(source="clientes_activos")}
+        with pytest.raises(ValidationError, match="source"):
+            PipelineConfig.model_validate(data)
+
+    def test_match_any_vacio_falla_igual(self, root_data: dict[str, Any]) -> None:
+        data = {**root_data, "eligibility": self._off(match_any=[])}
+        with pytest.raises(ValidationError, match="match_any"):
+            PipelineConfig.model_validate(data)
+
+    def test_field_inexistente_falla_igual(self, root_data: dict[str, Any]) -> None:
+        block = self._off(match_any=[{"field": "BAC_Inexistente", "column": "Shortname"}])
+        data = {**root_data, "eligibility": block}
+        with pytest.raises(ValidationError, match="BAC_Inexistente"):
+            PipelineConfig.model_validate(data)
+
+    def test_match_any_sin_source_falla_igual(self, root_data: dict[str, Any]) -> None:
+        """El bloque dice algo (``match_any``) pero no contra qué lista."""
+        block = {"enabled": False, "match_any": _FULL_BLOCK["match_any"]}
+        data = {**root_data, "eligibility": block}
+        with pytest.raises(ValidationError, match="source"):
+            PipelineConfig.model_validate(data)
+
+    def test_un_bloque_apagado_pero_correcto_es_valido(self, root_data: dict[str, Any]) -> None:
+        """Y sigue siendo byte-equivalente al pre-150 en comportamiento: el
+        servicio no se construye y la fuente no se abre (ver
+        ``test_eligibility_wiring.py``)."""
+        config = PipelineConfig.model_validate({**root_data, "eligibility": self._off()})
+        assert config.eligibility.enabled is False
+        assert config.eligibility.source == "csv:clientes_activos"

@@ -47,6 +47,7 @@ from cmcourier.domain.models import (
     DocDetail,
     FailedRecord,
     MigrationRecord,
+    ReasonBucket,
     ReasonCode,
     ReasonCount,
     StageStatus,
@@ -202,6 +203,34 @@ _PRAGMAS_READER: tuple[str, ...] = (
 
 _BATCH_FLUSH_SIZE = 500
 _BATCH_FLUSH_INTERVAL_S = 1.0
+
+# 150: las razones que ``retry_failed`` NUNCA reintenta — todo el balde
+# ``EXCLUIDO``. El discriminador correcto es el BALDE, no el ``status``:
+# por el eje ortogonal de 148 una exclusión puede vivir en una fila
+# ``*_FAILED`` (``CLIENT_NOT_ACTIVE`` es ``S2_FAILED``), así que el
+# ``LIKE '%_FAILED'`` se las llevaba puestas. Con la lista de activos real
+# del operador eso son cientos de miles de documentos re-procesados —cada
+# uno pagando otra vez la cadena completa de identidad— para volver a
+# excluirlos exactamente igual: una decisión de negocio no cambia de
+# opinión porque la reintentes.
+#
+# ``BLOQUEADO`` y ``FALLO`` sí se reintentan: el primero porque el operador
+# pudo haber arreglado el YAML / CSV / manifest entremedio, el segundo
+# porque es justamente para lo que existe el reintento.
+#
+# Se DERIVA del mapeo del dominio, no se hardcodea: una razón ``EXCLUIDO``
+# nueva queda no-reintentable sola.
+_NON_RETRYABLE_REASONS: tuple[str, ...] = tuple(
+    code.value for code in ReasonCode if code.bucket is ReasonBucket.EXCLUIDO
+)
+
+# ``NOT IN`` sobre un NULL da NULL (falsy) y descartaría las filas SIN razón,
+# que son reintentables legítimas (una fila legacy, o una ya reintentada que
+# quedó con ``reason_code`` en NULL). De ahí el guard explícito.
+_RETRYABLE_CLAUSE = (
+    "AND (reason_code IS NULL OR reason_code NOT IN "
+    f"({', '.join('?' * len(_NON_RETRYABLE_REASONS))}))"
+)
 
 
 # is_stage_done(stage) devuelve True si la fila alcanzó AL MENOS el estado de
@@ -899,26 +928,22 @@ class SQLiteTrackingStore(ITrackingStore):
         # Drenamos cualquier escritura pendiente para que el UPDATE vea un
         # estado consistente.
         self.flush()
+        # 150: el filtro del balde va EN EL SQL, no en Python después de traer
+        # las filas — el caso que motiva el cambio son cientos de miles de
+        # documentos, y traerlos para descartarlos sería pagar justo lo que se
+        # quiere evitar.
+        status_clause = "status LIKE '%_FAILED'" if stage is None else "status = ?"
+        params: tuple[str, ...] = (batch_id,) if stage is None else (batch_id, stage.value)
         try:
             with self._sync_lock:
-                if stage is None:
-                    cursor = self._sync_conn.execute(
-                        "UPDATE migration_log "
-                        "SET status = REPLACE(status, '_FAILED', '_PENDING'), "
-                        "    error_message = NULL, "
-                        "    reason_code = NULL "  # 148: la razón muere con la falla
-                        "WHERE batch_id = ? AND status LIKE '%_FAILED'",
-                        (batch_id,),
-                    )
-                else:
-                    cursor = self._sync_conn.execute(
-                        "UPDATE migration_log "
-                        "SET status = REPLACE(status, '_FAILED', '_PENDING'), "
-                        "    error_message = NULL, "
-                        "    reason_code = NULL "  # 148: la razón muere con la falla
-                        "WHERE batch_id = ? AND status = ?",
-                        (batch_id, stage.value),
-                    )
+                cursor = self._sync_conn.execute(
+                    "UPDATE migration_log "
+                    "SET status = REPLACE(status, '_FAILED', '_PENDING'), "
+                    "    error_message = NULL, "
+                    "    reason_code = NULL "  # 148: la razón muere con la falla
+                    f"WHERE batch_id = ? AND {status_clause} {_RETRYABLE_CLAUSE}",
+                    (*params, *_NON_RETRYABLE_REASONS),
+                )
                 self._sync_conn.commit()
         except sqlite3.Error as exc:
             raise TrackingError("retry_failed failed", batch_id=batch_id) from exc

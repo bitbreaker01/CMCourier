@@ -220,10 +220,28 @@ Lo que `retry_failed` hace en el tracking store:
 
 ```sql
 UPDATE migration_log
-SET status = REPLACE(status, '_FAILED', '_PENDING')
-WHERE batch_id = ? AND status LIKE '%_FAILED'
-[AND status = ?]  -- si --stage está especificado
+SET status = REPLACE(status, '_FAILED', '_PENDING'),
+    error_message = NULL,
+    reason_code = NULL                       -- 148: la razón muere con la falla
+WHERE batch_id = ? AND status LIKE '%_FAILED' -- o `status = ?` con --stage
+  -- 150: NUNCA el balde EXCLUIDO, sin importar el status
+  AND (reason_code IS NULL OR reason_code NOT IN (...))
 ```
+
+**El discriminador del último filtro es el BALDE, no el `status`** (150). Por
+el eje ortogonal de 148, una exclusión puede vivir en una fila `*_FAILED`:
+`CLIENT_NOT_ACTIVE` es `S2_FAILED` + balde `EXCLUIDO`. Reintentar una decisión
+de negocio no tiene sentido —la lista de clientes activos no va a cambiar de
+opinión porque la reintentes— y con la lista real del operador serían cientos
+de miles de documentos re-procesados, cada uno pagando otra vez la cadena
+completa de resolución de identidad, para volver a excluirlos exactamente
+igual.
+
+`BLOQUEADO` y `FALLO` se reintentan como siempre: el primero porque el
+operador pudo haber arreglado el YAML / CSV / manifest entremedio, el segundo
+porque es justamente para lo que existe el reintento. El `reason_code IS NULL`
+del guard no es cosmético: `NOT IN` sobre un NULL da NULL, y sin él una fila
+sin razón (legacy, o ya reintentada) dejaría de reintentarse para siempre.
 
 Después de eso, re-corrés `cmcourier <pipeline> run --batch-id <batch_id> --from-stage 4` (o el stage correspondiente) y solo los docs reseteados se procesan. Los `S5_DONE` del mismo batch se mantienen y se saltean. La idempotencia cross-batch además los protege del re-upload aunque corrieras desde S1.
 

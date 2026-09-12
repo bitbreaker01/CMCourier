@@ -133,6 +133,10 @@ $ cmcourier apply -c config.yaml --resume <batch_id>
 reintentó bien deja de figurar en el censo y pasa a contar como migrado.
 No queda contado dos veces.
 
+Y no toca el balde `EXCLUIDO` (150): esas filas se quedan como están, con su
+razón intacta. Reintentar una decisión de negocio no la cambia de opinión —
+por eso el `Reset N` puede ser menor que la cantidad de `*_FAILED` del batch.
+
 ## 4. `FALLO` — reintento o investigación
 
 Acá sí sirve reintentar, **pero no para todo**. La diferencia importa: tres

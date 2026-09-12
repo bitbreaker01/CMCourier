@@ -4,7 +4,8 @@
 * ``batch show <id>``: contadores por etapa, el censo del origen (148) y
   records fallados.
 * ``batch retry-failed --batch <id> [--stage Sn]``: resetea las
-  fallas.
+  fallas. 150: nunca toca el balde ``EXCLUIDO`` — el discriminador es el
+  balde, no el ``status``.
 * ``batch export-report --batch <id> --format csv|json [--output <path>]``:
   vuelca el estado completo del batch —censo incluido— para analisis
   offline.
@@ -254,7 +255,11 @@ def _echo_failures(details: BatchDetails) -> None:
     help="If given, only reset failures in this stage.",
 )
 def batch_retry_failed_command(config_path: Path, batch_id: str, stage: str | None) -> None:
-    """Resetea las filas ``*_FAILED`` a ``*_PENDING`` para reintento."""
+    """Resetea las filas ``*_FAILED`` a ``*_PENDING`` para reintento.
+
+    150: las filas del balde ``EXCLUIDO`` quedan intactas — reintentar una
+    decisión de negocio (``CLIENT_NOT_ACTIVE``) no la cambia de opinión.
+    """
     config = _load(config_path)
     configure_observability(config.observability, "INFO")
     stage_status = StageStatus(f"{stage}_FAILED") if stage is not None else None

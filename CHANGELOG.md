@@ -60,9 +60,26 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
   de activos es una foto de un momento, y dentro de seis meses alguien va a
   leer el censo y preguntar *"¿activo según qué lista?"*.
 
-  **`enabled: false` es el default y es byte-equivalente a que el bloque no
-  exista**: no se valida nada, no se evalúa nada, la lista no se abre ni
-  una vez y no se emite ninguna razón.
+  `batch retry-failed` **deja de tocar el balde `EXCLUIDO`**. El
+  discriminador correcto es el balde, no el `status`: por el eje ortogonal
+  de 148 una exclusión vive en una fila `*_FAILED` (`CLIENT_NOT_ACTIVE` es
+  `S2_FAILED`), así que el `LIKE '%_FAILED'` se las llevaba puestas — con
+  la lista real del operador, cientos de miles de documentos re-procesados
+  (cada uno pagando otra vez la cadena completa de identidad) para volver a
+  excluirlos exactamente igual. Una decisión de negocio no cambia de opinión
+  porque la reintentes. `BLOQUEADO` y `FALLO` se reintentan como siempre —
+  el primero porque el operador pudo haber arreglado la config entremedio.
+  El filtro va en el SQL y se deriva del mapeo código → balde del dominio,
+  así que una razón `EXCLUIDO` nueva queda no-reintentable sola.
+
+  **`enabled: false` es el default y apaga el COMPORTAMIENTO**: la lista no
+  se abre ni una vez, no corre el preflight, no se evalúa ningún documento y
+  no se emite ninguna razón. La **estructura** del bloque (alias declarado en
+  `metadata.sources`, kind coherente, `match_any` no vacío, cada `field`
+  existente) se valida igual, esté la perilla donde esté: un alias mal
+  escrito es un error de config, verificarlo no abre ninguna fuente, y evita
+  que el operador prenda la perilla en producción y recién ahí descubra el
+  typo — mismo criterio que el registro de conexiones de 129.
 
 - **Censo del origen: todo documento termina con una razón (148).** El
   operador no podía responder *"¿qué había en el origen y qué pasó con

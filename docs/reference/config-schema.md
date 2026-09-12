@@ -19,7 +19,7 @@ Convenciones de los rangos:
 | `mapping` | `MappingConfig` (required) | — | — | Modelo Documental (S2). |
 | `metadata` | `MetadataConfigModel` (required) | — | — | Resolución de propiedades (S3). |
 | `identity` | `IdentityConfigModel` | factory | — | (147) Qué campo alimenta el shortname / CIF / sistema del cliente. Todos los slots opcionales; sin declarar nada, comportamiento pre-147. |
-| `eligibility` | `EligibilityConfigModel` | factory | — | (150) Sólo se migran los clientes con producto activo. `enabled: false` (default) es byte-equivalente a que el bloque no exista. |
+| `eligibility` | `EligibilityConfigModel` | factory | — | (150) Sólo se migran los clientes con producto activo. `enabled: false` (default) no evalúa nada y no abre la fuente; la estructura del bloque se valida igual. |
 | `assembly` | `AssemblyConfig` (required) | — | — | Fuentes + temp dir para S4. |
 | `cmis` | `CmisConfigModel` (required) | — | — | Conexión + retries de S5. |
 | `tracking` | `TrackingConfig` (required) | — | — | SQLite + AS400 sync. |
@@ -496,9 +496,9 @@ eligibility:
 
 | Field | Type | Default | Constraint | Description |
 |-------|------|---------|------------|-------------|
-| `enabled` | bool | `False` | — | La perilla. Apagada ⇒ **byte-equivalente a que el bloque no exista**. |
-| `source` | `str \| None` | `None` | `"<kind>:<alias>"`, required si `enabled` | La lista de activos, contra un alias de `metadata.sources`. |
-| `match_any` | `tuple[EligibilityMatchModel, ...]` | `()` | no vacía si `enabled` | Criterios. **Basta con que UNO matchee.** |
+| `enabled` | bool | `False` | — | La perilla del **comportamiento**. Apagada ⇒ la fuente no se abre, no hay preflight y no se evalúa ningún documento. La estructura del bloque se valida igual. |
+| `source` | `str \| None` | `None` | `"<kind>:<alias>"`, required si el bloque declara una lista | La lista de activos, contra un alias de `metadata.sources`. |
+| `match_any` | `tuple[EligibilityMatchModel, ...]` | `()` | no vacía si el bloque declara una lista | Criterios. **Basta con que UNO matchee.** |
 
 ### `EligibilityMatchModel`
 
@@ -507,16 +507,29 @@ eligibility:
 | `field` | str (required) | — | clave de `metadata.field_sources` | El valor YA RESUELTO que se busca. |
 | `column` | str (required) | — | columna de la fuente | Dónde se lo busca. |
 
-Validadores de schema (fallan al CARGAR, no en runtime) — **todos detrás de
-la perilla**, porque un bloque a medio escribir no puede romper una corrida
-que ni lo va a mirar:
+Validadores de schema (fallan al CARGAR, no en runtime). **Corren SIEMPRE que
+el bloque declare una lista, aunque `enabled: false`** — un alias mal escrito
+es un error de config esté la perilla donde esté, y detectarlo acá evita que
+el operador lo descubra recién al prender la perilla en producción (mismo
+criterio que el registro de conexiones de 129, que valida el alias de un
+`as400_sync` apagado):
 
-- `enabled: true` sin `source`.
+- El bloque declara una lista pero no tiene `source`.
 - `source` que no tiene la forma `"<kind>:<alias>"`, o cuyo alias no está
   declarado en `metadata.sources`, o cuyo prefijo de kind miente sobre esa
   fuente (mismo criterio que 130).
 - `match_any` vacío.
 - Un `match_any[].field` que no es clave de `metadata.field_sources`.
+
+"Declara una lista" significa que el bloque dice algo más que `enabled:
+false`: hay un `source`, hay un `match_any`, o la perilla está en alto. Un
+bloque ausente, `eligibility: {}` o `eligibility: {enabled: false}` a secas no
+afirman nada y no se validan.
+
+**Estructura ≠ comportamiento.** Lo que sigue detrás de la perilla es el
+comportamiento: con `enabled: false` la fuente **no se abre ni una vez**, no
+corre el preflight y no se evalúa ningún documento. Ahí sí es byte-equivalente
+al pre-150.
 
 **`match_any` es OR, y eso es deliberado**: el CSV trae las dos columnas, y
 una fila a la que le falte una no debería costar la exclusión del cliente

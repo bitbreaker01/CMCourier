@@ -18,7 +18,7 @@ import pytest
 
 from cmcourier.adapters.tracking import SQLiteTrackingStore
 from cmcourier.domain.exceptions import TrackingError
-from cmcourier.domain.models import MigrationRecord, ReasonCode, StageStatus
+from cmcourier.domain.models import MigrationRecord, ReasonBucket, ReasonCode, StageStatus
 
 pytestmark = pytest.mark.integration
 
@@ -1095,6 +1095,88 @@ class TestCensusReadProjections148:
         store.close()
         assert details is not None
         assert details.reason_counts == ()
+
+
+class TestRetryFailedRespetaElBalde150:
+    """150: reintentar una DECISIÓN DE NEGOCIO no tiene sentido.
+
+    El discriminador correcto es el **balde**, no el ``status``. Una fila
+    ``CLIENT_NOT_ACTIVE`` es ``S2_FAILED`` por el eje ortogonal de 148, así
+    que el ``LIKE '%_FAILED'`` de ``retry_failed`` se la llevaba puesta: con
+    la lista real del operador eso son CIENTOS DE MILES de documentos
+    re-procesados —cada uno pagando la cadena completa de identidad— para
+    volver a excluirlos exactamente igual. La lista no va a cambiar de
+    opinión.
+    """
+
+    @staticmethod
+    def _seed_three_buckets(store: SQLiteTrackingStore) -> str:
+        """Un doc por balde: EXCLUIDO, BLOQUEADO y FALLO."""
+        batch_id = store.start_batch(total_records=3)
+        for txn, stage, reason in (
+            ("TXN_INACTIVE", StageStatus.S2_FAILED, ReasonCode.CLIENT_NOT_ACTIVE),
+            ("TXN_UNMAPPED", StageStatus.S2_FAILED, ReasonCode.CODE_NOT_MAPPED),
+            ("TXN_TIMEOUT", StageStatus.S5_FAILED, ReasonCode.CM_TIMEOUT),
+        ):
+            store.mark_stage_pending(_make_record(batch_id, txn), StageStatus.S2_PENDING)
+            store.mark_stage_failed(txn, batch_id, stage, "synthetic", reason_code=reason)
+        store.flush()
+        return batch_id
+
+    @staticmethod
+    def _reasons(store: SQLiteTrackingStore, batch_id: str) -> dict[str, str]:
+        return {d.txn_num: d.reason_code for d in store.list_docs_for_batch(batch_id)}
+
+    def test_no_reintenta_el_balde_excluido(self, store: SQLiteTrackingStore) -> None:
+        batch_id = self._seed_three_buckets(store)
+        reset = store.retry_failed(batch_id)
+        reasons = self._reasons(store, batch_id)
+        store.close()
+        assert reset == 2
+        # El inactivo conserva su razón: no se tocó.
+        assert reasons["TXN_INACTIVE"] == ReasonCode.CLIENT_NOT_ACTIVE.value
+        # Los otros dos se reintentan, y su razón muere con la falla (148).
+        assert reasons["TXN_UNMAPPED"] == ""
+        assert reasons["TXN_TIMEOUT"] == ""
+
+    def test_el_inactivo_sigue_en_su_estado_terminal(self, store: SQLiteTrackingStore) -> None:
+        batch_id = self._seed_three_buckets(store)
+        store.retry_failed(batch_id)
+        statuses = {d.txn_num: d.status for d in store.list_docs_for_batch(batch_id)}
+        store.close()
+        assert statuses["TXN_INACTIVE"] == StageStatus.S2_FAILED.value
+        assert statuses["TXN_UNMAPPED"] == StageStatus.S2_PENDING.value
+        assert statuses["TXN_TIMEOUT"] == StageStatus.S5_PENDING.value
+
+    def test_tambien_con_el_filtro_por_etapa(self, store: SQLiteTrackingStore) -> None:
+        """El balde manda también cuando el operador acota a una etapa."""
+        batch_id = self._seed_three_buckets(store)
+        reset = store.retry_failed(batch_id, stage=StageStatus.S2_FAILED)
+        reasons = self._reasons(store, batch_id)
+        store.close()
+        assert reset == 1
+        assert reasons["TXN_INACTIVE"] == ReasonCode.CLIENT_NOT_ACTIVE.value
+        assert reasons["TXN_UNMAPPED"] == ""
+
+    def test_una_fila_sin_razon_se_sigue_reintentando(self, store: SQLiteTrackingStore) -> None:
+        """``NOT IN`` sobre NULL da NULL: sin el guard, una fila legacy (o ya
+        reintentada, que quedó con ``reason_code`` NULL) dejaría de
+        reintentarse para siempre."""
+        batch_id = store.start_batch(total_records=1)
+        store.mark_stage_pending(_make_record(batch_id, "TXN_LEGACY"), StageStatus.S5_PENDING)
+        store.mark_stage_failed("TXN_LEGACY", batch_id, StageStatus.S5_FAILED, "boom")
+        store.flush()
+        reset = store.retry_failed(batch_id)
+        store.close()
+        assert reset == 1
+
+    def test_todo_codigo_excluido_es_no_reintentable(self) -> None:
+        """El guard se DERIVA del mapeo del dominio, no se hardcodea: una
+        razón EXCLUIDO nueva queda no-reintentable sola."""
+        from cmcourier.adapters.tracking.sqlite import _NON_RETRYABLE_REASONS
+
+        expected = {c.value for c in ReasonCode if c.bucket is ReasonBucket.EXCLUIDO}
+        assert set(_NON_RETRYABLE_REASONS) == expected
 
 
 class TestSourceTotal148:

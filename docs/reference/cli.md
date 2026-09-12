@@ -576,6 +576,13 @@ Cómo actuar sobre cada balde:
 
 Resetea filas `*_FAILED` a `*_PENDING` para reintento.
 
+**Nunca toca el balde `EXCLUIDO` (150)**, sin importar el `status`. El
+discriminador es el balde, no el estado: por el eje ortogonal de 148 una
+exclusión puede vivir en una fila `*_FAILED` (`CLIENT_NOT_ACTIVE` es
+`S2_FAILED`), y reintentar una decisión de negocio no la cambia de opinión.
+`BLOQUEADO` y `FALLO` se reintentan como siempre. Consecuencia visible: el
+`Reset N` puede ser menor que la cantidad de `*_FAILED` del batch.
+
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--config` / `-c` | Path (required) | — | — |

@@ -122,7 +122,7 @@ Los tres slots son opcionales, y un slot ausente deja el comportamiento pre-147 
 
 **(2) Evalúa la elegibilidad del cliente** (150). Content Manager no tiene espacio para todo RVABREP: la directiva de negocio es migrar sólo los documentos de clientes **con producto activo**, y el banco produce un CSV con el `Shortname` y el `CIF` de esos clientes. El bloque `eligibility:` declara contra qué fuente se la consulta y por qué columnas (`match_any`: basta con que UNA matchee). Corre **inmediatamente después de la identidad y antes del mapeo** — para saber si el cliente está activo hay que saber primero quién es el cliente. Un cliente que no está en la lista deja `CLIENT_NOT_ACTIVE` (balde `EXCLUIDO`) y **no avanza a S3**.
 
-Es opcional entero: `enabled: false` (el default) es byte-equivalente a que el bloque no exista. Ver [`how-to/client-eligibility.md`](../how-to/client-eligibility.md).
+Es opcional entero: con `enabled: false` (el default) la fuente no se abre ni una vez y no se evalúa ningún documento — el comportamiento es el pre-150. La estructura del bloque (alias declarado, `match_any` no vacío, cada `field` existente) se valida igual al cargar el YAML, porque un alias mal escrito es un error de config esté la perilla donde esté. Ver [`how-to/client-eligibility.md`](../how-to/client-eligibility.md).
 
 Dos consecuencias que conviene tener presentes:
 

@@ -361,6 +361,16 @@ class ITrackingStore(ABC):
         resetea esa etapa. Devuelve la cantidad de filas tocadas.
         `Idempotent`: un `batch` limpio devuelve 0. La usa
         ``cmcourier batch retry-failed``.
+
+        150: **NUNCA toca una fila cuyo ``reason_code`` esté en el balde
+        ``EXCLUIDO``**, sin importar su ``status``. El discriminador es el
+        balde, no el estado: por el eje ortogonal de 148 una exclusión puede
+        vivir en una fila ``*_FAILED`` (``CLIENT_NOT_ACTIVE`` es
+        ``S2_FAILED``), y reintentar una decisión de negocio no tiene
+        sentido — no va a cambiar de opinión, y con la lista de activos real
+        del operador serían cientos de miles de documentos re-procesados,
+        cada uno pagando otra vez la cadena completa de identidad.
+        ``BLOQUEADO`` y ``FALLO`` se reintentan como siempre.
         """
 
 

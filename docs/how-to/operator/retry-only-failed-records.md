@@ -52,6 +52,16 @@ SQL
 
 El comando es `batch retry-failed`. Por default resetea **todos** los `*_FAILED` del batch a `*_PENDING`:
 
+> **Salvo el balde `EXCLUIDO` (150).** Una fila cuyo `reason_code` sea una
+> exclusión —`CLIENT_NOT_ACTIVE`, por ejemplo, que es `S2_FAILED`— **nunca**
+> se reintenta, sin importar su `status`. Reintentar una decisión de negocio
+> no la cambia de opinión, y con la lista de clientes activos del banco serían
+> cientos de miles de documentos re-procesados para volver a excluirlos igual.
+> Por eso el `Reset N` que ves abajo puede ser menor que el total de
+> `*_FAILED` que contaste en el paso 1: la diferencia es el balde `EXCLUIDO`,
+> y está bien así. Ver
+> [`read-the-batch-census.md`](read-the-batch-census.md).
+
 ```bash
 cmcourier batch retry-failed \
     --config sample/config.yaml \
