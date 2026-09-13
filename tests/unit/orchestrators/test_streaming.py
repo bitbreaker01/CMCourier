@@ -99,7 +99,9 @@ class _FakePipeline:
         with self.lock:
             self.prep_calls.append(getattr(trigger, "shortname", str(idx)))
         if idx in self._prep_returns_none:
-            return None, 0, 0
+            # 155: el cuarto elemento es la etapa que falló ("" = el doc
+            # se filtró / se salteó, no falló).
+            return None, 0, 0, "S2"
         size = self._size_bytes_by_idx.get(idx, 0)
         return (
             SimpleNamespace(
@@ -109,6 +111,7 @@ class _FakePipeline:
             ),
             0,
             0,
+            "",
         )
 
     def streaming_upload_one(self, item, batch_id: str, recorder, lane=None):  # noqa: ARG002

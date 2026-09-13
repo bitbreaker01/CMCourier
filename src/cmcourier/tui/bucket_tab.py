@@ -12,8 +12,10 @@ drenan. El tab BUCKET le da al operador una vista live de:
 * throughput de S5 (docs/s saliendo del `bucket`, ventana
   deslizante de 5s)
 * conteo live de `worker`s (PREP busy/configured, S5 configured)
-* conteos acumulativos por estado (S5_DONE, S5_FAILED,
-  S1_FILTERED, S1_SKIPPED)
+* conteos acumulativos por estado (S5_DONE, FALLIDOS con su
+  desglose por etapa, S1_FILTERED, S1_SKIPPED). 155: el total de
+  FALLIDOS cubre S1..S5 — antes el bloque sólo sabía de S5 y las
+  etapas del medio no existían para el operador.
 
 En modo `batched` el renderer imprime un stub de una línea
 dirigiendo al operador al tab CHUNKS.
@@ -87,28 +89,50 @@ def render_bucket(snap: TUISnapshot) -> str:
             "",
             "OUTCOMES (cumulative)",
             "─────────────────────",
-            f"  S5_DONE     {cumulative['s5_done']:>6d}",
-            f"  S5_FAILED   {cumulative['s5_failed']:>6d}",
-            f"  S1_FILTERED {cumulative['s1_filtered']:>6d}",
-            f"  S1_SKIPPED  {cumulative['s1_skipped']:>6d}",
+            _outcome_line("S5_DONE", cumulative["s5_done"]),
+            _outcome_line("FALLIDOS", snap.failed_total),
+            *_stage_failure_lines(snap),
+            _outcome_line("S1_FILTERED", cumulative["s1_filtered"]),
+            _outcome_line("S1_SKIPPED", cumulative["s1_skipped"]),
         ]
     )
     return "\n".join(lines)
 
 
+def _outcome_line(label: str, value: int) -> str:
+    return f"  {label:<12s}{value:>6d}"
+
+
+def _stage_failure_lines(snap: TUISnapshot) -> list[str]:
+    """155 REQ-003 — una línea indentada por etapa que TIENE fallas.
+
+    Un bloque de nueve líneas en cero es ruido; ``S5_DONE`` y el total de
+    ``FALLIDOS`` se rinden siempre (arriba), las etapas sólo cuando hay
+    algo que mirar. Pre-155 el bloque tenía cuatro líneas y ninguna para
+    las etapas del medio: diez documentos muertos en S2 no aparecían.
+    """
+    by_stage = snap.failures_by_stage
+    return [
+        f"    {stage + '_FAILED':<10s}{by_stage[stage]:>6d}"
+        for stage in ("S1", "S2", "S3", "S4", "S5")
+        if by_stage.get(stage, 0) > 0
+    ]
+
+
 def _summarise_chunks(snap: TUISnapshot) -> dict[str, int]:
-    """Lee los resultados acumulativos de la única fila sintética de `chunk`."""
+    """Lee los resultados acumulativos de la única fila sintética de `chunk`.
+
+    155: las fallas ya NO salen de acá — el total de la corrida y su
+    desglose por etapa viven en el snapshot (``failed_total`` /
+    ``failures_by_stage``), que es la única fuente que ve las cinco.
+    """
     s5_done = 0
-    s5_failed = 0
-    s1_filtered = snap.s1_filtered
     s1_skipped = 0
     for chunk in snap.chunks_state:
         s5_done += _int_or_zero(chunk.get("s5_done"))
-        s5_failed += _int_or_zero(chunk.get("s5_failed"))
         s1_skipped += _int_or_zero(chunk.get("prep_skipped"))
     return {
         "s5_done": s5_done,
-        "s5_failed": s5_failed,
-        "s1_filtered": s1_filtered,
+        "s1_filtered": snap.s1_filtered,
         "s1_skipped": s1_skipped,
     }

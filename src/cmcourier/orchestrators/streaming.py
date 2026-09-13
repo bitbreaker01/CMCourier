@@ -84,6 +84,18 @@ def _record_crash(
         _log.exception("streaming: could not record crash", extra={"batch_id": batch_id})
 
 
+def _bump_stage_failure(tally: _StreamingTally, stage: str) -> None:
+    """155: suma 1 al contador de la etapa que falló. ``""`` no hace nada.
+
+    El caller ya tiene el ``tally_lock`` tomado.
+    """
+    if not stage:
+        return
+    attr = f"{stage.lower()}_failed"
+    if hasattr(tally, attr):
+        setattr(tally, attr, getattr(tally, attr) + 1)
+
+
 class _TriggerIter:
     """Wrapper thread-safe sobre un único iterador de triggers.
 
@@ -125,8 +137,19 @@ class _StreamingTally:
     s5_failed: int = 0
     s5_skipped: int = 0
     s1_filtered: int = 0
-    prep_failed: int = 0
+    # 155: las fallas de prep se cuentan POR ETAPA. Antes había un único
+    # ``prep_failed`` que sólo contaba los crashes del ``except
+    # BaseException`` — una falla ordinaria de S2/S3/S4 volvía como
+    # ``survivor=None`` y no incrementaba nada.
+    s1_failed: int = 0
+    s2_failed: int = 0
+    s3_failed: int = 0
+    s4_failed: int = 0
     cross_batch_skipped: int = 0
+
+    @property
+    def prep_failed(self) -> int:
+        return self.s1_failed + self.s2_failed + self.s3_failed + self.s4_failed
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,6 +390,10 @@ class StreamingOrchestrator:
             s5sk = tally.s5_skipped
             fil = tally.s1_filtered
             csk = tally.cross_batch_skipped
+            # 155: sin esto el ``ChunkState`` sintético del modo streaming
+            # salía con ``prep_failed == 0`` para siempre, y el monitor
+            # anunciaba "0 fallidos" con documentos muertos en S2.
+            prep = (tally.s1_failed, tally.s2_failed, tally.s3_failed, tally.s4_failed)
         completed = s5d + s5f + s5sk
         with self._state_lock:
             prev = self._chunk_state
@@ -376,9 +403,13 @@ class StreamingOrchestrator:
                 status="UPLOAD",
                 s5_done=s5d,
                 s5_failed=s5f,
-                doc_count=completed + fil + csk,
+                doc_count=completed + fil + csk + sum(prep),
                 prep_done=completed,
                 prep_skipped=csk,
+                s1_failed=prep[0],
+                s2_failed=prep[1],
+                s3_failed=prep[2],
+                s4_failed=prep[3],
                 prep_filtered=fil,
                 upload_skipped=s5sk,
                 prep_started_monotonic=(prev.prep_started_monotonic if prev is not None else None),
@@ -640,7 +671,10 @@ class StreamingOrchestrator:
                 s5_failed=tally.s5_failed,
                 s5_skipped=tally.s5_skipped,
                 s1_filtered=tally.s1_filtered,
-                prep_failed=tally.prep_failed,
+                s1_failed=tally.s1_failed,
+                s2_failed=tally.s2_failed,
+                s3_failed=tally.s3_failed,
+                s4_failed=tally.s4_failed,
                 cross_batch_skipped=tally.cross_batch_skipped,
             )
 
@@ -660,9 +694,13 @@ class StreamingOrchestrator:
                 status="DONE",
                 s5_done=snapshot.s5_done,
                 s5_failed=snapshot.s5_failed,
-                doc_count=total_docs,
+                doc_count=total_docs + snapshot.prep_failed,
                 prep_done=snapshot.s5_done + snapshot.s5_failed + snapshot.s5_skipped,
                 prep_skipped=snapshot.cross_batch_skipped,
+                s1_failed=snapshot.s1_failed,
+                s2_failed=snapshot.s2_failed,
+                s3_failed=snapshot.s3_failed,
+                s4_failed=snapshot.s4_failed,
                 prep_filtered=snapshot.s1_filtered,
                 upload_skipped=snapshot.s5_skipped,
                 upload_elapsed_s=elapsed,
@@ -675,12 +713,15 @@ class StreamingOrchestrator:
             s1_done=total_docs,
             s1_skipped_cross_batch=snapshot.cross_batch_skipped,
             s1_filtered=snapshot.s1_filtered,
+            # 155: las fallas de prep del modo `streaming` dejan de ser
+            # ceros hardcodeados en el reporte sintético.
+            s1_failed=snapshot.s1_failed,
             s2_done=total_docs,
-            s2_failed=0,
+            s2_failed=snapshot.s2_failed,
             s3_done=total_docs,
-            s3_failed=0,
+            s3_failed=snapshot.s3_failed,
             s4_done=total_docs,
-            s4_failed=0,
+            s4_failed=snapshot.s4_failed,
             s5_done=snapshot.s5_done,
             s5_failed=snapshot.s5_failed,
             elapsed_seconds=elapsed,
@@ -714,7 +755,7 @@ class StreamingOrchestrator:
                 self._prep_in_flight += 1
             try:
                 try:
-                    survivor, skipped, filtered = self._pipeline.streaming_prep_one(
+                    survivor, skipped, filtered, failed_stage = self._pipeline.streaming_prep_one(
                         trigger, batch_id, recorder
                     )
                 except BaseException as exc:  # noqa: BLE001 — log + count, la corrida continúa
@@ -726,17 +767,25 @@ class StreamingOrchestrator:
                     # memoria — el documento se evaporaba del batch sin
                     # estado terminal y sin razón.
                     _record_crash(self._pipeline.record_prep_crash, trigger, batch_id, exc)
+                    # 155: el crash deja una fila ``S1_FAILED``; el contador
+                    # en vivo tiene que contarla en la MISMA etapa.
                     with tally_lock:
-                        tally.prep_failed += 1
+                        tally.s1_failed += 1
+                    self._publish_chunk_state(batch_id=batch_id, tally=tally, tally_lock=tally_lock)
                     continue
                 with tally_lock:
                     tally.cross_batch_skipped += skipped
                     tally.s1_filtered += filtered
+                    # 155: una falla terminal de S1..S4 ya dejó su fila
+                    # ``Sn_FAILED`` en la base — acá entra al contador que
+                    # lee el monitor.
+                    _bump_stage_failure(tally, failed_stage)
                 if survivor is None:
                     # filtrado / saltado cross-batch / fallado en
-                    # S2-S4. Ya persistido por los helpers internos;
+                    # S1-S4. Ya persistido por los helpers internos;
                     # los counters de arriba capturan el resultado
                     # para el RunReport sintético.
+                    self._publish_chunk_state(batch_id=batch_id, tally=tally, tally_lock=tally_lock)
                     continue
                 bucket.put(survivor)
                 self._prep_window.record()

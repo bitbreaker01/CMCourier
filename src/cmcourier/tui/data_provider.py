@@ -92,8 +92,17 @@ class TUISnapshot:
     # ---------- slow ops + uploads recientes
     slow_ops_all: tuple[dict[str, object], ...] = ()
 
-    # ---------- 104: desglose de la tasa de error de S5 por tipo + status
+    # ---------- 155: fallas terminales de TODA la corrida.
+    # ``failed_total`` es la suma de S1..S5 — lo que ``batch show`` cuenta
+    # después. Hasta 155 era el total de ``failure_breakdown()``, que es
+    # sólo de S5: una falla de S2 no pasaba por ahí y el monitor decía
+    # ``0 fallidos`` en verde con diez documentos muertos.
     failed_total: int = 0
+    failures_by_stage: dict[str, int] = field(default_factory=dict)
+    # ---------- 104: desglose de la tasa de error de S5 por tipo + status.
+    # ``upload_failed_total`` es el total DE ESE desglose (CMIS-specific);
+    # el bloque del tab UPLOAD se rotula ``ERRORS BY TYPE (UPLOAD)``.
+    upload_failed_total: int = 0
     failures_by_type: dict[str, int] = field(default_factory=dict)
     failures_by_status: dict[int, int] = field(default_factory=dict)
 
@@ -318,9 +327,12 @@ class TUIDataProvider:
         ) = self._current_chunk_progress(chunks_snapshot, global_elapsed_s=elapsed)
 
         bw_cfg = self._cmis_config.auto_tune
-        failed_total, failures_by_type, failures_by_status = (
+        upload_failed_total, failures_by_type, failures_by_status = (
             self._upload_metrics.failure_breakdown()
         )
+        # 155: el total de la corrida es la suma de las etapas, no el de
+        # 104. El desglose por tipo/status sigue siendo de S5 y sólo de S5.
+        failures_by_stage = self._failures_by_stage(chunks_snapshot, upload_failed_total)
         return TUISnapshot(
             pipeline=self._pipeline_name,
             batch_id=self._batch_id,
@@ -360,7 +372,9 @@ class TUIDataProvider:
             bandwidth_ceiling_mbps=self._bandwidth_ceiling_mbps,
             bandwidth_series=tuple(self._upload_metrics.bandwidth.series(60)),
             slow_ops_all=tuple(self._upload_metrics.aggregator_snapshot()),
-            failed_total=failed_total,
+            failed_total=sum(failures_by_stage.values()),
+            failures_by_stage=failures_by_stage,
+            upload_failed_total=upload_failed_total,
             failures_by_type=failures_by_type,
             failures_by_status=failures_by_status,
             chunks_state=chunks_snapshot,
@@ -386,6 +400,32 @@ class TUIDataProvider:
             mode=self._mode,
             bucket=(self._bucket_provider() if self._bucket_provider is not None else None),
         )
+
+    # -------------------------------------------------- 155: fallas por etapa
+
+    @staticmethod
+    def _failures_by_stage(
+        chunks_snapshot: tuple[dict[str, object], ...],
+        upload_failed_total: int,
+    ) -> dict[str, int]:
+        """155 REQ-002 — fallas terminales de S1..S5, sumadas entre `chunk`s.
+
+        Las filas de `chunk` son la fuente: en multi-batch hay una por
+        `chunk`, en `streaming` hay una sintética para toda la corrida, y
+        en ambos casos ``s5_failed`` ya viene live-overrideado desde el
+        recorder de upload. Sin filas de `chunk` (path monolítico raro)
+        queda el contador de S5, que es lo único que existe.
+        """
+        stages = {f"S{i}": 0 for i in range(1, 6)}
+        if not chunks_snapshot:
+            stages["S5"] = upload_failed_total
+            return stages
+        for row in chunks_snapshot:
+            for stage in stages:
+                value = row.get(f"{stage.lower()}_failed", 0)
+                if isinstance(value, (int, float)):
+                    stages[stage] += int(value)
+        return stages
 
     # ------------------------------------------ 134: ventana deslizante + ETA
 
@@ -498,6 +538,11 @@ class TUIDataProvider:
                     "prep_done": getattr(chunk, "prep_done", 0),
                     "prep_skipped": getattr(chunk, "prep_skipped", 0),
                     "prep_failed": getattr(chunk, "prep_failed", 0),
+                    # 155 — el desglose que el total de la corrida necesita.
+                    "s1_failed": getattr(chunk, "s1_failed", 0),
+                    "s2_failed": getattr(chunk, "s2_failed", 0),
+                    "s3_failed": getattr(chunk, "s3_failed", 0),
+                    "s4_failed": getattr(chunk, "s4_failed", 0),
                     "prep_filtered": getattr(chunk, "prep_filtered", 0),
                     "upload_skipped": upload_skipped,
                     "prep_started_monotonic": prep_started,

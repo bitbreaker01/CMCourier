@@ -27,12 +27,30 @@ class _FakeProvider:
         window_rate: float | None = 1.0,
         eta_run_s: float | None = None,
         closing: object | None = None,
+        s5_done: int = 42,
+        failed_total: int = 2,
+        failures_by_stage: dict[str, int] | None = None,
+        s1_filtered: int = 1,
     ) -> None:
         self._complete = complete
         self._planned_total = planned_total
         self._window_rate = window_rate
         self._eta_run_s = eta_run_s
         self._closing = closing
+        self._s5_done = s5_done
+        self._failed_total = failed_total
+        # 155: el desglose por etapa; por defecto, todo en S5 (pre-155).
+        self._failures_by_stage = failures_by_stage or {
+            "S1": 0,
+            "S2": 0,
+            "S3": 0,
+            "S4": 0,
+            "S5": failed_total,
+        }
+        self._s1_filtered = s1_filtered
+        # 155: los elegibles son ``docs_processed - s1_filtered``; con los
+        # defaults esto da los 45 de siempre.
+        self._docs_processed = s5_done + failed_total + s1_filtered
 
     def snapshot(self) -> TUISnapshot:
         return TUISnapshot(
@@ -42,13 +60,15 @@ class _FakeProvider:
             elapsed_s=12.0,
             throughput_docs_per_s=3.4,
             is_complete=self._complete,
-            stages={"S5": {"count": 42}, "S4": {"count": 60}},
-            failed_total=2,
+            stages={"S5": {"count": self._s5_done}, "S4": {"count": 60}},
+            failed_total=self._failed_total,
+            failures_by_stage=dict(self._failures_by_stage),
+            upload_failed_total=self._failures_by_stage.get("S5", 0),
             failures_by_type={"503 server": 2},
-            s1_filtered=1,
+            s1_filtered=self._s1_filtered,
             pool_capacity=4,
             pool_in_use=3,
-            docs_processed=45,
+            docs_processed=self._docs_processed,
             throughput_window_docs_per_s=self._window_rate,
             planned_total=self._planned_total,
             eta_run_s=self._eta_run_s,
@@ -56,8 +76,15 @@ class _FakeProvider:
 
 
 class _FakeManager:
-    def __init__(self, provider: object | None, *, paused: bool = False) -> None:
+    def __init__(
+        self,
+        provider: object | None,
+        *,
+        paused: bool = False,
+        outcome: str = "cancelled",
+    ) -> None:
         self.provider = provider
+        self._outcome = outcome
         self.active = provider is not None
         self.paused = paused
         self.reauth_pending = False
@@ -76,7 +103,7 @@ class _FakeManager:
         return max(1, min(cap, self.aimd_total, self.pool_ceiling))
 
     def outcome(self) -> str:
-        return "cancelled"
+        return self._outcome
 
     def cancel(self) -> None:
         self.calls.append("cancel")
@@ -353,6 +380,84 @@ class TestPauseResume132:
                 assert mgr.reauth_pending is False
 
         asyncio.run(_run())
+
+
+class TestAvisoDeCierre155:
+    """155 REQ-002/REQ-004 — el cierre cuenta todas las etapas y no
+    describe un desastre con el tono de un éxito."""
+
+    @staticmethod
+    def _finish(
+        tmp_path: Path, provider: _FakeProvider, outcome: str = "completed"
+    ) -> tuple[str, str]:
+        """Corre ``on_run_finished`` y devuelve ``(mensaje, severidad)``."""
+        result: list[tuple[str, str]] = []
+
+        async def _run() -> None:
+            config, path = _make_config(tmp_path)
+            app = ConsoleApp(config=config, config_path=path)
+            mgr = _FakeManager(provider, outcome=outcome)
+            app.run_manager = mgr  # type: ignore[assignment]
+            async with app.run_test() as pilot:
+                await goto(pilot, app, "6")
+                app.on_run_finished(mgr)  # type: ignore[arg-type]
+                await pilot.pause()
+                notice = list(app._notifications)[-1]  # noqa: SLF001
+                result.append((notice.message, notice.severity))
+
+        asyncio.run(_run())
+        return result[0]
+
+    def test_el_total_de_fallidos_cuenta_las_etapas_de_prep(self, tmp_path: Path) -> None:
+        # El caso del operador: 10 muertos en S2, 0 subidos. Pre-155 el
+        # aviso leía sólo ``s5_failed`` del RunReport y decía "0 fallidos".
+        provider = _FakeProvider(
+            complete=True,
+            s5_done=0,
+            failed_total=10,
+            failures_by_stage={"S1": 0, "S2": 10, "S3": 0, "S4": 0, "S5": 0},
+            s1_filtered=22618,
+        )
+        message, _sev = self._finish(tmp_path, provider)
+        assert "0 subidos" in message
+        assert "10 fallidos" in message
+
+    def test_cero_subidos_con_elegibles_sale_en_warning(self, tmp_path: Path) -> None:
+        provider = _FakeProvider(
+            complete=True,
+            s5_done=0,
+            failed_total=10,
+            failures_by_stage={"S1": 0, "S2": 10, "S3": 0, "S4": 0, "S5": 0},
+            s1_filtered=22618,
+        )
+        message, severity = self._finish(tmp_path, provider)
+        assert severity == "warning"
+        # Nombra el motivo dominante y apunta al censo.
+        assert "S2" in message
+        assert "batch show" in message or "BATCHES" in message
+
+    def test_una_corrida_que_subio_algo_sigue_en_information(self, tmp_path: Path) -> None:
+        provider = _FakeProvider(
+            complete=True,
+            s5_done=42,
+            failed_total=0,
+            failures_by_stage={"S1": 0, "S2": 0, "S3": 0, "S4": 0, "S5": 0},
+        )
+        _message, severity = self._finish(tmp_path, provider)
+        assert severity == "information"
+
+    def test_sin_documentos_elegibles_no_grita(self, tmp_path: Path) -> None:
+        # Nada que subir y nada que falló: no hubo elegibles, no hay
+        # desastre que anunciar.
+        provider = _FakeProvider(
+            complete=True,
+            s5_done=0,
+            failed_total=0,
+            failures_by_stage={"S1": 0, "S2": 0, "S3": 0, "S4": 0, "S5": 0},
+            s1_filtered=0,
+        )
+        _message, severity = self._finish(tmp_path, provider)
+        assert severity == "information"
 
 
 class TestBatches:

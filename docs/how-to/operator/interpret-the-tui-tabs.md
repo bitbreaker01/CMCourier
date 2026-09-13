@@ -95,6 +95,11 @@ S5: throughput, latencia, AIMD, ancho de banda.
  SLOW OPS (UPLOAD, top 5)
   1  20251015-042    worker-5             7204 ms
   ...
+
+ ERRORS BY TYPE (UPLOAD) — 12 total
+  http_5xx        10
+  timeout          2
+    HTTP status:  500×2  503×8
 ```
 
 ### Layout (con heavy/light lanes, 036)
@@ -118,6 +123,7 @@ S5: throughput, latencia, AIMD, ancho de banda.
 - **Auto-tune** — ver [`tune-aimd-for-a-slow-link.md`](tune-aimd-for-a-slow-link.md) para interpretación profunda.
 - **Bandwidth current / peak / ceiling** — MB/s actual, máximo histórico, tope configurado (`cmis.max_bandwidth_mbps`, 0 = sin tope).
 - **UPLOAD SPEED sparkline** — 60 s ventana, MB/s, escala fija al ceiling si está configurado o al peak observado.
+- **ERRORS BY TYPE (UPLOAD)** — 104: desglose de las fallas **de S5 y sólo de S5**, por categoría (`timeout` / `http_4xx` / `http_5xx` / `transport` / `app_error`) y por status HTTP exacto. El total del rótulo es el total de UPLOAD, **no** el de la corrida: un documento que murió en S2 (identidad sin resolver) o en S4 (falta una página) no pasa por CMIS y no puede aparecer acá. Hasta 155 este bloque se llamaba `ERRORS BY TYPE` a secas y su total se usaba además como el `fallidos` de la corrida — por eso el monitor podía decir `0 fallidos` con diez documentos muertos en prep. El total de la corrida está en `fallidos` de la cabecera de `[6]` y en `FALLIDOS` del bloque OUTCOMES.
 
 ### Qué mirar primero
 
@@ -198,7 +204,9 @@ LANES (heavy/light, 065)
 OUTCOMES (cumulative)
 ─────────────────────
   S5_DONE        624
-  S5_FAILED        0
+  FALLIDOS        13
+    S2_FAILED     10
+    S5_FAILED      3
   S1_FILTERED     37
   S1_SKIPPED       0
 ```
@@ -212,9 +220,15 @@ OUTCOMES (cumulative)
 - **S5 up to N consumer threads** — techo (`cmis.workers` o el budget del AIMD).
 - **LANES** — bloque por-lane solo si `heavy_light_lanes.enabled: true`.
 - **OUTCOMES (cumulative)** — contadores acumulativos. `S1_SKIPPED` ≠ 0 indica idempotency cross-batch.
+- **FALLIDOS** (155) — el total de fallas terminales de **todas** las etapas, S1 a S5. Debajo, indentada, va una línea por etapa que tenga algo: `S2_FAILED 10` significa diez documentos muertos en S2 (típicamente identidad que no resuelve). `S5_DONE` y `FALLIDOS` se muestran siempre, aunque valgan cero; las etapas aparecen sólo cuando fallaron, porque nueve líneas en cero son ruido.
+  - Antes de 155 este bloque tenía una sola línea de fallas, `S5_FAILED`, y el `fallidos` de la cabecera salía del desglose de UPLOAD: una corrida donde diez documentos morían en S2 se anunciaba `0 fallidos`, en verde, y recién aparecían en `[7] BATCHES`, que lee la base.
+  - **La invariante**: lo que este bloque cuenta al terminar tiene que coincidir con lo que `cmcourier batch show <batch_id>` cuenta después. Si difieren, la vista en vivo está mintiendo — la base es la verdad.
+  - **El POR QUÉ no está acá.** El contador vive en memoria y no tiene `reason_code`. Para saber si esos diez son `IDENTITY_UNRESOLVED`, `IDRVI_NOT_MAPPED` o `CLIENT_NOT_ACTIVE`, el censo por razón está en [`read-the-batch-census.md`](read-the-batch-census.md).
+  - **Un caso de borde conocido**: por el eje ortogonal de 148 una **exclusión** de negocio puede vivir en una fila `*_FAILED` (`CLIENT_NOT_ACTIVE` es `S2_FAILED`). Esas filas las cuenta `batch show` pero no el contador en vivo, que sólo suma lo que el pipeline clasificó como falla reintentable. Si los dos números difieren y la diferencia son exclusiones, `batch show` te lo dice en el bloque por razón.
 
 ### Qué mirar primero
 
+- `FALLIDOS` ≠ 0 con `S5_DONE` en cero → nada está subiendo; mirá en qué etapa está el número y andá a `batch show` por la razón.
 - `level` clavado al cap → S5 es el cuello, subí workers o activá AIMD.
 - `level` clavado a 0 → PREP no llega, subí `prep_workers` o revisá S4.
 - PREP > S5 con bucket llenándose → comportamiento esperado (back-pressure).

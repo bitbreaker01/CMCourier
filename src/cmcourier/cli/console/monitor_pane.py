@@ -80,9 +80,12 @@ class MonitorPane(Vertical):
             + self._window_fragment(snap)
             + self._workers_fragment(mgr, snap)
         )
+        # 155: el desglose por tipo es de UPLOAD. Mientras `fallidos` era
+        # el total de S5 los dos números coincidían y el rótulo daba igual;
+        # ahora `fallidos` cuenta las cinco etapas y esto sólo explica una.
         breakdown = getattr(snap, "failures_by_type", None)
         if breakdown:
-            header += "\nfallos por tipo: " + " · ".join(
+            header += "\nfallos de subida por tipo: " + " · ".join(
                 f"{n}× {t}" for t, n in sorted(breakdown.items(), key=lambda kv: -kv[1])
             )
         header += self._bottleneck_line(snap)

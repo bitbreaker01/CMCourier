@@ -148,6 +148,22 @@ Después del último upload la corrida **no terminó**: falta la pasada final de
 
 Detalle relacionado: el `S5 UPLOAD 3000 / 3030` con `30 pending` y `idle 30` que se veía justo al final eran las 30 píldoras de parada de los consumers contadas como documentos. Desde 144 la cola las descuenta: el último doc deja `3000 / 3000 · 0 pending`.
 
+## `fallidos` cuenta las cinco etapas, y el color es información
+
+> 155 — `tui/data_provider.py`, `cli/console/monitor_pane.py`, `cli/console/app.py`.
+
+Una corrida del operador terminó así: `subidos 0 · fallidos 0 · salteados 22618`, en verde, con `corrida completed`. Diez documentos habían muerto en S2 con `identity.cif could not be resolved from field 'BAC_CIF'`. Aparecieron recién en `[7] BATCHES`, que lee la base.
+
+El bug era de una línea: `failed_total` salía de `MetricsRecorder.failure_breakdown()`, que es el desglose de S5 por tipo y status HTTP de la spec 104. **Una falla de S1, S2, S3 o S4 no pasa por ahí.** El número no estaba mal calculado: estaba midiendo otra cosa que casualmente coincidía mientras la única etapa que fallaba era la última.
+
+El arreglo no es mostrar más números, es que los que ya se muestran dejen de ser de una sola etapa. `fallidos` en la cabecera de `[6]`, el bloque `FALLIDOS` de OUTCOMES y el aviso de cierre leen ahora **la misma** fuente: el desglose por etapa del snapshot, que suma S1..S5. El desglose de 104 sigue existiendo tal cual — sólo que rotulado `ERRORS BY TYPE (UPLOAD)`, porque eso sí es legítimamente específico de CMIS; lo que estaba mal era usar su total como el total de la corrida.
+
+**La invariante, y por qué hay un test que la ata.** Lo que la vista en vivo cuenta al terminar tiene que coincidir con lo que `batch show` cuenta después. Si difieren, la vista en vivo está mintiendo — la base es la verdad. Es una invariante frágil por construcción: el contador en vivo es una suma de contadores en memoria y la base es una consulta por `status`, y nada obliga a que una etapa nueva se acuerde de sumar. Por eso hay un test de integración (`tests/integration/pipeline/test_live_view_census_parity.py`) que corre un batch rompiendo las cinco etapas a la vez y exige la igualdad exacta contra `get_batch_details`. Sin ese test, la próxima etapa que se agregue vuelve a quedar afuera del contador y nadie se entera hasta que un operador mire un cero en verde.
+
+**El color es información, no decoración.** `corrida completed · 0 subidos · 0 fallidos` en verde, con 22618 documentos excluidos y 10 fallados, describe un desastre con el tono de un éxito. Cuando `S5_DONE == 0` y hubo documentos elegibles —los que sobrevivieron al filtro de S1 y por lo tanto *tenían* que subir— el aviso de cierre sale en `warning`, nombra la etapa donde murió el grueso y apunta a `batch show`. Cuando no hubo elegibles (todo el lote quedó excluido en S1) no hay desastre que anunciar y el aviso queda informativo.
+
+**Lo que sigue sin estar en vivo, a propósito.** El desglose por `reason_code`. El contador vive en memoria y no lo tiene; ese desglose es de `batch show` y así se documentó en 153. Acá se corrige CUÁNTOS, no POR QUÉ. Hay además un borde conocido: por el eje ortogonal de 148 una exclusión de negocio puede vivir en una fila `*_FAILED` (`CLIENT_NOT_ACTIVE` es `S2_FAILED`); `batch show` la cuenta como fallida, el contador en vivo no, porque el pipeline la clasificó como decisión de negocio y no como falla reintentable (es la misma razón por la que `retry-failed` nunca la toca).
+
 ## Un tiro antes de la corrida
 
 Antes de 141, probar un código CM contra el servidor de verdad significaba `single-doc run`: corre el pipeline entero (RVABREP, fuentes de metadata, ensamblado del archivo real) para terminar con el adapter descartando la `httpx.Response` y truncando el cuerpo del error a 1024 caracteres. Para ver qué contestaba el servidor ante un tipo mal declarado o una carpeta que no existía, el operador terminaba armando el POST a mano con `curl`.

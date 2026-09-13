@@ -12,6 +12,69 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Fixed
 
+- **`0 fallidos` en verde con diez documentos muertos en S2 (155).** Una
+  corrida terminó así: `subidos 0 · fallidos 0 · salteados 22618`, en
+  verde, con `corrida completed`. Diez documentos habían fallado en S2
+  con `identity.cif could not be resolved from field 'BAC_CIF'` —
+  registrados, con su fila, con su `reason_code` y con un mensaje
+  accionable. Ni una línea del monitor los mencionaba. Aparecieron recién
+  en `[7] BATCHES`, que lee la base.
+
+  La causa era de una línea: `TUISnapshot.failed_total` salía de
+  `MetricsRecorder.failure_breakdown()`, que es el desglose de **S5** por
+  tipo y status HTTP de la spec 104. Una falla de S1, S2, S3 o S4 no pasa
+  por ahí. El número no estaba mal calculado: estaba midiendo otra cosa,
+  que coincidía con el total de la corrida mientras la única etapa que
+  fallaba fuera la última. Y `OUTCOMES` tenía cuatro líneas —`S5_DONE`,
+  `S5_FAILED`, `S1_FILTERED`, `S1_SKIPPED`— y ninguna para las etapas del
+  medio.
+
+  El dato existía a medias. `staged.py` ya calculaba `s2_failed`,
+  `s3_failed` y `s4_failed`, y el tab CHUNKS ya renderizaba `prep_failed`
+  para la vista multi-batch. Pero el cableado tenía **tres agujeros**, no
+  uno: (a) en modo `streaming` —el modo de la corrida del operador—
+  `streaming_prep_one` devolvía `survivor=None` sin decir en qué etapa
+  había muerto el documento, así que el `producer` no tenía nada que
+  contar; (b) el `ChunkState` sintético del streaming nunca escribía
+  `prep_failed` y sólo se re-publicaba después de un resultado de S5, así
+  que una corrida que no subía nada no actualizaba la fila jamás; (c)
+  **S1 no tenía contador de fallas en ningún lado** — ni en
+  `_stage_s0_s1`, ni en `RunReport`, ni en `ChunkState` — pese a que
+  `S1_FAILED` se persiste desde 148.
+
+  Ahora `fallidos` es la suma de las fallas terminales de S1..S5, y la
+  leen del MISMO snapshot la cabecera de `[6]`, el bloque `OUTCOMES` y el
+  aviso de cierre —que hasta acá sumaba `r.s5_failed` del `RunReport`:
+  otra fuente, el mismo defecto—. `OUTCOMES` gana una línea `FALLIDOS`
+  con el total y, indentada debajo, una línea por etapa que tenga algo
+  (un bloque de nueve líneas en cero es ruido; `S5_DONE` y el total se
+  muestran siempre). El desglose de 104 queda intacto y se re-rotula
+  `ERRORS BY TYPE (UPLOAD)`: ése sí es específico de CMIS y está bien que
+  lo sea — lo que estaba mal era usar su total como el total de la
+  corrida.
+
+  **La invariante queda atada con un test.** Lo que la vista en vivo
+  cuenta al terminar tiene que coincidir con lo que `batch show` cuenta
+  después; si difieren, la vista en vivo miente y la base es la verdad.
+  `tests/integration/pipeline/test_live_view_census_parity.py` corre un
+  batch rompiendo las cinco etapas a la vez y exige la igualdad exacta
+  contra `get_batch_details`. Sin ese candado, la próxima etapa que se
+  agregue vuelve a quedar afuera del contador y nadie se entera.
+
+  Y el color pasa a ser información: cuando `S5_DONE == 0` y hubo
+  documentos elegibles, el aviso de cierre sale en `warning`, nombra la
+  etapa donde murió el grueso y apunta a `batch show`. Un
+  `corrida completed · 0 subidos · 0 fallidos` en verde, con 22618
+  excluidos y 10 fallados, describía un desastre con el tono de un éxito.
+
+  Cuarto caso de la misma familia en una jornada: el sistema hizo lo
+  correcto —falló los documentos, los registró, con un mensaje
+  accionable— y lo comunicó mal. Los otros tres: el monitor decía
+  "deleted at source" sobre documentos que nadie borró (153), el mensaje
+  de un crash tiraba el `str(exc)` que era lo único útil (154), y el
+  `except BaseException` de streaming contaba en el tally sin persistir
+  nada (148).
+
 - **`crashed: ValueError` y nada más.** El mensaje de un crash se
   construía con `f"crashed: {type(exc).__name__}"`, tirando el
   `str(exc)` — que es justo la parte accionable. Un operador vio diez

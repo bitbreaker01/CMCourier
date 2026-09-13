@@ -54,6 +54,7 @@ from cmcourier.cli.doctor import (
 from cmcourier.config.schema import PipelineConfig
 from cmcourier.domain.exceptions import ConfigurationError
 from cmcourier.domain.models import BatchInfo
+from cmcourier.tui.data_provider import TUISnapshot
 
 _TABS = [
     "inicio",
@@ -76,6 +77,51 @@ _TABS = [
 # undécima no tiene dígito y usa la inicial de MODELO.
 _TAB_KEYS = [*(str(i + 1) for i in range(9)), "0", "m"]
 _log = logging.getLogger(__name__)
+
+
+def _dominant_stage(snap: TUISnapshot | None) -> str:
+    """155 — la etapa donde murió el grueso de los documentos, o ``""``."""
+    by_stage = snap.failures_by_stage if snap is not None else {}
+    ranked = sorted(by_stage.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ranked[0][0] if ranked and ranked[0][1] > 0 else ""
+
+
+def _closing_notice(
+    outcome: str,
+    done: int,
+    failed: int,
+    snap: TUISnapshot | None,
+) -> tuple[str, Literal["warning", "information"]]:
+    """155 REQ-004 — una corrida sin un solo documento subido no va en verde.
+
+    ``corrida completed · 0 subidos · 0 fallidos`` en verde, con 22618
+    documentos excluidos y 10 fallados, describe un desastre con el tono
+    de un éxito. Cuando ``S5_DONE == 0`` y hubo documentos elegibles el
+    aviso sale en ``warning``, nombra la etapa dominante y apunta al
+    censo — el POR QUÉ por documento lo tiene ``batch show``, no el
+    contador en memoria (153).
+
+    Los elegibles son ``docs_processed - s1_filtered``: lo que sobrevivió
+    al filtro de S1 y por lo tanto TENÍA que subir.
+    """
+    message = f"Corrida {outcome}: {done} subidos · {failed} fallidos"
+    eligible = 0
+    if snap is not None:
+        eligible = max(0, snap.docs_processed - snap.s1_filtered)
+    if done == 0 and eligible > 0:
+        stage = _dominant_stage(snap)
+        cause = f"el grueso murió en {stage}" if stage else "sin fallas registradas"
+        batch = snap.batch_id if snap is not None else ""
+        pointer = f"batch show {batch}" if batch else "[7] BATCHES"
+        return (
+            f"{message} — ningún documento subió de {eligible} elegibles; "
+            f"{cause}. Por qué, doc por doc: {pointer}",
+            "warning",
+        )
+    sev: Literal["warning", "information"] = (
+        "warning" if (outcome == "cancelled" or failed) else "information"
+    )
+    return message, sev
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -804,15 +850,16 @@ class ConsoleApp(App[None]):
         manager.reauth_pending = False
         outcome = manager.outcome()
         report = manager.report
-        done = sum(r.s5_done for r in report.chunks) if report else 0
-        failed = sum(r.s5_failed for r in report.chunks) if report else 0
+        # 155 REQ-002: el cierre lee el MISMO snapshot que la cabecera del
+        # monitor. Pre-155 sumaba ``r.s5_failed`` del RunReport: otra fuente,
+        # el mismo defecto — sólo S5. El reporte queda de fallback para
+        # cuando la corrida murió antes de tener provider.
+        done, failed, snap = self._closing_counts(manager, report)
         if manager.exception is not None:
             self.notify(f"La corrida terminó con excepción: {manager.exception}", severity="error")
         else:
-            sev: Literal["warning", "information"] = (
-                "warning" if (outcome == "cancelled" or failed) else "information"
-            )
-            self.notify(f"Corrida {outcome}: {done} subidos · {failed} fallidos", severity=sev)
+            message, sev = _closing_notice(outcome, done, failed, snap)
+            self.notify(message, severity=sev)
         with contextlib.suppress(NoMatches):
             monitor = self.q("MonitorPane", MonitorPane)
             monitor.refresh_monitor()
@@ -822,6 +869,29 @@ class ConsoleApp(App[None]):
             monitor.show_summary(summary)
         self.q("RunPane", RunPane).refresh_summary()
         self.refresh_status()
+
+    @staticmethod
+    def _closing_counts(
+        manager: ConsoleRunManager, report: object
+    ) -> tuple[int, int, TUISnapshot | None]:
+        """155 — ``(subidos, fallidos, snapshot)`` para el aviso de cierre.
+
+        La fuente es el snapshot del provider (todas las etapas). Sin
+        provider —la corrida reventó antes de arrancar— cae al RunReport,
+        que sólo sabe de S5, y el aviso degrada con gracia.
+        """
+        provider = getattr(manager, "provider", None)
+        if provider is not None:
+            with contextlib.suppress(Exception):
+                snap: TUISnapshot = provider.snapshot()
+                s5 = snap.stages.get("S5", {}) if snap.stages else {}
+                return int(s5.get("count", 0)), snap.failed_total, snap
+        chunks = getattr(report, "chunks", None) or []
+        return (
+            sum(r.s5_done for r in chunks),
+            sum(r.s5_failed for r in chunks),
+            None,
+        )
 
     def on_pii_override(self, unmask: bool | None) -> None:
         effective = self.config.observability.unmask_pii if unmask is None else unmask

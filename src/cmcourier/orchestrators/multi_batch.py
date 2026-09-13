@@ -38,6 +38,7 @@ import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypeVar
 
 from cmcourier.config.schema import PipelineConfig
 from cmcourier.domain.models import (  # noqa: F401 — TriggerRecord re-exportado
@@ -52,6 +53,8 @@ from cmcourier.services.reconciler import stop_reconciler_visibly
 
 _log = logging.getLogger(__name__)
 
+_T = TypeVar("_T")
+
 
 @dataclass(frozen=True, slots=True)
 class ChunkState:
@@ -64,6 +67,12 @@ class ChunkState:
     ``*_monotonic`` se setean cuando el `chunk` transiciona al `stage`; los
     campos ``*_elapsed_s`` se congelan cuando lo deja. Mientras el `chunk`
     está vivo en un `stage`, el `consumer` deriva elapsed = ``now - started``.
+
+    155: las fallas de PREP se guardan **por etapa**. Antes vivían
+    colapsadas en un único ``prep_failed`` que el TUI no sabía desarmar —
+    y el total de la corrida ni siquiera las miraba. ``prep_failed`` sigue
+    existiendo como la suma derivada (la lee el tab CHUNKS), así que no
+    puede quedar desincronizada de sus partes.
     """
 
     chunk_idx: int
@@ -76,7 +85,11 @@ class ChunkState:
     total_bytes: int = 0
     prep_done: int = 0
     prep_skipped: int = 0
-    prep_failed: int = 0
+    # 155 — fallas terminales de PREP, una por etapa
+    s1_failed: int = 0
+    s2_failed: int = 0
+    s3_failed: int = 0
+    s4_failed: int = 0
     # 051 — docs filtrados en S1 (filas RVABREP con código de baja)
     prep_filtered: int = 0
     upload_skipped: int = 0
@@ -84,6 +97,31 @@ class ChunkState:
     prep_elapsed_s: float = 0.0
     upload_started_monotonic: float | None = None
     upload_elapsed_s: float = 0.0
+
+    @property
+    def prep_failed(self) -> int:
+        """155 — total de fallas de PREP (S1..S4). Derivado, nunca seteado."""
+        return self.s1_failed + self.s2_failed + self.s3_failed + self.s4_failed
+
+
+@dataclass(frozen=True, slots=True)
+class _PrepFailures:
+    """155 — las fallas terminales de PREP de un `chunk`, por etapa."""
+
+    s1: int = 0
+    s2: int = 0
+    s3: int = 0
+    s4: int = 0
+
+
+#: Estado "no visto todavía" para resolver los ``None`` de
+#: ``_update_chunk_state`` sin repetir ``prev.x if prev else <default>``.
+_EMPTY_CHUNK_STATE = ChunkState(chunk_idx=-1, batch_id="", status="")
+
+
+def _keep(new: _T | None, previous: _T) -> _T:
+    """``None`` = mantener el valor previo del campo."""
+    return previous if new is None else new
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +173,9 @@ class _PreparedChunk:
     skipped: int
     s1_done: int
     s1_filtered: int
+    # 155: S1 también falla (RVABREP sin filas, indexing roto) y hasta acá
+    # nadie contaba esas fallas — ni el RunReport ni la vista en vivo.
+    s1_failed: int
     s2_failed: int
     s3_failed: int
     s4_failed: int
@@ -256,7 +297,7 @@ class MultiBatchOrchestrator:
         total_bytes: int | None = None,
         prep_done: int | None = None,
         prep_skipped: int | None = None,
-        prep_failed: int | None = None,
+        prep_failures: _PrepFailures | None = None,
         prep_filtered: int | None = None,
         upload_skipped: int | None = None,
         prep_started_monotonic: float | None = None,
@@ -267,56 +308,37 @@ class MultiBatchOrchestrator:
         """Transición atómica para un `chunk`. ``None`` significa "mantener el
         valor previo" para ese campo — así los callers sólo tienen que
         proveer lo que realmente cambió.
+
+        155: las fallas de PREP entran juntas como :class:`_PrepFailures`
+        para que las cuatro etapas se muevan siempre en bloque.
         """
         with self._state_lock:
-            prev = self._chunks_state.get(chunk_idx)
+            prev = self._chunks_state.get(chunk_idx) or _EMPTY_CHUNK_STATE
+            failures = prep_failures or _PrepFailures(
+                prev.s1_failed, prev.s2_failed, prev.s3_failed, prev.s4_failed
+            )
             self._chunks_state[chunk_idx] = ChunkState(
                 chunk_idx=chunk_idx,
                 batch_id=batch_id,
                 status=status,
                 s5_done=s5_done,
                 s5_failed=s5_failed,
-                doc_count=(doc_count if doc_count is not None else (prev.doc_count if prev else 0)),
-                total_bytes=(
-                    total_bytes if total_bytes is not None else (prev.total_bytes if prev else 0)
+                doc_count=_keep(doc_count, prev.doc_count),
+                total_bytes=_keep(total_bytes, prev.total_bytes),
+                prep_done=_keep(prep_done, prev.prep_done),
+                prep_skipped=_keep(prep_skipped, prev.prep_skipped),
+                s1_failed=failures.s1,
+                s2_failed=failures.s2,
+                s3_failed=failures.s3,
+                s4_failed=failures.s4,
+                prep_filtered=_keep(prep_filtered, prev.prep_filtered),
+                upload_skipped=_keep(upload_skipped, prev.upload_skipped),
+                prep_started_monotonic=_keep(prep_started_monotonic, prev.prep_started_monotonic),
+                prep_elapsed_s=_keep(prep_elapsed_s, prev.prep_elapsed_s),
+                upload_started_monotonic=_keep(
+                    upload_started_monotonic, prev.upload_started_monotonic
                 ),
-                prep_done=(prep_done if prep_done is not None else (prev.prep_done if prev else 0)),
-                prep_skipped=(
-                    prep_skipped if prep_skipped is not None else (prev.prep_skipped if prev else 0)
-                ),
-                prep_failed=(
-                    prep_failed if prep_failed is not None else (prev.prep_failed if prev else 0)
-                ),
-                prep_filtered=(
-                    prep_filtered
-                    if prep_filtered is not None
-                    else (prev.prep_filtered if prev else 0)
-                ),
-                upload_skipped=(
-                    upload_skipped
-                    if upload_skipped is not None
-                    else (prev.upload_skipped if prev else 0)
-                ),
-                prep_started_monotonic=(
-                    prep_started_monotonic
-                    if prep_started_monotonic is not None
-                    else (prev.prep_started_monotonic if prev else None)
-                ),
-                prep_elapsed_s=(
-                    prep_elapsed_s
-                    if prep_elapsed_s is not None
-                    else (prev.prep_elapsed_s if prev else 0.0)
-                ),
-                upload_started_monotonic=(
-                    upload_started_monotonic
-                    if upload_started_monotonic is not None
-                    else (prev.upload_started_monotonic if prev else None)
-                ),
-                upload_elapsed_s=(
-                    upload_elapsed_s
-                    if upload_elapsed_s is not None
-                    else (prev.upload_elapsed_s if prev else 0.0)
-                ),
+                upload_elapsed_s=_keep(upload_elapsed_s, prev.upload_elapsed_s),
             )
 
     def _set_active_recorder(self, recorder: MetricsRecorder | None) -> None:
@@ -512,7 +534,7 @@ class MultiBatchOrchestrator:
                 prep_started_monotonic=started,
             )
             self._set_active_recorder(recorder)
-            items, skipped, s1d, s1_filtered, s2f, s3f, s4f = self._pipeline.prep_chunk(
+            items, skipped, s1d, s1_filtered, s1f, s2f, s3f, s4f = self._pipeline.prep_chunk(
                 triggers=chunk,
                 batch_id=batch_id,
                 recorder=recorder,
@@ -524,11 +546,11 @@ class MultiBatchOrchestrator:
                 chunk_idx=idx,
                 batch_id=batch_id,
                 status="PREP",
-                doc_count=s1d + skipped + s1_filtered,
+                doc_count=s1d + skipped + s1_filtered + s1f,
                 total_bytes=total_bytes,
                 prep_done=len(items),
                 prep_skipped=skipped,
-                prep_failed=s2f + s3f + s4f,
+                prep_failures=_PrepFailures(s1f, s2f, s3f, s4f),
                 prep_filtered=s1_filtered,
                 prep_elapsed_s=prep_elapsed,
             )
@@ -540,6 +562,7 @@ class MultiBatchOrchestrator:
                 skipped=skipped,
                 s1_done=s1d,
                 s1_filtered=s1_filtered,
+                s1_failed=s1f,
                 s2_failed=s2f,
                 s3_failed=s3f,
                 s4_failed=s4f,
@@ -627,6 +650,7 @@ class MultiBatchOrchestrator:
                         s1_done=item.s1_done,
                         s1_skipped_cross_batch=item.skipped,
                         s1_filtered=item.s1_filtered,
+                        s1_failed=item.s1_failed,
                         s2_done=len(item.items) + item.s2_failed,
                         s2_failed=item.s2_failed,
                         s3_done=len(item.items) + item.s3_failed,

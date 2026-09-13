@@ -561,7 +561,7 @@ class TestS1FilteredOutcome051:
             _row_trigger(_rvabrep_row("D", "TXN_D", delete_code="X")),
         ]
         with caplog.at_level(logging.INFO, logger="cmcourier.orchestrators.staged"):
-            items, skipped, filtered = pipeline._stage_s0_s1(  # noqa: SLF001
+            items, skipped, filtered, _failed = pipeline._stage_s0_s1(  # noqa: SLF001
                 triggers, batch_id, None
             )
 

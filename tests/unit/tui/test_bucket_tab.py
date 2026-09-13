@@ -31,6 +31,10 @@ def _streaming_snapshot(**kwargs: object) -> TUISnapshot:
         ),
         "chunks_state": ({"s5_done": 50, "s5_failed": 1, "prep_skipped": 3},),
         "s1_filtered": 2,
+        # 155: el bloque OUTCOMES lee el desglose por etapa del snapshot,
+        # no sólo las dos columnas de S5 de las filas de `chunk`.
+        "failed_total": 1,
+        "failures_by_stage": {"S1": 0, "S2": 0, "S3": 0, "S4": 0, "S5": 1},
     }
     defaults.update(kwargs)
     return TUISnapshot(**defaults)  # type: ignore[arg-type]
@@ -52,8 +56,11 @@ class TestRenderBucket:
         # Conteos `in-flight` + `worker`
         assert "2 in-flight / 4" in out
         assert "8" in out  # `worker`s de upload
-        # Outcomes (acumulados)
+        # Outcomes (acumulados). 155: el total de fallas de la corrida
+        # reemplaza a la línea suelta de S5_FAILED; la etapa se detalla
+        # indentada debajo, y sólo cuando tiene algo.
         assert "S5_DONE" in out
+        assert "FALLIDOS" in out
         assert "S5_FAILED" in out
         assert "S1_FILTERED" in out
         assert "S1_SKIPPED" in out
@@ -134,3 +141,57 @@ class TestRenderBucket:
         assert "3" in out and "1" in out
         # `total budget` 8
         assert "total budget 8" in out
+
+
+class TestOutcomesPorEtapa155:
+    """155 REQ-003 — `OUTCOMES` dice DÓNDE murieron los documentos."""
+
+    def test_total_de_fallidos_con_las_etapas_que_tienen_algo(self) -> None:
+        snap = _streaming_snapshot(
+            chunks_state=({"s5_done": 0, "s5_failed": 0, "prep_skipped": 0},),
+            s1_filtered=22618,
+            failed_total=10,
+            failures_by_stage={"S1": 0, "S2": 10, "S3": 0, "S4": 0, "S5": 0},
+        )
+        out = render_bucket(snap)
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        block = lines[lines.index("OUTCOMES (cumulative)") :]
+        assert block[2] == "  S5_DONE          0"
+        assert block[3] == "  FALLIDOS        10"
+        assert block[4] == "    S2_FAILED     10"
+        assert block[5] == "  S1_FILTERED  22618"
+        assert block[6] == "  S1_SKIPPED       0"
+
+    def test_las_etapas_sin_fallas_no_se_renderizan(self) -> None:
+        # Nueve líneas en cero son ruido: sólo se muestra lo que pasó.
+        out = render_bucket(
+            _streaming_snapshot(
+                failed_total=3,
+                failures_by_stage={"S1": 0, "S2": 0, "S3": 3, "S4": 0, "S5": 0},
+            )
+        )
+        assert "S3_FAILED" in out
+        for stage in ("S1_FAILED", "S2_FAILED", "S4_FAILED", "S5_FAILED"):
+            assert stage not in out
+
+    def test_s5_done_y_el_total_siempre_se_renderizan_en_cero(self) -> None:
+        out = render_bucket(
+            _streaming_snapshot(
+                chunks_state=({"s5_done": 0, "s5_failed": 0, "prep_skipped": 0},),
+                failed_total=0,
+                failures_by_stage={"S1": 0, "S2": 0, "S3": 0, "S4": 0, "S5": 0},
+            )
+        )
+        assert "  S5_DONE          0" in out
+        assert "  FALLIDOS         0" in out
+        assert "_FAILED" not in out
+
+    def test_varias_etapas_se_ordenan_de_s1_a_s5(self) -> None:
+        out = render_bucket(
+            _streaming_snapshot(
+                failed_total=6,
+                failures_by_stage={"S1": 1, "S2": 0, "S3": 2, "S4": 0, "S5": 3},
+            )
+        )
+        rendered = [ln.strip().split()[0] for ln in out.splitlines() if "_FAILED" in ln]
+        assert rendered == ["S1_FAILED", "S3_FAILED", "S5_FAILED"]

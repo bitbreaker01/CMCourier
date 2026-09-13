@@ -157,7 +157,7 @@ class TestS0S1Census148:
             system_id="1",
         )
 
-        items, _skipped, filtered = pipeline._stage_s0_s1([excluded], "B1", None)
+        items, _skipped, filtered, _failed = pipeline._stage_s0_s1([excluded], "B1", None)
 
         assert items == []  # no fluye a S2
         assert filtered == 1
@@ -215,7 +215,7 @@ class TestS0S1Census148:
             documents=(), excluded=deleted
         )
 
-        _items, _skipped, filtered = pipeline._stage_s0_s1([_client_trigger()], "B1", None)
+        _items, _skipped, filtered, _failed = pipeline._stage_s0_s1([_client_trigger()], "B1", None)
 
         assert filtered == 3
         assert {r.rvabrep_txn_num for r in _pending_records(pipeline)} == {
@@ -232,7 +232,7 @@ class TestS0S1Census148:
             documents=(_doc("TXN_S"),), excluded=()
         )
 
-        _items, skipped, _filtered = pipeline._stage_s0_s1([_client_trigger()], "B1", None)
+        _items, skipped, _filtered, _failed = pipeline._stage_s0_s1([_client_trigger()], "B1", None)
 
         assert skipped == 1
         assert _reasons_by_txn(pipeline)["TXN_S"] is ReasonCode.ALREADY_UPLOADED
@@ -244,7 +244,7 @@ class TestS0S1Census148:
             documents=(_doc("TXN_OOS"),), excluded=()
         )
 
-        items, _skipped, _filtered = pipeline._stage_s0_s1(
+        items, _skipped, _filtered, _failed = pipeline._stage_s0_s1(
             [_client_trigger()], "B1", resume_scope={"OTHER"}
         )
 

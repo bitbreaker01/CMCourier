@@ -136,6 +136,10 @@ class RunReport:
     s5_done: int
     s5_failed: int
     elapsed_seconds: float
+    # 155: S1 también falla —el trigger sin filas RVABREP, el escaneo que
+    # revienta— y esas fallas dejan su ``S1_FAILED`` en la base. Hasta acá
+    # el reporte no las tenía, así que la vista en vivo tampoco.
+    s1_failed: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -644,7 +648,7 @@ class StagedPipeline:
             )
             resume_scope = self._resume_scope(resolved_batch_id) if from_stage > 1 else None
 
-            items, skipped, s1_filtered = self._stage_s0_s1(
+            items, skipped, s1_filtered, s1_failed = self._stage_s0_s1(
                 triggers, resolved_batch_id, resume_scope
             )
             s1_done = len(items)
@@ -699,6 +703,7 @@ class StagedPipeline:
             s1_done=s1_done,
             s1_skipped_cross_batch=skipped,
             s1_filtered=s1_filtered,
+            s1_failed=s1_failed,
             s2_done=s2_done,
             s2_failed=s2_failed,
             s3_done=s3_done,
@@ -804,23 +809,26 @@ class StagedPipeline:
         batch_id: str,
         recorder: MetricsRecorder,
         from_stage: int = 1,
-    ) -> tuple[list[_StageItem], int, int, int, int, int, int]:
+    ) -> tuple[list[_StageItem], int, int, int, int, int, int, int]:
         """Corre S0..S4 sobre un `chunk` de triggers ya adquirido.
 
-        Devuelve ``(items, skipped, s1_done, s1_filtered, s2_failed,
-        s3_failed, s4_failed)``. La adquisición de triggers es
+        Devuelve ``(items, skipped, s1_done, s1_filtered, s1_failed,
+        s2_failed, s3_failed, s4_failed)``. La adquisición de triggers es
         responsabilidad del orchestrator — este método toma la lista
         directamente.
+
+        155: ``s1_failed`` es nuevo; sin él las fallas de S1 no llegaban
+        ni al ``ChunkState`` ni al contador de la vista en vivo.
         """
         resume_scope = self._resume_scope(batch_id) if from_stage > 1 else None
-        items, skipped, s1_filtered = self._stage_s0_s1(
+        items, skipped, s1_filtered, s1_failed = self._stage_s0_s1(
             triggers, batch_id, resume_scope, recorder=recorder
         )
         s1_done = len(items)
         items, s2_failed = self._stage_s2(items, batch_id, recorder=recorder)
         items, s3_failed = self._stage_s3(items, batch_id, recorder=recorder)
         items, s4_failed = self._stage_s4(items, batch_id, recorder=recorder)
-        return items, skipped, s1_done, s1_filtered, s2_failed, s3_failed, s4_failed
+        return items, skipped, s1_done, s1_filtered, s1_failed, s2_failed, s3_failed, s4_failed
 
     def upload_chunk(
         self,
@@ -839,37 +847,43 @@ class StagedPipeline:
         trigger: Trigger,
         batch_id: str,
         recorder: MetricsRecorder,
-    ) -> tuple[_StageItem | None, int, int]:
+    ) -> tuple[_StageItem | None, int, int, str]:
         """063: corre S1→S4 sobre un único trigger y devuelve el sobreviviente.
 
         Usado por los `producer`s de :class:`StreamingOrchestrator`.
-        Devuelve ``(survivor, skipped_cross_batch, s1_filtered)``:
+        Devuelve ``(survivor, skipped_cross_batch, s1_filtered,
+        failed_stage)``:
 
         * ``survivor`` es el único ``_StageItem`` sobreviviente o
-          ``None`` (filtrado / saltado cross-batch / fallado en S2-S4).
+          ``None`` (filtrado / saltado cross-batch / fallado en S1-S4).
         * ``skipped_cross_batch`` es 1 cuando el doc RVABREP del
           trigger ya había sido subido en un `batch` previo (062
           ``S1_SKIPPED``).
         * ``s1_filtered`` es 1 cuando la fila RVABREP venía con código
           de baja (062 ``S1_FILTERED``).
+        * ``failed_stage`` (155) es ``"S1"``..``"S4"`` cuando el
+          documento murió con una falla terminal, y ``""`` en cualquier
+          otro caso. Pre-155 el `producer` recibía un ``None`` pelado y
+          NO podía distinguir "filtrado" de "fallado en S2": por eso las
+          fallas de prep nunca llegaban al contador de la vista en vivo.
 
         La persistencia de falla / filtrado / salto la hacen los
         helpers internos por-`stage` — este método no agrega ningún
         comportamiento propio más allá del secuenciamiento.
         """
-        items, skipped, filtered = self._stage_s0_s1(
+        items, skipped, filtered, s1_failed = self._stage_s0_s1(
             [trigger], batch_id, resume_scope=None, recorder=recorder
         )
         if not items:
-            return None, skipped, filtered
-        survivor, _ = self._s2_one(items[0], batch_id, recorder)
+            return None, skipped, filtered, ("S1" if s1_failed else "")
+        survivor, s2_failed = self._s2_one(items[0], batch_id, recorder)
         if survivor is None:
-            return None, skipped, filtered
-        survivor, _ = self._s3_one(survivor, batch_id, recorder)
+            return None, skipped, filtered, ("S2" if s2_failed else "")
+        survivor, s3_failed = self._s3_one(survivor, batch_id, recorder)
         if survivor is None:
-            return None, skipped, filtered
-        survivor, _ = self._s4_one(survivor, batch_id, recorder)
-        return survivor, skipped, filtered
+            return None, skipped, filtered, ("S3" if s3_failed else "")
+        survivor, s4_failed = self._s4_one(survivor, batch_id, recorder)
+        return survivor, skipped, filtered, ("S4" if s4_failed and survivor is None else "")
 
     def streaming_upload_one(
         self,
@@ -1008,7 +1022,7 @@ class StagedPipeline:
         resume_scope: set[str] | None,
         *,
         recorder: MetricsRecorder | None = None,
-    ) -> tuple[list[_StageItem], int, int]:
+    ) -> tuple[list[_StageItem], int, int, int]:
         """S0→S1. 148 REQ-004: ningún documento del origen sale de acá sin fila.
 
         Cuatro salidas posibles por documento, y las cuatro dejan rastro:
@@ -1017,6 +1031,10 @@ class StagedPipeline:
         (``S1_FILTERED`` + su razón), o el escaneo se rompió
         (``S1_FAILED`` + su razón). Pre-148 tres de esos caminos eran un
         ``continue`` pelado.
+
+        155: devuelve ``(items, skipped, filtered, s1_failed)``. El cuarto
+        elemento es nuevo — la cuarta salida dejaba su fila desde 148 pero
+        no tenía contador, así que ningún reporte ni el monitor la veían.
         """
         rec = recorder or self._metrics
         items: list[_StageItem] = []
@@ -1024,6 +1042,7 @@ class StagedPipeline:
         # 051: un trigger filtrado es un resultado de primera clase, NO una
         # falla y NO un descarte silencioso.
         filtered = 0
+        failed = 0
         for trigger in triggers:
             # 097: cancelación cooperativa — dejamos de tomar triggers
             # nuevos; los ya convertidos a items siguen su curso. 148: el
@@ -1040,6 +1059,9 @@ class StagedPipeline:
                 continue
             outcome = self._s1_enrich(trigger, batch_id, rec)
             if outcome is None:
+                # 155: ``_s1_enrich`` ya dejó la fila ``S1_FAILED``; acá se
+                # cuenta para que el censo y la vista en vivo coincidan.
+                failed += 1
                 continue
             for excluded in outcome.excluded:
                 filtered += 1
@@ -1049,7 +1071,7 @@ class StagedPipeline:
                 skipped_cross_batch += skipped_delta
                 if item is not None:
                     items.append(item)
-        return items, skipped_cross_batch, filtered
+        return items, skipped_cross_batch, filtered, failed
 
     def _record_cancelled(self, trigger: Trigger, batch_id: str) -> None:
         """148: el trigger que estaba en la mano cuando se canceló la corrida."""

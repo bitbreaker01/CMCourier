@@ -128,8 +128,11 @@ def render_upload(snap: TUISnapshot, *, width: int = 76) -> str:
     # 104: desglose de la tasa de error por tipo — visible en vivo, para
     # ver el instante en que arrancan los 5xx durante una prueba de estrés.
     lines.append("")
-    lines.append(f" ERRORS BY TYPE ({snap.failed_total} total)")
-    if snap.failed_total == 0:
+    # 155: el rótulo dice de qué etapa habla. El desglose por tipo y
+    # status HTTP es legítimamente CMIS-specific — lo que estaba mal era
+    # usar SU total como el total de la corrida (ver ``failed_total``).
+    lines.append(f" ERRORS BY TYPE (UPLOAD) — {snap.upload_failed_total} total")
+    if snap.upload_failed_total == 0:
         lines.append("    (none yet)")
     else:
         for category in ("timeout", "http_4xx", "http_5xx", "transport", "app_error"):

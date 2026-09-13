@@ -26,19 +26,19 @@ def _snap(**overrides: Any) -> TUISnapshot:
 
 def test_clean_run_shows_none_yet() -> None:
     out = render_upload(_snap())
-    assert "ERRORS BY TYPE (0 total)" in out
+    assert "ERRORS BY TYPE (UPLOAD) — 0 total" in out
     assert "(none yet)" in out
 
 
 def test_breakdown_lists_categories_and_status() -> None:
     out = render_upload(
         _snap(
-            failed_total=12,
+            upload_failed_total=12,
             failures_by_type={"http_5xx": 10, "timeout": 2},
             failures_by_status={503: 8, 500: 2},
         )
     )
-    assert "ERRORS BY TYPE (12 total)" in out
+    assert "ERRORS BY TYPE (UPLOAD) — 12 total" in out
     assert "http_5xx" in out
     assert "timeout" in out
     assert "503×8" in out
@@ -46,6 +46,23 @@ def test_breakdown_lists_categories_and_status() -> None:
 
 
 def test_zero_count_categories_are_omitted() -> None:
-    out = render_upload(_snap(failed_total=3, failures_by_type={"timeout": 3}))
+    out = render_upload(_snap(upload_failed_total=3, failures_by_type={"timeout": 3}))
     assert "timeout" in out
     assert "http_4xx" not in out
+
+
+def test_el_bloque_es_solo_de_upload_no_del_total_de_la_corrida() -> None:
+    """155 REQ-002 — el desglose de 104 es CMIS-specific y se rotula como tal.
+
+    Una corrida con 10 fallas en S2 y 2 en S5 tiene ``failed_total == 12``
+    pero el bloque de tipos sólo puede explicar las 2 de upload.
+    """
+    out = render_upload(
+        _snap(
+            failed_total=12,
+            upload_failed_total=2,
+            failures_by_type={"http_5xx": 2},
+        )
+    )
+    assert "ERRORS BY TYPE (UPLOAD) — 2 total" in out
+    assert "12 total" not in out

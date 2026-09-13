@@ -14,6 +14,7 @@ import pytest
 from cmcourier.config.schema import ObservabilityConfig, PipelineConfig
 from cmcourier.domain.models import TriggerRecord
 from cmcourier.orchestrators.multi_batch import (
+    ChunkState,
     MultiBatchOrchestrator,
     MultiBatchRunReport,
 )
@@ -94,8 +95,9 @@ class _FakePipeline:
             SimpleNamespace(document=SimpleNamespace(txn_num=f"TXN_{batch_id}_{i}"))
             for i, _ in enumerate(triggers)
         ]
-        # 051: (items, skipped, s1_done, s1_filtered, s2_failed, s3_failed, s4_failed)
-        return items, 0, len(items), 0, 0, 0, 0
+        # 051/155: (items, skipped, s1_done, s1_filtered, s1_failed,
+        # s2_failed, s3_failed, s4_failed)
+        return items, 0, len(items), 0, 0, 0, 0, 0
 
     def upload_chunk(self, *, items, batch_id: str, recorder):  # noqa: ARG002
         if self._upload_sleep:
@@ -109,7 +111,7 @@ class _FakePipeline:
         batch_id = self._resolve_batch_id(
             kwargs.get("batch_id"), kwargs.get("from_stage", 1), kwargs.get("batch_size", 1000)
         )
-        items, skipped, s1d, s1f, s2f, s3f, s4f = self.prep_chunk(
+        items, skipped, s1d, s1_filtered, s1f, s2f, s3f, s4f = self.prep_chunk(
             triggers=self._triggers, batch_id=batch_id, recorder=None
         )
         s5d, s5f = self.upload_chunk(items=items, batch_id=batch_id, recorder=None)
@@ -119,7 +121,8 @@ class _FakePipeline:
             total_docs=s1d + skipped,
             s1_done=s1d,
             s1_skipped_cross_batch=skipped,
-            s1_filtered=s1f,
+            s1_filtered=s1_filtered,
+            s1_failed=s1f,
             s2_done=s1d - s2f,
             s2_failed=s2f,
             s3_done=s1d - s2f - s3f,
@@ -560,10 +563,10 @@ class _FilterPipeline(_FakePipeline):
         self._filtered_per_chunk = filtered_per_chunk
 
     def prep_chunk(self, *, triggers, batch_id, recorder, from_stage=1):  # type: ignore[no-untyped-def]
-        items, skipped, s1d, _s1f, s2f, s3f, s4f = super().prep_chunk(
+        items, skipped, s1d, _filtered, s1f, s2f, s3f, s4f = super().prep_chunk(
             triggers=triggers, batch_id=batch_id, recorder=recorder
         )
-        return items, skipped, s1d, self._filtered_per_chunk, s2f, s3f, s4f
+        return items, skipped, s1d, self._filtered_per_chunk, s1f, s2f, s3f, s4f
 
 
 class TestFilteredOutcome051:
@@ -641,3 +644,22 @@ class TestRunClose144:
         orch.run(source_descriptor="", batch_size=3, batches_in_flight=1)
 
         recon.stop.assert_called_once_with()
+
+
+class TestFallasDePrepPorEtapa155:
+    """155 — ``prep_failed`` es derivado, así que no puede desincronizarse."""
+
+    def test_prep_failed_es_la_suma_de_s1_a_s4(self) -> None:
+        state = ChunkState(
+            chunk_idx=0,
+            batch_id="B1",
+            status="PREP",
+            s1_failed=1,
+            s2_failed=10,
+            s3_failed=2,
+            s4_failed=3,
+        )
+        assert state.prep_failed == 16
+
+    def test_un_chunk_limpio_no_reporta_fallas_de_prep(self) -> None:
+        assert ChunkState(chunk_idx=0, batch_id="B1", status="DONE").prep_failed == 0
