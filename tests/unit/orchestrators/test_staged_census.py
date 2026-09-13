@@ -127,6 +127,10 @@ def _reasons_by_txn(pipeline: StagedPipeline) -> dict[str, ReasonCode | None]:
     return {c[0]: c[-1] for c in _terminal_calls(pipeline)}
 
 
+def _errors_by_txn(pipeline: StagedPipeline) -> dict[str, str]:
+    return {c[0]: c[3] for c in _terminal_calls(pipeline)}
+
+
 def _statuses_by_txn(pipeline: StagedPipeline) -> dict[str, StageStatus]:
     return {c[0]: c[2] for c in _terminal_calls(pipeline)}
 
@@ -452,6 +456,35 @@ class TestCrashCensus148:
 
         assert _reasons_by_txn(pipeline)["TXN_P"] is ReasonCode.CRASHED
         pipeline._tracking_store.increment_source_total.assert_not_called()
+
+    def test_el_mensaje_del_crash_lleva_el_detalle_de_la_excepcion_153(self) -> None:
+        """El operador recibia `crashed: ValueError` y nada mas.
+
+        Un ValueError de ``parse_cymmdd`` dice QUE columna y QUE valor lo
+        rompio; quedarse con el nombre del tipo tira justo la parte que
+        sirve para arreglarlo.
+        """
+        pipeline = _pipeline()
+        pipeline._indexing_service.txn_num_of.return_value = "TXN_P"
+        trigger = RvabrepRowTrigger(row={"ABABCD": "SN", "ABAACD": "1"})
+
+        pipeline.record_prep_crash(
+            trigger, "B1", ValueError("CYYMMDD requires exactly 7 digits, got '2026-09-13'")
+        )
+
+        msg = _errors_by_txn(pipeline)["TXN_P"]
+        assert msg.startswith("crashed: ValueError: ")
+        assert "CYYMMDD requires exactly 7 digits" in msg
+        assert "2026-09-13" in msg
+
+    def test_el_mensaje_del_crash_se_recorta_153(self) -> None:
+        pipeline = _pipeline()
+        pipeline._indexing_service.txn_num_of.return_value = "TXN_P"
+        trigger = RvabrepRowTrigger(row={"ABABCD": "SN", "ABAACD": "1"})
+
+        pipeline.record_prep_crash(trigger, "B1", ValueError("x" * 5000))
+
+        assert len(_errors_by_txn(pipeline)["TXN_P"]) <= 512
 
     def test_prep_crash_before_s1_counts_the_document(self) -> None:
         """Si reventó antes de que S1 lo contara, el denominador lo suma

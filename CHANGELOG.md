@@ -12,6 +12,14 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Fixed
 
+- **`crashed: ValueError` y nada más.** El mensaje de un crash se
+  construía con `f"crashed: {type(exc).__name__}"`, tirando el
+  `str(exc)` — que es justo la parte accionable. Un operador vio diez
+  documentos con `crashed: ValueError` y no tenía por dónde empezar; la
+  excepción decía `CYYMMDD requires exactly 7 digits, got '...'`, o sea
+  el formato esperado Y el valor que lo rompió. Ahora el detalle viaja
+  (recortado a 512) hasta `migration_log.error_message` y `batch show`.
+
 - **El monitor decía "deleted at source" sobre documentos que nadie había
   borrado.** La etiqueta `FILTERED (S1, deleted at source)` es de la spec
   051, cuando ese estado tenía UNA sola causa. La 148 metió en el mismo

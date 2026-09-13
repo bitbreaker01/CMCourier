@@ -52,7 +52,7 @@ El mapa lógico → físico de RVABREP que usa CMCourier:
 | tipo imagen | `ABABST` | `P` (PDF) |
 | path | `ABAICD` | carpeta del share |
 | archivo | `ABAJCD` | nombre de la primera página |
-| alta / vista | `ABAADT` / `ABABDT` | timestamps |
+| alta / vista | `ABAADT` / `ABABDT` | **números `CYYMMDD`**, NO timestamps (`1260913`, `0`) |
 | páginas | `ABABUN` | cantidad |
 | **borrado** | `ABACST` | **no vacío = borrado** |
 
@@ -152,6 +152,25 @@ Un `INSERT` por bloque temático, para que puedas correr de a uno y ver
 qué pasa. Ajustá la lista de columnas a lo que te devolvió el Paso 0 — si
 tu tabla tiene columnas `NOT NULL` que acá no figuran, agregalas.
 
+> ⚠️ **`ABAADT` y `ABABDT` NO son timestamps: son números en formato
+> `CYYMMDD` de 7 dígitos.** `C` es el siglo (`0` = 1900s, `1` = 2000s),
+> después `YY`, `MM`, `DD`. Así que el 13 de septiembre de 2026 se
+> escribe **`1260913`**, no `CURRENT TIMESTAMP`.
+>
+> `parse_cymmdd` (`domain/models.py`) exige exactamente 7 dígitos y tira
+> `ValueError` ante cualquier otra cosa — y ese `ValueError` se registra
+> como `CRASHED` en el censo, con un mensaje que NO dice qué columna ni
+> qué valor lo causó. Si ves `crashed: ValueError` en tus filas de
+> prueba, mirá estas dos columnas primero.
+>
+> `ABABDT` (última vista) va en **`0`**: el parser mapea `'0'` y `''` a
+> "nunca vista", que es lo correcto para una fila recién insertada.
+>
+> Confirmá el formato con tus propios datos antes de insertar:
+> ```sql
+> SELECT ABAADT, ABABDT, ABABUN FROM RVILIB.RVABREP FETCH FIRST 3 ROWS ONLY;
+> ```
+
 ### 3.1 Camino feliz y formato
 
 ```sql
@@ -161,15 +180,15 @@ INSERT INTO RVILIB.RVABREP
 VALUES
   -- C01: shortname directo, CIF "1000" en el CSV → debe subir 000001000
   ('1','T0001','ACMESA001001','', 'DC01','P','/RVI9/DEV','T0001.PDF',
-   CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, ''),
+   1260913, 0, 1, ''),
 
   -- C02: shortname directo, CIF ya con ceros → mismo resultado
   ('1','T0002','BBVASA002002','', 'DC01','P','/RVI9/DEV','T0002.PDF',
-   CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, ''),
+   1260913, 0, 1, ''),
 
   -- C03: shortname con relleno de espacios (columna CHAR)
   ('1','T0003','CDEFSA003003 ','','DC01','P','/RVI9/DEV','T0003.PDF',
-   CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, '');
+   1260913, 0, 1, '');
 ```
 
 | Caso | Prueba | Esperado |
@@ -187,19 +206,19 @@ INSERT INTO RVILIB.RVABREP
 VALUES
   -- C04: afiliado hijo en index1 (no hay shortname) → cadena de 3 saltos
   ('1','T0004','10000001','','DC01','P','/RVI9/DEV','T0004.PDF',
-   CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, ''),
+   1260913, 0, 1, ''),
 
   -- C05: afiliado hijo en index2, index1 vacío
   ('1','T0005','','10000003','DC01','P','/RVI9/DEV','T0005.PDF',
-   CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, ''),
+   1260913, 0, 1, ''),
 
   -- C06: afiliado que NO está en el CSV de padres
   ('1','T0006','19999999','','DC01','P','/RVI9/DEV','T0006.PDF',
-   CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, ''),
+   1260913, 0, 1, ''),
 
   -- C07: fila sin shortname y sin sistema
   ('' ,'T0007','','','DC01','P','/RVI9/DEV','T0007.PDF',
-   CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, '');
+   1260913, 0, 1, '');
 ```
 
 | Caso | Prueba | Esperado |
@@ -218,19 +237,19 @@ INSERT INTO RVILIB.RVABREP
 VALUES
   -- C08: código con marca de borrado
   ('1','T0008','ACMESA001001','','DC01','P','/RVI9/DEV','T0008.PDF',
-   CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, 'D'),
+   1260913, 0, 1, 'D'),
 
   -- C09: código FUERA de triggers.filters.document_types
   ('1','T0009','ACMESA001001','','AF01','P','/RVI9/DEV','T0009.PDF',
-   CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, ''),
+   1260913, 0, 1, ''),
 
   -- C10: código que NO existe en MapeoRVI_CM.csv
   ('1','T0010','ACMESA001001','','ZZ99','P','/RVI9/DEV','T0010.PDF',
-   CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, ''),
+   1260913, 0, 1, ''),
 
   -- C11: cliente que NO está en clientes-activos.csv
   ('1','T0011','BBVASA002002','','DC01','P','/RVI9/DEV','T0011.PDF',
-   CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, '');
+   1260913, 0, 1, '');
 ```
 
 | Caso | Esperado |
@@ -257,19 +276,19 @@ INSERT INTO RVILIB.RVABREP
 VALUES
   -- C12: tarjeta de 16 dígitos en index2
   ('1','T0012','ACMESA001001','4111111111111111','TC18','P',
-   '/RVI9/DEV','T0012.PDF', CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, ''),
+   '/RVI9/DEV','T0012.PDF', 1260913, 0, 1, ''),
 
   -- C13: tarjeta ausente → cae al default "000000"
   ('1','T0013','ACMESA001001','','TC18','P',
-   '/RVI9/DEV','T0013.PDF', CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, ''),
+   '/RVI9/DEV','T0013.PDF', 1260913, 0, 1, ''),
 
   -- C14: préstamo de 9 dígitos en index2
   ('1','T0014','ACMESA001001','123456789','PP16','P',
-   '/RVI9/DEV','T0014.PDF', CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, ''),
+   '/RVI9/DEV','T0014.PDF', 1260913, 0, 1, ''),
 
   -- C15: valor de 7 dígitos donde se espera una tarjeta de 14-16
   ('1','T0015','ACMESA001001','1234567','TC18','P',
-   '/RVI9/DEV','T0015.PDF', CURRENT TIMESTAMP, CURRENT TIMESTAMP, 1, '');
+   '/RVI9/DEV','T0015.PDF', 1260913, 0, 1, '');
 ```
 
 | Caso | Prueba | Esperado |

@@ -143,6 +143,26 @@ class RunReport:
 # ---------------------------------------------------------------------------
 
 
+#: Tope del mensaje de un crash en ``migration_log.error_message``. Un
+#: traceback repr-eado puede ser enorme; 512 alcanza para el tipo más el
+#: detalle accionable y no infla la base.
+_CRASH_MESSAGE_MAX = 512
+
+
+def _crash_message(exc: BaseException) -> str:
+    """El mensaje del crash CON el detalle de la excepción.
+
+    Hasta 153 esto era ``f"crashed: {type(exc).__name__}"``, y el operador
+    recibía ``crashed: ValueError`` — el nombre del tipo y nada más. El
+    ``str(exc)`` es justo la parte accionable: un ``ValueError`` de
+    ``parse_cymmdd`` dice qué formato esperaba y qué valor recibió, que es
+    lo único que permite ir a arreglar la fila.
+    """
+    detail = str(exc).strip()
+    text = f"crashed: {type(exc).__name__}" + (f": {detail}" if detail else "")
+    return text if len(text) <= _CRASH_MESSAGE_MAX else text[: _CRASH_MESSAGE_MAX - 1] + "…"
+
+
 def _census_record(excluded: ExcludedTrigger, batch_id: str) -> MigrationRecord:
     """148 REQ-004: la fila de ``migration_log`` de un documento que no sigue.
 
@@ -928,7 +948,7 @@ class StagedPipeline:
                 excluded.txn_num,
                 batch_id,
                 stage,
-                f"crashed: {type(exc).__name__}",
+                _crash_message(exc),
                 reason_code=ReasonCode.CRASHED,
             )
         except Exception:  # noqa: BLE001 — S6 nunca bloquea el pipeline
