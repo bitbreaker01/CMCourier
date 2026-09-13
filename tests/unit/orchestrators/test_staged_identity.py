@@ -313,20 +313,23 @@ class TestClaveDelMapeo:
 
 
 class TestFallaDeIdentidad:
-    def test_falla_el_documento_como_s2_failed_con_el_motivo(
+    def test_bloquea_el_documento_como_s2_blocked_con_el_motivo(
         self, metadata_service: MetadataService
     ) -> None:
-        # Un hijo que no está en la tabla de afiliados corta la cadena entera.
+        # 157 REQ-002: una identidad sin resolver es del balde BLOQUEADO —falta
+        # config, el operador la arregla— así que el estado terminal es
+        # ``S2_BLOCKED`` (escrito con mark_stage_terminal) y NO cuenta como
+        # falla. Un hijo que no está en la tabla de afiliados corta la cadena.
         identity = _identity_config()
         pipeline = _pipeline(metadata_service, identity, stage_done=False)
         item = _StageItem(trigger=_trigger(), document=_document(index1="NO_EXISTE"))
         survivor, counted = _run_s2(pipeline, item)
         assert survivor is None
-        assert counted is True
+        assert counted is False
         tracking = pipeline._tracking_store
-        tracking.mark_stage_failed.assert_called_once()  # type: ignore[attr-defined]
-        args = tracking.mark_stage_failed.call_args.args  # type: ignore[attr-defined]
-        assert args[2] is StageStatus.S2_FAILED
+        tracking.mark_stage_terminal.assert_called_once()  # type: ignore[attr-defined]
+        args = tracking.mark_stage_terminal.call_args.args  # type: ignore[attr-defined]
+        assert args[2] is StageStatus.S2_BLOCKED
         assert "identity.shortname" in args[3]
         # La cadena completa que se intentó es el punto del mensaje.
         assert "BAC_Afiliado_Padre" in args[3]

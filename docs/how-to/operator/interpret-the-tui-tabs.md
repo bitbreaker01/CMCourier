@@ -204,9 +204,10 @@ LANES (heavy/light, 065)
 OUTCOMES (cumulative)
 ─────────────────────
   S5_DONE        624
-  FALLIDOS        13
-    S2_FAILED     10
+  FALLIDOS         3
     S5_FAILED      3
+  BLOQUEADOS      10
+  EXCLUIDOS       37
   S1_FILTERED     37
   S1_SKIPPED       0
 ```
@@ -220,11 +221,32 @@ OUTCOMES (cumulative)
 - **S5 up to N consumer threads** — techo (`cmis.workers` o el budget del AIMD).
 - **LANES** — bloque por-lane solo si `heavy_light_lanes.enabled: true`.
 - **OUTCOMES (cumulative)** — contadores acumulativos. `S1_SKIPPED` ≠ 0 indica idempotency cross-batch.
-- **FALLIDOS** (155) — el total de fallas terminales de **todas** las etapas, S1 a S5. Debajo, indentada, va una línea por etapa que tenga algo: `S2_FAILED 10` significa diez documentos muertos en S2 (típicamente identidad que no resuelve). `S5_DONE` y `FALLIDOS` se muestran siempre, aunque valgan cero; las etapas aparecen sólo cuando fallaron, porque nueve líneas en cero son ruido.
-  - Antes de 155 este bloque tenía una sola línea de fallas, `S5_FAILED`, y el `fallidos` de la cabecera salía del desglose de UPLOAD: una corrida donde diez documentos morían en S2 se anunciaba `0 fallidos`, en verde, y recién aparecían en `[7] BATCHES`, que lee la base.
-  - **La invariante**: lo que este bloque cuenta al terminar tiene que coincidir con lo que `cmcourier batch show <batch_id>` cuenta después. Si difieren, la vista en vivo está mintiendo — la base es la verdad.
-  - **El POR QUÉ no está acá.** El contador vive en memoria y no tiene `reason_code`. Para saber si esos diez son `IDENTITY_UNRESOLVED`, `IDRVI_NOT_MAPPED` o `CLIENT_NOT_ACTIVE`, el censo por razón está en [`read-the-batch-census.md`](read-the-batch-census.md).
-  - **Un caso de borde conocido**: por el eje ortogonal de 148 una **exclusión** de negocio puede vivir en una fila `*_FAILED` (`CLIENT_NOT_ACTIVE` es `S2_FAILED`). Esas filas las cuenta `batch show` pero no el contador en vivo, que sólo suma lo que el pipeline clasificó como falla reintentable. Si los dos números difieren y la diferencia son exclusiones, `batch show` te lo dice en el bloque por razón.
+- **FALLIDOS / BLOQUEADOS / EXCLUIDOS** (155 + 157) — desde 157 el bloque
+  separa las tres categorías de no-subidos, cada una por su balde:
+  - **FALLIDOS** — fallas terminales de ejecución (`*_FAILED`, balde FALLO),
+    S1 a S5. Debajo, indentada, va una línea por etapa que tenga algo:
+    `S5_FAILED 3`. Estas SÍ se reintentan con `R`.
+  - **BLOQUEADOS** (157) — `*_BLOCKED`: falta config (código sin mapear, tipo
+    fuera del manifest, identidad o metadata sin resolver, fila de origen
+    incompleta). No son fallas de ejecución: se arreglan editando la config y
+    re-corriendo, **no** con `R`.
+  - **EXCLUIDOS** (157) — `*_EXCLUDED` + `S1_FILTERED` + `S1_SKIPPED`: decisión
+    de negocio/origen (cliente inactivo, código de baja, ya subido). No hay
+    nada que arreglar.
+  - `S5_DONE`, `FALLIDOS`, `BLOQUEADOS` y `EXCLUIDOS` se muestran siempre,
+    aunque valgan cero; las etapas de FALLIDOS aparecen sólo cuando fallaron.
+  - **Por qué importa**: hasta 156 un cliente inactivo (`CLIENT_NOT_ACTIVE`)
+    vivía en una fila `S2_FAILED` y se contaba como falla — el operador veía
+    `fallidos 38527` sobre documentos que nadie falló. 157 le dio a cada balde
+    su propio sufijo de status, así que el monitor cuenta cada uno donde
+    corresponde y una corrida que sólo excluyó/bloqueó ya no se anuncia en rojo.
+  - **La invariante (155, extendida por 157)**: lo que este bloque cuenta al
+    terminar —en las CUATRO categorías— tiene que coincidir con lo que
+    `cmcourier batch show <batch_id>` cuenta después. Si difieren, la vista en
+    vivo está mintiendo — la base es la verdad.
+  - **El POR QUÉ por documento no está acá.** El contador vive en memoria y no
+    lleva `reason_code`; el censo por razón está en
+    [`read-the-batch-census.md`](read-the-batch-census.md).
 
 ### Qué mirar primero
 

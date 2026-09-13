@@ -152,6 +152,9 @@ class TestOutcomesPorEtapa155:
             s1_filtered=22618,
             failed_total=10,
             failures_by_stage={"S1": 0, "S2": 10, "S3": 0, "S4": 0, "S5": 0},
+            # 157: las cuatro categorías. Acá sólo hay fallidos y excluidos.
+            blocked_total=0,
+            excluded_total=22618,
         )
         out = render_bucket(snap)
         lines = [ln for ln in out.splitlines() if ln.strip()]
@@ -159,8 +162,11 @@ class TestOutcomesPorEtapa155:
         assert block[2] == "  S5_DONE          0"
         assert block[3] == "  FALLIDOS        10"
         assert block[4] == "    S2_FAILED     10"
-        assert block[5] == "  S1_FILTERED  22618"
-        assert block[6] == "  S1_SKIPPED       0"
+        # 157: BLOQUEADOS y EXCLUIDOS van entre las fallas y su detalle.
+        assert block[5] == "  BLOQUEADOS       0"
+        assert block[6] == "  EXCLUIDOS    22618"
+        assert block[7] == "  S1_FILTERED  22618"
+        assert block[8] == "  S1_SKIPPED       0"
 
     def test_las_etapas_sin_fallas_no_se_renderizan(self) -> None:
         # Nueve líneas en cero son ruido: sólo se muestra lo que pasó.
@@ -195,3 +201,29 @@ class TestOutcomesPorEtapa155:
         )
         rendered = [ln.strip().split()[0] for ln in out.splitlines() if "_FAILED" in ln]
         assert rendered == ["S1_FAILED", "S3_FAILED", "S5_FAILED"]
+
+
+class TestOutcomesCuatroCategorias157:
+    """157 REQ-004 — OUTCOMES separa fallidos / bloqueados / excluidos."""
+
+    def test_bloqueados_y_excluidos_se_rinden_siempre(self) -> None:
+        out = render_bucket(_streaming_snapshot(failed_total=0, blocked_total=0, excluded_total=0))
+        assert "BLOQUEADOS" in out
+        assert "EXCLUIDOS" in out
+
+    def test_una_corrida_solo_de_bloqueados_no_muestra_fallas(self) -> None:
+        out = render_bucket(
+            _streaming_snapshot(
+                chunks_state=({"s5_done": 0, "s5_failed": 0, "prep_skipped": 0},),
+                s1_filtered=0,
+                failed_total=0,
+                failures_by_stage={"S1": 0, "S2": 0, "S3": 0, "S4": 0, "S5": 0},
+                blocked_total=7,
+                excluded_total=0,
+            )
+        )
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        block = lines[lines.index("OUTCOMES (cumulative)") :]
+        assert "  FALLIDOS         0" in block
+        assert "  BLOQUEADOS       7" in block
+        assert "_FAILED" not in out

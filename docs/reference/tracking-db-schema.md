@@ -160,12 +160,17 @@ stateDiagram-v2
     S0_DONE --> S1_PENDING
     S1_PENDING --> S1_DONE
     S1_PENDING --> S1_SKIPPED: already uploaded (cross-batch)
+    S1_PENDING --> S1_FILTERED: excluido en origen
+    S1_PENDING --> S1_BLOCKED: fila de origen incompleta (157)
     S1_DONE --> S2_PENDING
     S2_PENDING --> S2_DONE
     S2_PENDING --> S2_FAILED
+    S2_PENDING --> S2_BLOCKED: falta config (157)
+    S2_PENDING --> S2_EXCLUDED: cliente inactivo (157)
     S2_DONE --> S3_PENDING
     S3_PENDING --> S3_DONE
     S3_PENDING --> S3_FAILED
+    S3_PENDING --> S3_BLOCKED: metadata sin resolver (157)
     S3_DONE --> S4_PENDING
     S4_PENDING --> S4_DONE
     S4_PENDING --> S4_FAILED
@@ -174,6 +179,9 @@ stateDiagram-v2
     S5_PENDING --> S5_FAILED
     S5_DONE --> [*]
     S1_SKIPPED --> [*]
+    S1_FILTERED --> [*]
+    S1_BLOCKED --> [*]
+    S2_EXCLUDED --> [*]
 ```
 
 ### Valores válidos (set completo)
@@ -185,13 +193,17 @@ stateDiagram-v2
 | `S1_PENDING` | S1 | no | En indexing. |
 | `S1_DONE` | S1 | no | Documento RVABREP listo. |
 | `S1_SKIPPED` | S1 | **sí** | Cross-batch dedup (062) — ya existía un `S5_DONE` para este `txn_num`. `reason_code = ALREADY_UPLOADED`. |
-| `S1_FILTERED` | S1 | **sí** | El documento no se migra: código de baja en RVABREP (051, `reason_code = DELETED_AT_SOURCE`) o código fuera de `filters.document_types` (148, `reason_code = EXCLUDED_BY_FILTER`). |
+| `S1_FILTERED` | S1 | **sí** | El documento no se migra: código de baja en RVABREP (051, `reason_code = DELETED_AT_SOURCE`) o código fuera de `filters.document_types` (148, `reason_code = EXCLUDED_BY_FILTER`). Balde EXCLUIDO. |
+| `S1_BLOCKED` | S1 | **sí** | **157** — la fila de origen viene incompleta (`reason_code = SOURCE_ROW_INCOMPLETE`, balde BLOQUEADO): falta shortname/sistema. Config, no baja. |
 | `S2_PENDING` | S2 | no | En mapping. |
 | `S2_DONE` | S2 | no | Folder + object type resueltos. |
-| `S2_FAILED` | S2 | sí (hasta retry) | `IDRViNotMappedError`. |
+| `S2_FAILED` | S2 | sí (hasta retry) | Falla de ejecución de S2 (balde FALLO). |
+| `S2_BLOCKED` | S2 | **sí** | **157** — falta config: `CODE_NOT_MAPPED` (`MapeoRVI_CM.csv`), `TYPE_NOT_IN_MANIFEST` (manifest de tipos), `IDENTITY_UNRESOLVED` (YAML de identidad). Balde BLOQUEADO. Se arregla y se re-corre; **no** se reintenta con `R`. |
+| `S2_EXCLUDED` | S2 | **sí** | **157** — `CLIENT_NOT_ACTIVE` (150): el cliente no tiene producto activo. Decisión de negocio, balde EXCLUIDO. No hay nada que arreglar. |
 | `S3_PENDING` | S3 | no | En metadata resolution. |
 | `S3_DONE` | S3 | no | Propiedades resueltas. |
-| `S3_FAILED` | S3 | sí (hasta retry) | `SourceFailedError` (toda la cadena falló y no hay `default_value`). |
+| `S3_FAILED` | S3 | sí (hasta retry) | Falla de ejecución de S3 (balde FALLO). |
+| `S3_BLOCKED` | S3 | **sí** | **157** — `METADATA_UNRESOLVED`: un `field_source` no dio y no hay default. Balde BLOQUEADO. |
 | `S4_PENDING` | S4 | no | En assembly. |
 | `S4_DONE` | S4 | no | PDF listo. |
 | `S4_FAILED` | S4 | sí (hasta retry) | `SourceFileMissingError` / `PDFAssemblyFailedError`. |
@@ -200,12 +212,36 @@ stateDiagram-v2
 | `S5_FAILED` | S5 | sí (hasta retry) | `RetriesExhaustedError` / `CMISServerError` no recuperable. |
 
 `*_FAILED` se resetea a `*_PENDING` con `cmcourier batch retry-failed --batch <id> [--stage Sn]`.
+Los `*_BLOCKED` y `*_EXCLUDED` **no** se reintentan con `retry-failed` (el
+`LIKE '%_FAILED'` los deja fuera solos): un bloqueo se arregla editando la
+config y re-corriendo la migración; una exclusión no se toca.
 
-**148: `status` no alcanza para saber qué pasó.** El `reason_code` es un eje
-ortogonal — `status=S2_FAILED` + `reason_code=CODE_NOT_MAPPED` cae en el balde
-`BLOQUEADO`, que NO es un error de ejecución aunque el status diga `FAILED`:
-lo arregla el operador editando `MapeoRVI_CM.csv`. Por eso 148 no agregó ni un
-solo estado nuevo. El desglose por balde lo rinde `cmcourier batch show`.
+### 157 — el sufijo del status dice el balde, y todo se cuenta por sufijo
+
+Hasta 156 el `status` decía sólo *dónde* paró el documento y el balde vivía
+únicamente en `reason_code` (148, eje ortogonal). El problema: una exclusión o
+un bloqueo que pasa en S2 se persistía como `S2_FAILED`, y **todo lo que cuenta
+lo hacía por el status** (`LIKE '%_FAILED'`) — un cliente inactivo aparecía como
+`fallidos`. 157 hace que el **sufijo del status coincida con el balde**, así la
+categoría sale del sufijo sin re-derivar el mapa razón→balde:
+
+| Categoría | Sufijos | Balde |
+|-----------|---------|-------|
+| subidos | `S5_DONE` | — |
+| fallidos | `*_FAILED` | FALLO |
+| bloqueados | `*_BLOCKED` | BLOQUEADO |
+| excluidos | `*_EXCLUDED`, `S1_FILTERED`, `S1_SKIPPED` | EXCLUIDO |
+| pendientes | `*_PENDING` | — |
+
+El helper de dominio `terminal_status_for(stage, bucket)` elige el estado:
+`FALLO → Sn_FAILED`, `BLOQUEADO → Sn_BLOCKED`, `EXCLUIDO → Sn_EXCLUDED`.
+`S1_FILTERED`/`S1_SKIPPED` se conservan (051/062) — ya eran no-`_FAILED`, ya
+contaban bien, y renombrarlos rompería bases existentes.
+
+**Migración de bases pre-157**: al abrir la base, las filas `Sn_FAILED` con un
+`reason_code` de balde EXCLUIDO/BLOQUEADO se reescriben al sufijo que les
+corresponde (idempotente; las de balde FALLO y las sin razón no se tocan). Los
+batches viejos del operador se leen bien sin re-correr nada.
 
 ## Ver también
 

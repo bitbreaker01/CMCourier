@@ -527,10 +527,22 @@ class MetricsRecorder:
         # Se guardan bajo ``_s5_failed_lock`` junto con ``_s5_failed``.
         self._failures_by_type: dict[str, int] = {}
         self._failures_by_status: dict[int, int] = {}
+        # 157: desenlaces terminales de PREP que NO son fallas — bloqueos
+        # (falta config) y exclusiones (decisión de negocio), por etapa. El
+        # recorder es la fuente per-chunk que el orchestrator lee para armar
+        # el ChunkState, igual que ``_s5_*``. Se cuentan acá y no en el
+        # ``failed`` de cada stage para que el monitor deje de mostrar un
+        # bloqueo o una exclusión como una falla.
+        self._prep_blocked: dict[str, int] = {}
+        self._prep_excluded: dict[str, int] = {}
+        self._prep_outcome_lock = threading.Lock()
 
     def start_batch(self, *, pipeline: str, batch_id: str) -> None:
         with self._buckets_lock:
             self._stage_buckets = {}
+        with self._prep_outcome_lock:
+            self._prep_blocked = {}
+            self._prep_excluded = {}
         if not self._enabled:
             return
         self._aggregator = SlowOpAggregator(
@@ -696,6 +708,26 @@ class MetricsRecorder:
         with self._buckets_lock:
             items = list(self._stage_buckets.items())
         return {stage: bucket.summary() for stage, bucket in items}
+
+    def record_prep_blocked(self, stage: str) -> None:
+        """157: un doc terminó en un ``Sn_BLOCKED`` (falta config) en *stage*."""
+        with self._prep_outcome_lock:
+            self._prep_blocked[stage] = self._prep_blocked.get(stage, 0) + 1
+
+    def record_prep_excluded(self, stage: str) -> None:
+        """157: un doc terminó en un ``Sn_EXCLUDED`` (decisión de negocio) en *stage*."""
+        with self._prep_outcome_lock:
+            self._prep_excluded[stage] = self._prep_excluded.get(stage, 0) + 1
+
+    def prep_blocked_by_stage(self) -> dict[str, int]:
+        """157: copia ``{stage: conteo}`` de los bloqueos de PREP de este recorder."""
+        with self._prep_outcome_lock:
+            return dict(self._prep_blocked)
+
+    def prep_excluded_by_stage(self) -> dict[str, int]:
+        """157: copia ``{stage: conteo}`` de las exclusiones de PREP de este recorder."""
+        with self._prep_outcome_lock:
+            return dict(self._prep_excluded)
 
     def record_upload_skipped(self) -> None:
         """041: contabiliza un outcome S5 de ``"skipped"`` (idempotencia / `claim-lost`)."""

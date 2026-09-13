@@ -28,6 +28,7 @@ from cmcourier.domain.models import (
     compute_cm_object_type,
     is_pdf_filename,
     parse_cymmdd,
+    terminal_status_for,
 )
 
 # ---------------------------------------------------------------------------
@@ -489,25 +490,83 @@ class TestReasonCode148:
         assert ReasonCode.bucket_of("") is None
 
 
+class TestTerminalStatusFor157:
+    """157 REQ-002: el estado terminal de un documento no-subido se elige por
+    el balde de su razón, no por dónde paró. El sufijo tiene que decir la
+    verdad: ``_FAILED`` es FALLO, ``_BLOCKED`` es BLOQUEADO, ``_EXCLUDED``
+    es EXCLUIDO."""
+
+    def test_fallo_maps_to_failed(self) -> None:
+        for stage in range(1, 6):
+            assert terminal_status_for(stage, ReasonBucket.FALLO) == StageStatus[f"S{stage}_FAILED"]
+
+    def test_bloqueado_maps_to_blocked(self) -> None:
+        assert terminal_status_for(1, ReasonBucket.BLOQUEADO) == StageStatus.S1_BLOCKED
+        assert terminal_status_for(2, ReasonBucket.BLOQUEADO) == StageStatus.S2_BLOCKED
+        assert terminal_status_for(3, ReasonBucket.BLOQUEADO) == StageStatus.S3_BLOCKED
+
+    def test_excluido_maps_to_excluded(self) -> None:
+        assert terminal_status_for(2, ReasonBucket.EXCLUIDO) == StageStatus.S2_EXCLUDED
+
+    def test_suffix_matches_bucket_for_the_concrete_157_mappings(self) -> None:
+        # El corazón de 157: cada razón mal-vestida hoy como _FAILED pasa a
+        # llevar el sufijo de su balde.
+        cases = {
+            ReasonCode.CLIENT_NOT_ACTIVE: (2, StageStatus.S2_EXCLUDED),
+            ReasonCode.CODE_NOT_MAPPED: (2, StageStatus.S2_BLOCKED),
+            ReasonCode.TYPE_NOT_IN_MANIFEST: (2, StageStatus.S2_BLOCKED),
+            ReasonCode.IDENTITY_UNRESOLVED: (2, StageStatus.S2_BLOCKED),
+            ReasonCode.METADATA_UNRESOLVED: (3, StageStatus.S3_BLOCKED),
+            ReasonCode.SOURCE_ROW_INCOMPLETE: (1, StageStatus.S1_BLOCKED),
+        }
+        for code, (stage, expected) in cases.items():
+            assert terminal_status_for(stage, code.bucket) == expected
+
+    def test_invalid_stage_raises(self) -> None:
+        with pytest.raises(ValueError):
+            terminal_status_for(0, ReasonBucket.FALLO)
+        with pytest.raises(ValueError):
+            terminal_status_for(6, ReasonBucket.BLOQUEADO)
+
+    def test_unmapped_combo_raises(self) -> None:
+        # No existe ``S4_BLOCKED``/``S5_EXCLUDED`` — pedir un combo sin
+        # miembro tiene que fallar ruidoso, no inventar un string.
+        with pytest.raises((KeyError, ValueError)):
+            terminal_status_for(4, ReasonBucket.BLOQUEADO)
+        with pytest.raises((KeyError, ValueError)):
+            terminal_status_for(5, ReasonBucket.EXCLUIDO)
+
+
 class TestReasonCodeIsOrthogonal148:
     def test_no_reason_code_leaked_into_stage_status(self) -> None:
         """REQ-003: the taxonomy adds ZERO members to ``StageStatus``."""
         status_names = {s.name for s in StageStatus}
         assert status_names.isdisjoint({c.name for c in ReasonCode})
 
-    def test_stage_status_membership_is_unchanged(self) -> None:
+    def test_stage_status_membership_157(self) -> None:
+        """157 REQ-001: el candado de 148 ("cero estados nuevos") queda
+        OBSOLETO a propósito. 157 lo revierte: un documento no-subido tiene
+        que llevar en el sufijo el balde al que pertenece. Se agregan
+        ``S1_BLOCKED``, ``S2_BLOCKED``, ``S2_EXCLUDED`` y ``S3_BLOCKED``;
+        ``S1_FILTERED``/``S1_SKIPPED`` se conservan (051/062). Este test
+        vuelve a atar el conjunto EXACTO — cualquier miembro de más o de
+        menos rompe la suite."""
         assert {s.value for s in StageStatus} == {
             "S1_PENDING",
             "S1_DONE",
             "S1_FAILED",
             "S1_FILTERED",
             "S1_SKIPPED",
+            "S1_BLOCKED",
             "S2_PENDING",
             "S2_DONE",
             "S2_FAILED",
+            "S2_BLOCKED",
+            "S2_EXCLUDED",
             "S3_PENDING",
             "S3_DONE",
             "S3_FAILED",
+            "S3_BLOCKED",
             "S4_PENDING",
             "S4_DONE",
             "S4_FAILED",

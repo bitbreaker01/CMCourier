@@ -39,6 +39,7 @@ __all__ = [
     "compute_cm_object_type",
     "is_pdf_filename",
     "parse_cymmdd",
+    "terminal_status_for",
     "trigger_system_id",
 ]
 
@@ -118,14 +119,28 @@ class StageStatus(StrEnum):
     # cayeron en cada `bucket` y por qué.
     S1_FILTERED = "S1_FILTERED"  # con código de borrado en la fuente (spec 051)
     S1_SKIPPED = "S1_SKIPPED"  # ya S5_DONE en un `batch` previo
+    # 157 REQ-001: falta config en la fila de origen (SOURCE_ROW_INCOMPLETE,
+    # balde BLOQUEADO). Antes se vestía de ``S1_FILTERED`` y contaba como
+    # exclusión; es config que el operador arregla, no una baja.
+    S1_BLOCKED = "S1_BLOCKED"
 
     S2_PENDING = "S2_PENDING"
     S2_DONE = "S2_DONE"
     S2_FAILED = "S2_FAILED"
+    # 157 REQ-001: los dos sufijos terminales que faltaban para que el
+    # status de un doc no-subido diga a qué balde pertenece. ``S2_BLOCKED``
+    # = falta config (CODE_NOT_MAPPED, TYPE_NOT_IN_MANIFEST,
+    # IDENTITY_UNRESOLVED); ``S2_EXCLUDED`` = decisión de negocio
+    # (CLIENT_NOT_ACTIVE). Antes ambos colapsaban en ``S2_FAILED`` y todo
+    # conteo por ``LIKE '%_FAILED'`` los trataba como fallas.
+    S2_BLOCKED = "S2_BLOCKED"
+    S2_EXCLUDED = "S2_EXCLUDED"
 
     S3_PENDING = "S3_PENDING"
     S3_DONE = "S3_DONE"
     S3_FAILED = "S3_FAILED"
+    # 157 REQ-001: falta config de metadata (METADATA_UNRESOLVED).
+    S3_BLOCKED = "S3_BLOCKED"
 
     S4_PENDING = "S4_PENDING"
     S4_DONE = "S4_DONE"
@@ -273,6 +288,36 @@ REASON_BUCKETS: Mapping[ReasonCode, ReasonBucket] = MappingProxyType(
         ReasonCode.EXTERNAL_FAILURE: ReasonBucket.FALLO,
     }
 )
+
+
+# 157 REQ-002: sufijo terminal por balde. El estado de un documento que no
+# se subió se elige por QUIÉN lo arregla, no por dónde paró.
+_BUCKET_SUFFIX: Mapping[ReasonBucket, str] = MappingProxyType(
+    {
+        ReasonBucket.FALLO: "FAILED",
+        ReasonBucket.BLOQUEADO: "BLOCKED",
+        ReasonBucket.EXCLUIDO: "EXCLUDED",
+    }
+)
+
+
+def terminal_status_for(stage: int, bucket: ReasonBucket) -> StageStatus:
+    """157 REQ-002: el :class:`StageStatus` terminal de un documento no-subido.
+
+    El sufijo tiene que coincidir con el balde: ``FALLO → Sn_FAILED``,
+    ``BLOQUEADO → Sn_BLOCKED``, ``EXCLUIDO → Sn_EXCLUDED``. Así la categoría
+    de un documento sale del sufijo del status —sin que ningún conteo tenga
+    que reimportar el mapa razón→balde— y un ``LIKE '%_FAILED'`` deja de
+    llevarse puesta una exclusión o un bloqueo.
+
+    Lanza ``ValueError`` para un ``stage`` fuera de ``[1, 5]`` y ``KeyError``
+    para un combo sin miembro (no existe ``S4_BLOCKED`` ni ``S5_EXCLUDED``):
+    pedir un estado inexistente tiene que fallar ruidoso, no inventar un
+    literal que la base no sabe leer.
+    """
+    if not 1 <= stage <= 5:
+        raise ValueError(f"stage must be in [1, 5], got {stage!r}")
+    return StageStatus[f"S{stage}_{_BUCKET_SUFFIX[bucket]}"]
 
 
 # ---------------------------------------------------------------------------
@@ -800,6 +845,11 @@ class BatchDetails:
     stage_counts: Mapping[str, Mapping[str, int]]
     failed_records: tuple[FailedRecord, ...]
     reason_counts: tuple[ReasonCount, ...] = ()
+    # 157 REQ-003: los ``*_BLOCKED`` van en su propio bloque — son config
+    # que el operador arregla (editando YAML/CSV/manifest y re-corriendo),
+    # no fallas de ejecución que se reintentan con ``R``. Vacío cuando no
+    # hay ninguno.
+    blocked_records: tuple[FailedRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

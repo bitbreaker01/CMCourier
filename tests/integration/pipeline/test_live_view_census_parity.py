@@ -8,13 +8,15 @@ Sin este test la próxima etapa que se agregue al `pipeline` vuelve a
 quedar afuera de ``TUISnapshot.failed_total`` y nadie se entera hasta que
 un operador mira ``0 fallidos`` en verde con diez documentos muertos.
 
-La corrida rompe las CINCO etapas a la vez:
+La corrida rompe las CINCO etapas a la vez. 157: el sufijo del status sigue
+al balde, así que la vista en vivo separa las cuatro categorías y el candado
+las compara TODAS contra el censo:
 
-* ``NO_SUCH_CLIENT`` — sin filas en RVABREP → ``S1_FAILED``
-* ``TESTUNMAPPED``   — IDRVI sin mapeo      → ``S2_FAILED``
-* ``TESTMETAFAIL``   — CIF fuera de clients → ``S3_FAILED``
-* ``TESTMISSFILES``  — página inexistente   → ``S4_FAILED``
-* ``TESTCLIENT01``   — CMIS responde 400    → ``S5_FAILED``
+* ``NO_SUCH_CLIENT`` — sin filas en RVABREP → ``S1_FAILED``  (fallido)
+* ``TESTUNMAPPED``   — IDRVI sin mapeo      → ``S2_BLOCKED`` (bloqueado)
+* ``TESTMETAFAIL``   — CIF fuera de clients → ``S3_BLOCKED`` (bloqueado)
+* ``TESTMISSFILES``  — página inexistente   → ``S4_FAILED``  (fallido)
+* ``TESTCLIENT01``   — CMIS responde 400    → ``S5_FAILED``  (fallido)
 """
 
 from __future__ import annotations
@@ -119,6 +121,19 @@ def _census_failures(details: BatchDetails) -> int:
     return sum(states.get("FAILED", 0) for states in details.stage_counts.values())
 
 
+def _census_blocked(details: BatchDetails) -> int:
+    """157: los ``*_BLOCKED`` del censo."""
+    return sum(states.get("BLOCKED", 0) for states in details.stage_counts.values())
+
+
+def _census_excluded(details: BatchDetails) -> int:
+    """157: los ``*_EXCLUDED`` + ``S1_FILTERED`` + ``S1_SKIPPED`` del censo."""
+    return sum(
+        states.get("EXCLUDED", 0) + states.get("FILTERED", 0) + states.get("SKIPPED", 0)
+        for states in details.stage_counts.values()
+    )
+
+
 class TestLaVistaEnVivoCoincideConElCenso:
     """155 REQ-001 — la invariante, atada con un test."""
 
@@ -144,10 +159,14 @@ class TestLaVistaEnVivoCoincideConElCenso:
         details = pipeline_harness.tracking_store.get_batch_details(batch_id)
         assert details is not None
 
-        # El escenario efectivamente rompió las cinco etapas.
-        assert snap.failures_by_stage == {"S1": 1, "S2": 1, "S3": 1, "S4": 1, "S5": 1}
-        # …y la invariante: la vista en vivo cuenta lo mismo que la base.
-        assert snap.failed_total == _census_failures(details) == 5
+        # 157: el escenario tocó las cinco etapas, pero S2 y S3 son BLOQUEOS
+        # (falta config), no fallas — así que ya no cuentan en failures_by_stage.
+        assert snap.failures_by_stage == {"S1": 1, "S2": 0, "S3": 0, "S4": 1, "S5": 1}
+        # …y la invariante extendida a 157: la vista en vivo cuenta lo mismo
+        # que la base, en las CUATRO categorías.
+        assert snap.failed_total == _census_failures(details) == 3
+        assert snap.blocked_total == _census_blocked(details) == 2
+        assert snap.excluded_total == _census_excluded(details) == 0
         # El desglose de 104 sigue siendo de upload y sólo de upload.
         assert snap.upload_failed_total == 1
         assert sum(snap.failures_by_type.values()) == 1
@@ -179,3 +198,5 @@ class TestLaVistaEnVivoCoincideConElCenso:
         details = pipeline_harness.tracking_store.get_batch_details(batch_id)
         assert details is not None
         assert snap.failed_total == _census_failures(details) == 0
+        assert snap.blocked_total == _census_blocked(details) == 0
+        assert snap.excluded_total == _census_excluded(details) == 0

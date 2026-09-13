@@ -26,6 +26,47 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Fixed
 
+- **`fallidos 38527` sobre clientes inactivos que nadie falló (157).** El
+  operador corrió un batch con la lista de elegibilidad activa y vio
+  **`fallidos 38527`** en `[7] BATCHES`. Los 38527 eran
+  `CLIENT_NOT_ACTIVE` —clientes sin producto activo, una decisión de
+  negocio (150)—: no fallaron, se excluyeron a propósito. La causa era la
+  costura de la 148: cada documento tiene tres ejes ortogonales —`status`
+  (dónde paró), `reason_code` (por qué) y `bucket` (quién lo arregla)— y
+  la 148 había decidido "cero estados nuevos", así que una exclusión que
+  pasa en S2 se persistía como `S2_FAILED`. **Todo lo que contaba lo hacía
+  por el status** (`LIKE '%_FAILED'`), no por el balde, y se llevaba
+  puesto al cliente inactivo.
+
+  157 cierra el agujero: **el sufijo del status tiene que coincidir con el
+  balde.** `StageStatus` gana `S1_BLOCKED`, `S2_BLOCKED`, `S3_BLOCKED`
+  (balde BLOQUEADO — falta config) y `S2_EXCLUDED` (balde EXCLUIDO —
+  decisión de negocio). `S1_FILTERED`/`S1_SKIPPED` se conservan (051/062)
+  y cuentan como excluidos. Un helper de dominio `terminal_status_for(stage,
+  bucket)` elige el estado, y el orchestrator lo usa: `CLIENT_NOT_ACTIVE`
+  → `S2_EXCLUDED`; `CODE_NOT_MAPPED`/`TYPE_NOT_IN_MANIFEST`/
+  `IDENTITY_UNRESOLVED` → `S2_BLOCKED`; `METADATA_UNRESOLVED` →
+  `S3_BLOCKED`; `SOURCE_ROW_INCOMPLETE` → `S1_BLOCKED`. Las razones FALLO
+  siguen en `Sn_FAILED`.
+
+  Con eso, **todo se cuenta por categoría de sufijo**: subidos `S5_DONE`,
+  fallidos `*_FAILED`, bloqueados `*_BLOCKED`, excluidos `*_EXCLUDED` +
+  `S1_FILTERED` + `S1_SKIPPED`, pendientes `*_PENDING`. La lista de batches
+  gana una columna `bloqueados` y muestra **subidos / fallidos /
+  bloqueados / excluidos**; `batch show` lista los `*_BLOCKED` en su propio
+  bloque. `retry-failed` reintenta SÓLO los `*_FAILED` — un bloqueo se
+  arregla editando el YAML/CSV/manifest y re-corriendo la migración, no con
+  `R`; y `reanudable` es tener `*_FAILED` o `*_PENDING`, no un bloqueo ni
+  una exclusión. El monitor en vivo y su `OUTCOMES` separan las cuatro
+  categorías, y una corrida cuyo único "problema" fueron exclusiones o
+  bloqueos ya no se anuncia en rojo. El candado de paridad de 155 se
+  extendió a las cuatro categorías (la vista en vivo cuenta lo mismo que
+  el censo). Las bases pre-157 se migran en el lugar al abrirlas: una fila
+  `Sn_FAILED` con un `reason_code` de balde EXCLUIDO/BLOQUEADO se reescribe
+  al sufijo que le corresponde (idempotente; las FALLO y las sin razón no
+  se tocan). Ver
+  [`docs/reference/tracking-db-schema.md`](docs/reference/tracking-db-schema.md).
+
 - **`0 fallidos` en verde con diez documentos muertos en S2 (155).** Una
   corrida terminó así: `subidos 0 · fallidos 0 · salteados 22618`, en
   verde, con `corrida completed`. Diez documentos habían fallado en S2

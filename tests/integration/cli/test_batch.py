@@ -598,10 +598,16 @@ class TestElegibilidadEnBatchShow150:
         assert "Lista de activos" not in result.stdout
 
 
-class TestRetryFailedNoTocaElBaldeExcluido150:
-    """El operador corre `retry-failed` y los inactivos NO vuelven al ruedo."""
+class TestRetryFailedSoloTocaFallos157:
+    """157: ``retry-failed`` reintenta SÓLO los ``*_FAILED`` (balde FALLO).
 
-    def test_reintenta_bloqueado_y_fallo_pero_no_excluido(self, tmp_path: Path) -> None:
+    Un bloqueo (``*_BLOCKED``, falta config) se arregla editando el
+    YAML/CSV/manifest y re-corriendo, no reintentando — así que ``R`` lo
+    deja donde está, igual que a una exclusión. Antes de 157 un
+    ``CODE_NOT_MAPPED`` vivía en ``S2_FAILED`` y ``R`` se lo llevaba; ahora
+    tiene su propio estado y queda afuera solo."""
+
+    def test_reintenta_solo_el_fallo_no_el_bloqueado_ni_el_excluido(self, tmp_path: Path) -> None:
         yaml_path = _write_yaml(tmp_path)
         batch_id = _seed_eligibility_batch(tmp_path / "tracking.db")
         _seed_extra_failures(tmp_path / "tracking.db", batch_id)
@@ -610,12 +616,15 @@ class TestRetryFailedNoTocaElBaldeExcluido150:
             main, ["batch", "retry-failed", "-c", str(yaml_path), "--batch", batch_id]
         )
         assert result.exit_code == 0, result.output
-        # Los dos inactivos quedan afuera; se reintentan sólo los otros dos.
-        assert "Reset 2 FAILED" in result.stdout
+        # Sólo el FALLO real (CM_TIMEOUT) vuelve al ruedo; los inactivos
+        # (EXCLUIDO) y el no-mapeado (BLOQUEADO) quedan afuera.
+        assert "Reset 1 FAILED" in result.stdout
 
         show = CliRunner().invoke(main, ["batch", "show", "-c", str(yaml_path), batch_id])
+        # El excluido y el bloqueado siguen en el censo (no se reintentaron);
+        # el FALLO reintentado perdió su razón y ya no aparece.
         assert "CLIENT_NOT_ACTIVE" in show.stdout
-        assert "CODE_NOT_MAPPED" not in show.stdout
+        assert "CODE_NOT_MAPPED" in show.stdout
         assert "CM_TIMEOUT" not in show.stdout
 
 

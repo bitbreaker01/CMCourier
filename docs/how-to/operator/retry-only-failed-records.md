@@ -50,16 +50,25 @@ SQL
 
 ### 2. Resetear los FAILED a PENDING
 
-El comando es `batch retry-failed`. Por default resetea **todos** los `*_FAILED` del batch a `*_PENDING`:
+El comando es `batch retry-failed`. Resetea **sólo** los `*_FAILED` del batch
+(balde `FALLO`) a `*_PENDING`:
 
-> **Salvo el balde `EXCLUIDO` (150).** Una fila cuyo `reason_code` sea una
-> exclusión —`CLIENT_NOT_ACTIVE`, por ejemplo, que es `S2_FAILED`— **nunca**
-> se reintenta, sin importar su `status`. Reintentar una decisión de negocio
-> no la cambia de opinión, y con la lista de clientes activos del banco serían
-> cientos de miles de documentos re-procesados para volver a excluirlos igual.
-> Por eso el `Reset N` que ves abajo puede ser menor que el total de
-> `*_FAILED` que contaste en el paso 1: la diferencia es el balde `EXCLUIDO`,
-> y está bien así. Ver
+> **157 — `retry-failed` toca sólo el balde `FALLO`.** Desde 157 el sufijo del
+> status coincide con el balde, así que el `LIKE '%_FAILED'` del comando deja
+> afuera solo a los otros dos baldes:
+>
+> - **`EXCLUIDO`** (`*_EXCLUDED`, `S1_FILTERED`, `S1_SKIPPED`) — decisión de
+>   negocio/origen. `CLIENT_NOT_ACTIVE` ahora es `S2_EXCLUDED`, no `S2_FAILED`.
+>   Reintentar una decisión de negocio no la cambia de opinión, y con la lista
+>   de clientes activos del banco serían cientos de miles de documentos
+>   re-procesados para volver a excluirlos igual.
+> - **`BLOQUEADO`** (`*_BLOCKED`) — falta configuración. **No se arregla con
+>   `retry-failed`**: editás el `MapeoRVI_CM.csv` / el manifest / el YAML de
+>   identidad y **re-corrés la migración** (paso 3). Un `R` sobre un bloqueo
+>   sin tocar la config vuelve a bloquear exactamente igual.
+>
+> Por eso el `Reset N` que ves abajo cuenta sólo los `*_FAILED`; los bloqueados
+> y excluidos que contaste en el paso 1 quedan afuera, y está bien así. Ver
 > [`read-the-batch-census.md`](read-the-batch-census.md).
 
 ```bash

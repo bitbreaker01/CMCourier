@@ -754,6 +754,212 @@ class TestRetryFailed:
 
 
 # ---------------------------------------------------------------------------
+# 157 — el sufijo del status dice el balde; los conteos salen del sufijo
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalStatusBucketAware157:
+    """157 REQ-002/003: ``_BLOCKED`` y ``_EXCLUDED`` son estados terminales
+    propios, no ``_FAILED`` disfrazados."""
+
+    def test_mark_stage_terminal_accepts_blocked_and_excluded(
+        self, store: SQLiteTrackingStore, tmp_path: Path
+    ) -> None:
+        batch_id = store.start_batch(total_records=3)
+        for txn, status, reason in (
+            ("TXN_EXC", StageStatus.S2_EXCLUDED, ReasonCode.CLIENT_NOT_ACTIVE),
+            ("TXN_BLK2", StageStatus.S2_BLOCKED, ReasonCode.CODE_NOT_MAPPED),
+            ("TXN_BLK3", StageStatus.S3_BLOCKED, ReasonCode.METADATA_UNRESOLVED),
+        ):
+            store.mark_stage_pending(_make_record(batch_id, txn), StageStatus.S1_PENDING)
+            store.mark_stage_terminal(
+                txn, batch_id, status, reason.value.lower(), reason_code=reason
+            )
+        store.flush()
+        conn = sqlite3.connect(tmp_path / "tracking.db")
+        rows = dict(
+            conn.execute(
+                "SELECT rvabrep_txn_num, status || ':' || retry_count "
+                "FROM migration_log WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchall()
+        )
+        conn.close()
+        store.close()
+        # El estado es el del balde y retry_count NO se toca (no es una falla).
+        assert rows["TXN_EXC"] == "S2_EXCLUDED:0"
+        assert rows["TXN_BLK2"] == "S2_BLOCKED:0"
+        assert rows["TXN_BLK3"] == "S3_BLOCKED:0"
+
+    def test_get_batch_details_splits_failed_from_blocked(self, store: SQLiteTrackingStore) -> None:
+        batch_id = store.start_batch(total_records=3)
+        store.mark_stage_pending(_make_record(batch_id, "TXN_F"), StageStatus.S5_PENDING)
+        store.mark_stage_failed("TXN_F", batch_id, StageStatus.S5_FAILED, "cmis 500")
+        store.mark_stage_pending(_make_record(batch_id, "TXN_B"), StageStatus.S2_PENDING)
+        store.mark_stage_terminal(
+            "TXN_B",
+            batch_id,
+            StageStatus.S2_BLOCKED,
+            "code_not_mapped",
+            reason_code=ReasonCode.CODE_NOT_MAPPED,
+        )
+        store.mark_stage_pending(_make_record(batch_id, "TXN_E"), StageStatus.S2_PENDING)
+        store.mark_stage_terminal(
+            "TXN_E",
+            batch_id,
+            StageStatus.S2_EXCLUDED,
+            "client_not_active",
+            reason_code=ReasonCode.CLIENT_NOT_ACTIVE,
+        )
+        store.flush()
+        details = store.get_batch_details(batch_id)
+        store.close()
+        assert details is not None
+        # La lista de "fallidos" es SÓLO *_FAILED — el bloqueo y la exclusión
+        # no la ensucian.
+        assert {r.txn_num for r in details.failed_records} == {"TXN_F"}
+        assert all(r.status.endswith("_FAILED") for r in details.failed_records)
+        # Un bloque separado lista los *_BLOCKED (no los *_EXCLUDED).
+        assert {r.txn_num for r in details.blocked_records} == {"TXN_B"}
+        assert details.stage_counts["S2"]["BLOCKED"] == 1
+        assert details.stage_counts["S2"]["EXCLUDED"] == 1
+        assert details.stage_counts["S5"]["FAILED"] == 1
+
+    def test_blocked_and_excluded_count_as_past_s1_done(self, store: SQLiteTrackingStore) -> None:
+        """157: un doc que paró en S2/S3 por bloqueo/exclusión igual PASÓ S1
+        (y S2, para S3_BLOCKED). Sin esto, un resume lo re-admitiría y volvería
+        a sumar el denominador del censo."""
+        batch_id = store.start_batch(total_records=3)
+        for txn, status in (
+            ("TXN_EXC", StageStatus.S2_EXCLUDED),
+            ("TXN_BLK2", StageStatus.S2_BLOCKED),
+            ("TXN_BLK3", StageStatus.S3_BLOCKED),
+        ):
+            store.mark_stage_pending(_make_record(batch_id, txn), StageStatus.S1_PENDING)
+            store.mark_stage_terminal(txn, batch_id, status, "x")
+        store.flush()
+        for txn in ("TXN_EXC", "TXN_BLK2", "TXN_BLK3"):
+            assert store.is_stage_done(txn, batch_id, StageStatus.S1_DONE) is True
+        # …y el S3_BLOCKED también pasó S2.
+        assert store.is_stage_done("TXN_BLK3", batch_id, StageStatus.S2_DONE) is True
+        # pero un bloqueo/exclusión de S2 NO completó S2.
+        assert store.is_stage_done("TXN_BLK2", batch_id, StageStatus.S2_DONE) is False
+        store.close()
+
+    def test_retry_failed_leaves_blocked_and_excluded_alone(
+        self, store: SQLiteTrackingStore
+    ) -> None:
+        batch_id = store.start_batch(total_records=3)
+        store.mark_stage_pending(_make_record(batch_id, "TXN_F"), StageStatus.S5_PENDING)
+        store.mark_stage_failed("TXN_F", batch_id, StageStatus.S5_FAILED, "cmis 500")
+        store.mark_stage_pending(_make_record(batch_id, "TXN_B"), StageStatus.S2_PENDING)
+        store.mark_stage_terminal(
+            "TXN_B",
+            batch_id,
+            StageStatus.S2_BLOCKED,
+            "code_not_mapped",
+            reason_code=ReasonCode.CODE_NOT_MAPPED,
+        )
+        store.mark_stage_pending(_make_record(batch_id, "TXN_E"), StageStatus.S2_PENDING)
+        store.mark_stage_terminal(
+            "TXN_E",
+            batch_id,
+            StageStatus.S2_EXCLUDED,
+            "client_not_active",
+            reason_code=ReasonCode.CLIENT_NOT_ACTIVE,
+        )
+        store.flush()
+        reset = store.retry_failed(batch_id)
+        details = store.get_batch_details(batch_id)
+        store.close()
+        # Sólo la falla real se reintenta; el bloqueo y la exclusión quedan.
+        assert reset == 1
+        assert details is not None
+        assert details.stage_counts["S5"]["PENDING"] == 1
+        assert details.stage_counts["S2"]["BLOCKED"] == 1
+        assert details.stage_counts["S2"]["EXCLUDED"] == 1
+
+
+class TestPre157Migration:
+    """157 REQ-006: las bases que el operador ya tiene traen filas
+    ``S2_FAILED`` con razones de balde EXCLUIDO/BLOQUEADO. Al abrir la base,
+    una migración idempotente las reescribe al sufijo que les corresponde."""
+
+    def _seed_pre157_db(self, db_path: Path) -> str:
+        """Escribe a mano una base como la de antes de 157 y devuelve el batch."""
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE migration_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trigger_shortname TEXT NOT NULL, trigger_cif TEXT NOT NULL,
+                trigger_system_id TEXT NOT NULL, rvabrep_txn_num TEXT NOT NULL,
+                rvabrep_file_name TEXT NOT NULL, batch_id TEXT NOT NULL,
+                status TEXT NOT NULL, created_at TEXT NOT NULL,
+                cm_object_id TEXT, cm_folder TEXT, cm_object_type TEXT,
+                error_message TEXT, source_file_path TEXT, page_count INTEGER,
+                file_size_bytes INTEGER, started_at TEXT, completed_at TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                reason_code TEXT, id_rvi TEXT
+            );
+            CREATE TABLE migration_batch (
+                batch_id TEXT PRIMARY KEY, total_records INTEGER NOT NULL,
+                started_at TEXT NOT NULL, completed_at TEXT
+            );
+            """
+        )
+        rows = [
+            ("EXC", "S2_FAILED", "CLIENT_NOT_ACTIVE"),  # → S2_EXCLUDED
+            ("BLK", "S2_FAILED", "CODE_NOT_MAPPED"),  # → S2_BLOCKED
+            ("META", "S3_FAILED", "METADATA_UNRESOLVED"),  # → S3_BLOCKED
+            ("FALLO", "S5_FAILED", "CM_REJECTED_4XX"),  # se queda: es FALLO
+            ("NORE", "S2_FAILED", None),  # sin razón: no se toca
+        ]
+        for txn, status, reason in rows:
+            conn.execute(
+                "INSERT INTO migration_log (trigger_shortname, trigger_cif, "
+                "trigger_system_id, rvabrep_txn_num, rvabrep_file_name, batch_id, "
+                "status, created_at, reason_code) VALUES "
+                "('T','0','1',?,'F.001','B1',?,'2026-01-01T00:00:00',?)",
+                (txn, status, reason),
+            )
+        conn.execute("INSERT INTO migration_batch VALUES ('B1', 5, '2026-01-01T00:00:00', NULL)")
+        conn.commit()
+        conn.close()
+        return "B1"
+
+    def test_open_rewrites_misfiled_failed_rows(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "pre157.db"
+        batch_id = self._seed_pre157_db(db_path)
+        store = SQLiteTrackingStore(db_path)  # la apertura corre la migración
+        details = store.get_batch_details(batch_id)
+        store.close()
+        assert details is not None
+        by_status = {
+            r.txn_num: r.status for r in (*details.failed_records, *details.blocked_records)
+        }
+        # Se reescribieron al sufijo de su balde…
+        assert details.stage_counts["S2"]["EXCLUDED"] == 1
+        assert details.stage_counts["S2"]["BLOCKED"] == 1
+        assert details.stage_counts["S3"]["BLOCKED"] == 1
+        # …y las razones FALLO / sin-razón siguen como _FAILED.
+        assert by_status["FALLO"] == "S5_FAILED"
+        assert by_status["NORE"] == "S2_FAILED"
+
+    def test_migration_is_idempotent(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "pre157.db"
+        batch_id = self._seed_pre157_db(db_path)
+        SQLiteTrackingStore(db_path).close()  # primera pasada
+        store = SQLiteTrackingStore(db_path)  # segunda pasada: no cambia nada
+        details = store.get_batch_details(batch_id)
+        store.close()
+        assert details is not None
+        assert details.stage_counts["S2"]["EXCLUDED"] == 1
+        assert details.stage_counts["S2"]["BLOCKED"] == 1
+        assert details.stage_counts["S3"]["BLOCKED"] == 1
+
+
+# ---------------------------------------------------------------------------
 # 099 — uploaded_records (entrada de la recuperación AS400)
 # ---------------------------------------------------------------------------
 

@@ -69,14 +69,19 @@ class MonitorPane(Vertical):
         s5 = snap.stages.get("S5", {}) if snap.stages else {}
         done = int(s5.get("count", 0))
         failed = snap.failed_total
-        skipped = snap.s1_filtered
+        # 157: las cuatro categorías van separadas — un bloqueo (falta config)
+        # y una exclusión (decisión de negocio) NO son fallas y ya no se
+        # muestran en rojo. ``excluidos`` incluye S1_FILTERED/S1_SKIPPED.
+        blocked = snap.blocked_total
+        excluded = snap.excluded_total
         state = self._state_word(mgr, snap)
         header = (
             f"[b]batch[/b] {snap.batch_id or '—'}  [b]{state}[/b]  "
             f"[b]elapsed[/b] {int(snap.elapsed_s)}s\n"
             f"[green]subidos {done}[/green]  "
             + (f"[red]fallidos {failed}[/red]  " if failed else f"fallidos {failed}  ")
-            + f"salteados {skipped}  {snap.throughput_docs_per_s:.1f} docs/s"
+            + f"bloqueados {blocked}  excluidos {excluded}  "
+            + f"{snap.throughput_docs_per_s:.1f} docs/s"
             + self._window_fragment(snap)
             + self._workers_fragment(mgr, snap)
         )

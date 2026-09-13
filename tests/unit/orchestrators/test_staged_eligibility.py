@@ -269,7 +269,8 @@ class TestClienteInactivo150:
         assert counted is False
         call = _terminal_calls(pipeline)[0]
         assert call.args[0] == "TXN_ID"
-        assert call.args[2] is StageStatus.S2_FAILED
+        # 157 REQ-002: cliente inactivo (balde EXCLUIDO) → S2_EXCLUDED, no S2_FAILED.
+        assert call.args[2] is StageStatus.S2_EXCLUDED
         assert call.kwargs["reason_code"] is ReasonCode.CLIENT_NOT_ACTIVE
 
     def test_la_razon_vive_en_el_balde_excluido(self) -> None:
@@ -315,9 +316,12 @@ class TestOrdenDentroDeS2150:
         item = _StageItem(trigger=_trigger(ABABCD=""), document=_document())
         survivor, counted = _run_s2(pipeline, item)
         assert survivor is None
-        assert counted is True
-        failed = pipeline._tracking_store.mark_stage_failed  # type: ignore[attr-defined]
-        assert failed.call_args.kwargs["reason_code"] is ReasonCode.IDENTITY_UNRESOLVED
+        # 157 REQ-002: identidad sin resolver (balde BLOQUEADO) → S2_BLOCKED,
+        # que NO cuenta como falla y se escribe con mark_stage_terminal.
+        assert counted is False
+        call = _terminal_calls(pipeline)[-1]
+        assert call.args[2] is StageStatus.S2_BLOCKED
+        assert call.kwargs["reason_code"] is ReasonCode.IDENTITY_UNRESOLVED
         assert activos.reads == 0
 
     def test_la_elegibilidad_corre_antes_de_get_mapping(

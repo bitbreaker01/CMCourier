@@ -15,14 +15,19 @@ stateDiagram-v2
     S0_DONE --> S1_PENDING: hand off
     S1_PENDING --> S1_DONE: RVABREP resolved
     S1_PENDING --> S1_SKIPPED: is_uploaded(txn_num) == true (062)
+    S1_PENDING --> S1_FILTERED: excluido en origen (051/148)
+    S1_PENDING --> S1_BLOCKED: SOURCE_ROW_INCOMPLETE (157)
 
     S1_DONE --> S2_PENDING: hand off
     S2_PENDING --> S2_DONE: mapping resolved
-    S2_PENDING --> S2_FAILED: IDRViNotMappedError o equivalente
+    S2_PENDING --> S2_FAILED: falla de ejecución (FALLO)
+    S2_PENDING --> S2_BLOCKED: falta config — CODE_NOT_MAPPED / TYPE_NOT_IN_MANIFEST / IDENTITY_UNRESOLVED (157)
+    S2_PENDING --> S2_EXCLUDED: CLIENT_NOT_ACTIVE (157)
 
     S2_DONE --> S3_PENDING: hand off
     S3_PENDING --> S3_DONE: metadata resuelta
-    S3_PENDING --> S3_FAILED: SourceFailedError
+    S3_PENDING --> S3_FAILED: falla de ejecución (FALLO)
+    S3_PENDING --> S3_BLOCKED: METADATA_UNRESOLVED (157)
 
     S3_DONE --> S4_PENDING: hand off
     S4_PENDING --> S4_DONE: PDF ensamblado
@@ -34,8 +39,13 @@ stateDiagram-v2
 
     S5_DONE --> [*]
     S1_SKIPPED --> [*]
+    S1_FILTERED --> [*]
+    S1_BLOCKED --> [*]
     S2_FAILED --> [*]
+    S2_BLOCKED --> [*]
+    S2_EXCLUDED --> [*]
     S3_FAILED --> [*]
+    S3_BLOCKED --> [*]
     S4_FAILED --> [*]
     S5_FAILED --> [*]
 ```
@@ -43,10 +53,11 @@ stateDiagram-v2
 ## Reglas
 
 - Transiciones son **estrictamente hacia adelante**. No hay `S3_DONE → S2_PENDING`.
-- Solo `Sn_FAILED → Sn_PENDING` se permite vía `cmcourier batch retry-failed --stage SN` (re-corrida explícita).
+- Solo `Sn_FAILED → Sn_PENDING` se permite vía `cmcourier batch retry-failed --stage SN` (re-corrida explícita). Los `*_BLOCKED` y `*_EXCLUDED` **no** se reintentan con `retry-failed` (157): un bloqueo se arregla editando config y re-corriendo; una exclusión no se toca.
+- **157 — el sufijo del status dice el balde**: `*_FAILED` = FALLO, `*_BLOCKED` = BLOQUEADO (falta config), `*_EXCLUDED` = EXCLUIDO (decisión de negocio). `S1_FILTERED`/`S1_SKIPPED` se conservan y cuentan como EXCLUIDO. El estado terminal lo elige `terminal_status_for(stage, bucket)`.
 - `S1_SKIPPED` es **terminal** — el doc ya está en Content Manager, no hay nada que hacer.
 - `cm_object_id` se persiste solo en `S5_DONE`. Las otras filas tienen `NULL`.
-- `error_message` se persiste en cualquier `*_FAILED`.
+- `error_message` se persiste en cualquier estado terminal no-`DONE`.
 
 ## Idempotencia cross-batch
 

@@ -31,6 +31,8 @@ class _FakeProvider:
         failed_total: int = 2,
         failures_by_stage: dict[str, int] | None = None,
         s1_filtered: int = 1,
+        blocked_total: int = 0,
+        excluded_total: int = 0,
     ) -> None:
         self._complete = complete
         self._planned_total = planned_total
@@ -48,9 +50,11 @@ class _FakeProvider:
             "S5": failed_total,
         }
         self._s1_filtered = s1_filtered
-        # 155: los elegibles son ``docs_processed - s1_filtered``; con los
-        # defaults esto da los 45 de siempre.
-        self._docs_processed = s5_done + failed_total + s1_filtered
+        self._blocked_total = blocked_total
+        self._excluded_total = excluded_total
+        # 155/157: los elegibles son ``docs_processed - excluidos -
+        # bloqueados``; con los defaults (0/0) esto da los 45 de siempre.
+        self._docs_processed = s5_done + failed_total + s1_filtered + blocked_total + excluded_total
 
     def snapshot(self) -> TUISnapshot:
         return TUISnapshot(
@@ -66,6 +70,8 @@ class _FakeProvider:
             upload_failed_total=self._failures_by_stage.get("S5", 0),
             failures_by_type={"503 server": 2},
             s1_filtered=self._s1_filtered,
+            blocked_total=self._blocked_total,
+            excluded_total=self._excluded_total,
             pool_capacity=4,
             pool_in_use=3,
             docs_processed=self._docs_processed,
@@ -442,6 +448,36 @@ class TestAvisoDeCierre155:
             s5_done=42,
             failed_total=0,
             failures_by_stage={"S1": 0, "S2": 0, "S3": 0, "S4": 0, "S5": 0},
+        )
+        _message, severity = self._finish(tmp_path, provider)
+        assert severity == "information"
+
+    def test_una_corrida_solo_de_excluidos_no_va_en_rojo_157(self, tmp_path: Path) -> None:
+        # 157: el caso del operador — 38527 excluidos (clientes inactivos),
+        # 0 subidos, 0 fallidos. No es un desastre: es la directiva de
+        # negocio. No hay elegibles frustrados → no sale en warning.
+        provider = _FakeProvider(
+            complete=True,
+            s5_done=0,
+            failed_total=0,
+            failures_by_stage={"S1": 0, "S2": 0, "S3": 0, "S4": 0, "S5": 0},
+            s1_filtered=0,
+            excluded_total=38527,
+        )
+        message, severity = self._finish(tmp_path, provider)
+        assert severity == "information"
+        assert "0 fallidos" in message
+
+    def test_una_corrida_solo_de_bloqueados_no_va_en_rojo_157(self, tmp_path: Path) -> None:
+        # 157: sólo bloqueos (falta config). Es config que el operador
+        # arregla, no fallas que murieron — no se anuncia en rojo.
+        provider = _FakeProvider(
+            complete=True,
+            s5_done=0,
+            failed_total=0,
+            failures_by_stage={"S1": 0, "S2": 0, "S3": 0, "S4": 0, "S5": 0},
+            s1_filtered=0,
+            blocked_total=12,
         )
         _message, severity = self._finish(tmp_path, provider)
         assert severity == "information"

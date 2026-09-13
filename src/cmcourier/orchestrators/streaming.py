@@ -394,6 +394,12 @@ class StreamingOrchestrator:
             # salía con ``prep_failed == 0`` para siempre, y el monitor
             # anunciaba "0 fallidos" con documentos muertos en S2.
             prep = (tally.s1_failed, tally.s2_failed, tally.s3_failed, tally.s4_failed)
+        # 157: los bloqueos/exclusiones de PREP los acumula el recorder de la
+        # corrida (un único recorder en streaming), no el tally — no son
+        # fallas y no vuelven por el ``failed_stage`` de ``streaming_prep_one``.
+        rec = self._recorder
+        blocked = rec.prep_blocked_by_stage() if rec is not None else {}
+        excluded = rec.prep_excluded_by_stage() if rec is not None else {}
         completed = s5d + s5f + s5sk
         with self._state_lock:
             prev = self._chunk_state
@@ -411,6 +417,10 @@ class StreamingOrchestrator:
                 s3_failed=prep[2],
                 s4_failed=prep[3],
                 prep_filtered=fil,
+                s1_blocked=blocked.get("S1", 0),
+                s2_blocked=blocked.get("S2", 0),
+                s3_blocked=blocked.get("S3", 0),
+                s2_excluded=excluded.get("S2", 0),
                 upload_skipped=s5sk,
                 prep_started_monotonic=(prev.prep_started_monotonic if prev is not None else None),
                 upload_started_monotonic=(
@@ -687,6 +697,12 @@ class StreamingOrchestrator:
             elapsed_s=elapsed,
         )
 
+        # 157: el estado terminal del chunk sintético también lleva los
+        # bloqueos/exclusiones (del recorder de la corrida) — si no, el
+        # último ``_chunk_state`` los perdía y el monitor cerraba con
+        # bloqueados/excluidos en 0 pese a que la base sí los tenía.
+        blocked_final = recorder.prep_blocked_by_stage()
+        excluded_final = recorder.prep_excluded_by_stage()
         with self._state_lock:
             self._chunk_state = ChunkState(
                 chunk_idx=0,
@@ -702,6 +718,10 @@ class StreamingOrchestrator:
                 s3_failed=snapshot.s3_failed,
                 s4_failed=snapshot.s4_failed,
                 prep_filtered=snapshot.s1_filtered,
+                s1_blocked=blocked_final.get("S1", 0),
+                s2_blocked=blocked_final.get("S2", 0),
+                s3_blocked=blocked_final.get("S3", 0),
+                s2_excluded=excluded_final.get("S2", 0),
                 upload_skipped=snapshot.s5_skipped,
                 upload_elapsed_s=elapsed,
             )

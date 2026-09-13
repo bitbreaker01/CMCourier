@@ -255,10 +255,13 @@ class TestStageFailures:
         pipeline_harness.register_cmis_for_docs([])  # No upload expected.
         triggers = _write_trigger_csv(tmp_path, [("TESTUNMAPPED", "123456", "1")])
         report = pipeline_harness.build_pipeline(triggers).run(source_descriptor=str(triggers))
-        assert report.s2_failed == 1
+        # 157: un IDRVI sin mapeo es BLOQUEADO (falta config), no una falla —
+        # ``s2_failed`` (fallas) queda en 0 y la fila terminal es ``S2_BLOCKED``.
+        assert report.s2_failed == 0
         assert report.s5_done == 0
         pipeline_harness.tracking_store.flush()
-        assert _count_rows(pipeline_harness.db_path, report.batch_id, "S2_FAILED") == 1
+        assert _count_rows(pipeline_harness.db_path, report.batch_id, "S2_FAILED") == 0
+        assert _count_rows(pipeline_harness.db_path, report.batch_id, "S2_BLOCKED") == 1
 
     @respx.mock
     def test_s3_metadata_source_failed(self, pipeline_harness, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -266,10 +269,12 @@ class TestStageFailures:
         pipeline_harness.register_cmis_for_docs([])
         triggers = _write_trigger_csv(tmp_path, [("TESTMETAFAIL", "999999", "1")])
         report = pipeline_harness.build_pipeline(triggers).run(source_descriptor=str(triggers))
-        assert report.s3_failed == 1
+        # 157: metadata sin resolver es BLOQUEADO → ``S3_BLOCKED``, no falla.
+        assert report.s3_failed == 0
         assert report.s5_done == 0
         pipeline_harness.tracking_store.flush()
-        assert _count_rows(pipeline_harness.db_path, report.batch_id, "S3_FAILED") == 1
+        assert _count_rows(pipeline_harness.db_path, report.batch_id, "S3_FAILED") == 0
+        assert _count_rows(pipeline_harness.db_path, report.batch_id, "S3_BLOCKED") == 1
 
     @respx.mock
     def test_s4_source_file_missing(self, pipeline_harness, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -445,17 +450,20 @@ class TestHeterogeneous:
             tmp_path,
             [
                 ("TESTCLIENT01", "123456", "1"),  # success
-                ("TESTUNMAPPED", "123456", "1"),  # S2 fail
-                ("TESTMETAFAIL", "999999", "1"),  # S3 fail
+                ("TESTUNMAPPED", "123456", "1"),  # S2 blocked (157)
+                ("TESTMETAFAIL", "999999", "1"),  # S3 blocked (157)
                 ("TESTMISSFILES", "123456", "1"),  # S4 fail
             ],
         )
         report = pipeline_harness.build_pipeline(triggers).run(source_descriptor=str(triggers))
         assert report.s5_done == 1
-        assert report.s2_failed == 1
-        assert report.s3_failed == 1
+        # 157: S2/S3 son BLOQUEOS (falta config), no fallas — sólo S4 es falla.
+        assert report.s2_failed == 0
+        assert report.s3_failed == 0
         assert report.s4_failed == 1
         pipeline_harness.tracking_store.flush()
+        assert _count_rows(pipeline_harness.db_path, report.batch_id, "S2_BLOCKED") == 1
+        assert _count_rows(pipeline_harness.db_path, report.batch_id, "S3_BLOCKED") == 1
         assert _batch_completed_at(pipeline_harness.db_path, report.batch_id) is not None
 
 
@@ -635,16 +643,17 @@ class TestPrepWorkers056:
         )
 
         assert report.total_docs == 6
-        assert report.s2_failed == 1  # TESTUNMAPPED — IDRViNotMappedError
-        assert report.s3_failed == 1  # TESTMETAFAIL — metadata resolution
-        assert report.s4_failed == 1  # TESTMISSFILES — source file missing
+        # 157: TESTUNMAPPED (S2) y TESTMETAFAIL (S3) son BLOQUEOS, no fallas.
+        assert report.s2_failed == 0  # TESTUNMAPPED — S2_BLOCKED
+        assert report.s3_failed == 0  # TESTMETAFAIL — S3_BLOCKED
+        assert report.s4_failed == 1  # TESTMISSFILES — source file missing (FALLO)
         assert report.s5_done == 3  # CLIENT01, CLIENT02, HEAL
         assert report.s5_failed == 0
 
         pipeline_harness.tracking_store.flush()
         assert _count_rows(pipeline_harness.db_path, report.batch_id, "S5_DONE") == 3
-        assert _count_rows(pipeline_harness.db_path, report.batch_id, "S2_FAILED") == 1
-        assert _count_rows(pipeline_harness.db_path, report.batch_id, "S3_FAILED") == 1
+        assert _count_rows(pipeline_harness.db_path, report.batch_id, "S2_BLOCKED") == 1
+        assert _count_rows(pipeline_harness.db_path, report.batch_id, "S3_BLOCKED") == 1
         assert _count_rows(pipeline_harness.db_path, report.batch_id, "S4_FAILED") == 1
 
 

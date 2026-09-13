@@ -69,6 +69,7 @@ from cmcourier.domain.models import (
     CMMapping,
     ExcludedTrigger,
     MigrationRecord,
+    ReasonBucket,
     ReasonCode,
     ResolvedMetadata,
     RVABREPDocument,
@@ -1054,8 +1055,17 @@ class StagedPipeline:
             # allow-list, o fila sin identidad). No se enriquece: se
             # registra y no llega a S2.
             if isinstance(trigger, ExcludedTrigger):
-                filtered += 1
-                self._record_exclusion(trigger, batch_id, StageStatus.S1_FILTERED)
+                # 157 REQ-002: el sufijo del status sigue al balde. Una fila
+                # de origen incompleta (SOURCE_ROW_INCOMPLETE, BLOQUEADO) es
+                # config que el operador arregla → ``S1_BLOCKED``, no una baja
+                # como ``S1_FILTERED``. El resto de las razones S1 (EXCLUIDO)
+                # conservan ``S1_FILTERED`` (051/062).
+                if trigger.reason_code.bucket is ReasonBucket.BLOQUEADO:
+                    rec.record_prep_blocked("S1")
+                    self._record_exclusion(trigger, batch_id, StageStatus.S1_BLOCKED)
+                else:
+                    filtered += 1
+                    self._record_exclusion(trigger, batch_id, StageStatus.S1_FILTERED)
                 continue
             outcome = self._s1_enrich(trigger, batch_id, rec)
             if outcome is None:
@@ -1387,8 +1397,12 @@ class StagedPipeline:
                 # REQ-004: un documento cuya identidad no resuelve nunca llega
                 # a evaluarse contra la lista.
                 if not self._client_is_active(item):
+                    # 157 REQ-002: cliente inactivo es una decisión de negocio
+                    # (balde EXCLUIDO) → ``S2_EXCLUDED``, no ``S2_FAILED``. No
+                    # es una falla: no cuenta como fallido ni se reintenta.
+                    rec.record_prep_excluded("S2")
                     self._record_terminal_reason(
-                        item, batch_id, StageStatus.S2_FAILED, ReasonCode.CLIENT_NOT_ACTIVE
+                        item, batch_id, StageStatus.S2_EXCLUDED, ReasonCode.CLIENT_NOT_ACTIVE
                     )
                     return None, False
                 # 145 REQ-001: la clave del mapping es ``(sistema, IDRVI)``.
@@ -1401,16 +1415,23 @@ class StagedPipeline:
             except (IDRViNotMappedError, IdentityResolutionError) as exc:
                 timer.mark_failed()
                 if not self._tracking_store.is_stage_done(txn, batch_id, StageStatus.S2_DONE):
+                    # 157 REQ-002: las tres razones (CODE_NOT_MAPPED,
+                    # TYPE_NOT_IN_MANIFEST, IDENTITY_UNRESOLVED) son del balde
+                    # BLOQUEADO —falta config, el operador la arregla— así que
+                    # el estado terminal es ``S2_BLOCKED``, no ``S2_FAILED``.
+                    # Como bloqueo, NO cuenta como fallido y NO se reintenta
+                    # con ``R``: se corrige el archivo y se re-corre.
                     record = self._build_record(item, batch_id, StageStatus.S2_PENDING)
                     self._tracking_store.mark_stage_pending(record, StageStatus.S2_PENDING)
-                    self._tracking_store.mark_stage_failed(
+                    rec.record_prep_blocked("S2")
+                    self._tracking_store.mark_stage_terminal(
                         txn,
                         batch_id,
-                        StageStatus.S2_FAILED,
+                        StageStatus.S2_BLOCKED,
                         str(exc),
                         reason_code=self._s2_reason(exc),
                     )
-                    return None, True
+                    return None, False
                 return None, False
         if not self._tracking_store.is_stage_done(txn, batch_id, StageStatus.S2_DONE):
             record = self._build_record(item, batch_id, StageStatus.S2_PENDING)
@@ -1555,16 +1576,20 @@ class StagedPipeline:
                 except (SourceFailedError, DefaultValidationFailedError) as exc:
                     timer.mark_failed()
                     if not self._tracking_store.is_stage_done(txn, batch_id, StageStatus.S3_DONE):
+                        # 157 REQ-002: metadata sin resolver (METADATA_UNRESOLVED,
+                        # balde BLOQUEADO) → ``S3_BLOCKED``. Falta config, no es
+                        # una falla de ejecución: no cuenta como fallido.
                         record = self._build_record(item, batch_id, StageStatus.S3_PENDING)
                         self._tracking_store.mark_stage_pending(record, StageStatus.S3_PENDING)
-                        self._tracking_store.mark_stage_failed(
+                        rec.record_prep_blocked("S3")
+                        self._tracking_store.mark_stage_terminal(
                             txn,
                             batch_id,
-                            StageStatus.S3_FAILED,
+                            StageStatus.S3_BLOCKED,
                             str(exc),
                             reason_code=ReasonCode.METADATA_UNRESOLVED,
                         )
-                        return None, True
+                        return None, False
                     return None, False
                 metadata = resolution.metadata
                 healed_trigger = resolution.healed_trigger

@@ -92,6 +92,12 @@ def render_bucket(snap: TUISnapshot) -> str:
             _outcome_line("S5_DONE", cumulative["s5_done"]),
             _outcome_line("FALLIDOS", snap.failed_total),
             *_stage_failure_lines(snap),
+            # 157: las cuatro categorías separadas. BLOQUEADOS (falta config)
+            # y EXCLUIDOS (decisión de negocio/origen) NO son fallas; se
+            # rinden siempre, como FALLIDOS. ``S1_FILTERED``/``S1_SKIPPED``
+            # quedan como el detalle de EXCLUIDOS.
+            _outcome_line("BLOQUEADOS", snap.blocked_total),
+            _outcome_line("EXCLUIDOS", snap.excluded_total),
             _outcome_line("S1_FILTERED", cumulative["s1_filtered"]),
             _outcome_line("S1_SKIPPED", cumulative["s1_skipped"]),
         ]

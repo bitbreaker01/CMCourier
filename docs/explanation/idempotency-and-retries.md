@@ -56,13 +56,17 @@ stateDiagram-v2
     S1_PENDING --> S1_FILTERED: excluido en S1 (ver reason_code)
     S1_PENDING --> S1_FAILED: RVABREP query fails
 
+    S1_PENDING --> S1_BLOCKED: SOURCE_ROW_INCOMPLETE (157)
     S1_DONE --> S2_PENDING
     S2_PENDING --> S2_DONE: ID RVI mapped
-    S2_PENDING --> S2_FAILED: ID RVI not in mapping
+    S2_PENDING --> S2_FAILED: falla de ejecución (FALLO)
+    S2_PENDING --> S2_BLOCKED: falta config (157)
+    S2_PENDING --> S2_EXCLUDED: CLIENT_NOT_ACTIVE (157)
 
     S2_DONE --> S3_PENDING
     S3_PENDING --> S3_DONE: metadata resolved
-    S3_PENDING --> S3_FAILED: source failed + no default
+    S3_PENDING --> S3_FAILED: falla de ejecución (FALLO)
+    S3_PENDING --> S3_BLOCKED: METADATA_UNRESOLVED (157)
 
     S3_DONE --> S4_PENDING
     S4_PENDING --> S4_DONE: PDF assembled
@@ -75,14 +79,35 @@ stateDiagram-v2
     S5_DONE --> [*]
     S1_SKIPPED --> [*]
     S1_FILTERED --> [*]
+    S1_BLOCKED --> [*]
+    S2_BLOCKED --> [*]
+    S2_EXCLUDED --> [*]
+    S3_BLOCKED --> [*]
 ```
 
-Estados terminales (en el sentido "el doc no avanza"):
+Estados terminales (en el sentido "el doc no avanza"), agrupados por balde
+(**157 — el sufijo del status coincide con el balde**):
 
 - **`S5_DONE`**: éxito completo. El doc está en CM con un `cm_object_id` registrado.
-- **`S1_SKIPPED`**: ya está en `S5_DONE` por una corrida previa (cross-batch idempotency, spec 062).
-- **`S1_FILTERED`**: el documento se excluyó en S1. No es un error — es deliberado. 051 lo creó para una sola causa (todas las filas RVABREP con `ABACST` no vacío ⇒ `DELETED_AT_SOURCE`); 148 sumó al mismo estado `EXCLUDED_BY_FILTER`, `SOURCE_ROW_INCOMPLETE` y `OUT_OF_SCOPE_RESUME`. **El estado dice dónde paró; el `reason_code` dice por qué** — no los confundas, que es justo lo que hacía la etiqueta vieja del monitor.
-- **`Sn_FAILED`**: cualquier `n`. Se puede recuperar con `cmcourier batch retry-failed`.
+- **EXCLUIDO** — decisión de negocio/origen, no hay nada que arreglar:
+  - **`S1_SKIPPED`**: ya está en `S5_DONE` por una corrida previa (062).
+  - **`S1_FILTERED`**: excluido en S1 (051 `DELETED_AT_SOURCE`; 148
+    `EXCLUDED_BY_FILTER`, `OUT_OF_SCOPE_RESUME`).
+  - **`S2_EXCLUDED`** (157): `CLIENT_NOT_ACTIVE` — el cliente no tiene producto
+    activo (150). Antes vivía en `S2_FAILED` y se contaba como falla.
+- **BLOQUEADO** — falta config, lo arregla el operador editando archivos y
+  re-corriendo (no con `retry-failed`):
+  - **`S1_BLOCKED`** (157): `SOURCE_ROW_INCOMPLETE`.
+  - **`S2_BLOCKED`** (157): `CODE_NOT_MAPPED`, `TYPE_NOT_IN_MANIFEST`,
+    `IDENTITY_UNRESOLVED`.
+  - **`S3_BLOCKED`** (157): `METADATA_UNRESOLVED`.
+- **FALLO** — falla de ejecución, se reintenta o se investiga:
+  - **`Sn_FAILED`**: cualquier `n`. Se recupera con `cmcourier batch retry-failed`.
+
+Hasta 156 `status` decía sólo *dónde* paró el doc y el balde vivía en
+`reason_code` (148, eje ortogonal); una exclusión o un bloqueo se persistía como
+`Sn_FAILED` y todo conteo por `LIKE '%_FAILED'` lo trataba como falla. 157 hace
+que el sufijo del status **sea** el balde, así la categoría sale del sufijo.
 
 ## La idempotencia cross-batch
 

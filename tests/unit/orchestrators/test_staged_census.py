@@ -518,6 +518,74 @@ def _uploadable(tmp_path: Any) -> _StageItem:
 
 
 # ---------------------------------------------------------------------------
+# 157 — el sufijo del status terminal coincide con el balde de la razón
+# ---------------------------------------------------------------------------
+
+
+class TestStatusMatchesBucket157:
+    """157 REQ-002: la razón elige el status por su balde. Las razones que
+    antes colapsaban en ``Sn_FAILED`` pasan a llevar ``_BLOCKED`` (config) o
+    ``_EXCLUDED`` (negocio)."""
+
+    def test_source_row_incomplete_is_s1_blocked(self) -> None:
+        pipeline = _pipeline()
+        excluded = ExcludedTrigger(
+            reason_code=ReasonCode.SOURCE_ROW_INCOMPLETE, txn_num="TXN_INC", id_rvi="BB02"
+        )
+        pipeline._stage_s0_s1([excluded], "B1", None)
+        assert _statuses_by_txn(pipeline)["TXN_INC"] is StageStatus.S1_BLOCKED
+
+    def test_excluded_by_filter_stays_s1_filtered(self) -> None:
+        """Una exclusión de S1 conserva ``S1_FILTERED`` (051/062), no se
+        renombra a ``S1_EXCLUDED`` — sigue contando como excluido."""
+        pipeline = _pipeline()
+        excluded = ExcludedTrigger(
+            reason_code=ReasonCode.EXCLUDED_BY_FILTER, txn_num="TXN_FIL", id_rvi="AA01"
+        )
+        pipeline._stage_s0_s1([excluded], "B1", None)
+        assert _statuses_by_txn(pipeline)["TXN_FIL"] is StageStatus.S1_FILTERED
+
+    def test_code_not_mapped_is_s2_blocked(self) -> None:
+        pipeline = _pipeline()
+        pipeline._mapping_service.get_mapping.side_effect = IDRViNotMappedError(id_rvi="CC03")
+        pipeline._mapping_service.missing_from_manifest.return_value = False
+        pipeline._s2_one(_item(pipeline), "B1", pipeline._metrics)
+        assert _statuses_by_txn(pipeline)["TXN1"] is StageStatus.S2_BLOCKED
+
+    def test_type_not_in_manifest_is_s2_blocked(self) -> None:
+        pipeline = _pipeline()
+        pipeline._mapping_service.get_mapping.side_effect = IDRViNotMappedError(id_rvi="CC03")
+        pipeline._mapping_service.missing_from_manifest.return_value = True
+        pipeline._s2_one(_item(pipeline), "B1", pipeline._metrics)
+        assert _statuses_by_txn(pipeline)["TXN1"] is StageStatus.S2_BLOCKED
+
+    def test_identity_unresolved_is_s2_blocked(self) -> None:
+        pipeline = _pipeline()
+        pipeline._mapping_service.get_mapping.side_effect = IdentityResolutionError(
+            slot="cif", field_name="BAC_CIF", reason="sin resultado", chain=()
+        )
+        pipeline._s2_one(_item(pipeline), "B1", pipeline._metrics)
+        assert _statuses_by_txn(pipeline)["TXN1"] is StageStatus.S2_BLOCKED
+
+    def test_metadata_unresolved_is_s3_blocked(self) -> None:
+        pipeline = _pipeline()
+        pipeline._metadata_service.resolve.side_effect = SourceFailedError(
+            field_name="BAC_CIF", source="as400"
+        )
+        pipeline._s3_one(_item(pipeline, mapping=_mapping()), "B1", pipeline._metrics)
+        assert _statuses_by_txn(pipeline)["TXN1"] is StageStatus.S3_BLOCKED
+
+    def test_s4_file_missing_stays_s4_failed(self) -> None:
+        """Un FALLO real conserva ``_FAILED`` — el pescado que 157 NO toca."""
+        pipeline = _pipeline()
+        pipeline._assembler.assemble_traced.side_effect = SourceFileMissingError(
+            file_path="/x/y.001"
+        )
+        pipeline._s4_one(_item(pipeline, mapping=_mapping()), "B1", pipeline._metrics)
+        assert _statuses_by_txn(pipeline)["TXN1"] is StageStatus.S4_FAILED
+
+
+# ---------------------------------------------------------------------------
 # id_rvi — se llena SIEMPRE, no sólo en las exclusiones
 # ---------------------------------------------------------------------------
 

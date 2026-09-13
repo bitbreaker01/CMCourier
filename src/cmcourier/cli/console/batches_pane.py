@@ -20,7 +20,21 @@ from cmcourier.domain.models import BatchDetails, BatchInfo
 if TYPE_CHECKING:
     from cmcourier.cli.console.app import ConsoleApp
 
-_COLS = ("batch", "fecha", "por", "entorno", "subidos", "fallidos", "salteados", "estado")
+# 157: la lista muestra las cuatro categorías por sufijo — subidos /
+# fallidos / bloqueados / excluidos. La columna ``bloqueados`` es nueva; el
+# operador que vio "fallidos 38527" (clientes inactivos) ahora los ve en
+# ``excluidos``, donde corresponde, y no como una falla.
+_COLS = (
+    "batch",
+    "fecha",
+    "por",
+    "entorno",
+    "subidos",
+    "fallidos",
+    "bloqueados",
+    "excluidos",
+    "estado",
+)
 
 
 class BatchesPane(Vertical):
@@ -78,17 +92,30 @@ class BatchesPane(Vertical):
                 audit.get("environment", "—"),
                 str(counts["done"]),
                 str(counts["failed"]),
-                str(counts["pending"]),
+                str(counts["blocked"]),
+                str(counts["excluded"]),
                 audit.get("outcome") or info.status,
                 key=info.batch_id,
             )
 
     def _counts(self, details: BatchDetails | None) -> dict[str, int]:
-        out = {"done": 0, "failed": 0, "pending": 0}
+        """157 REQ-003: cuenta por CATEGORÍA de sufijo, no por ``_FAILED``.
+
+        subidos=``S5_DONE``, fallidos=``*_FAILED``, bloqueados=``*_BLOCKED``,
+        excluidos=``*_EXCLUDED`` + ``S1_FILTERED`` + ``S1_SKIPPED``,
+        pendientes=``*_PENDING``. Antes ``fallidos`` era la suma de todos los
+        ``FAILED`` — y una exclusión que vivía en ``S2_FAILED``
+        (``CLIENT_NOT_ACTIVE``) se contaba como falla.
+        """
+        out = {"done": 0, "failed": 0, "blocked": 0, "excluded": 0, "pending": 0}
         if details is None:
             return out
         for states in details.stage_counts.values():
             out["failed"] += states.get("FAILED", 0)
+            out["blocked"] += states.get("BLOCKED", 0)
+            out["excluded"] += (
+                states.get("EXCLUDED", 0) + states.get("FILTERED", 0) + states.get("SKIPPED", 0)
+            )
             out["pending"] += states.get("PENDING", 0)
         out["done"] = details.stage_counts.get("S5", {}).get("DONE", 0)
         return out
@@ -129,6 +156,17 @@ class BatchesPane(Vertical):
                 lines.append(f"  … y {len(details.failed_records) - 8} más")
         else:
             lines.append("sin documentos fallidos")
+        # 157: los bloqueados van en su propio bloque — no se reintentan con
+        # ``R``, se arregla la config (YAML/CSV/manifest) y se re-corre.
+        if details and details.blocked_records:
+            lines.append("")
+            lines.append(
+                f"bloqueados ({len(details.blocked_records)}) — arreglá config y re-corré:"
+            )
+            for br in details.blocked_records[:8]:
+                lines.append(f"  {br.txn_num}  {br.status}  {br.error_message[:60]}")
+            if len(details.blocked_records) > 8:
+                lines.append(f"  … y {len(details.blocked_records) - 8} más")
         panel.update("\n".join(lines))
 
     def is_resumable(self, info: BatchInfo) -> bool:

@@ -101,13 +101,17 @@ def _closing_notice(
     censo — el POR QUÉ por documento lo tiene ``batch show``, no el
     contador en memoria (153).
 
-    Los elegibles son ``docs_processed - s1_filtered``: lo que sobrevivió
-    al filtro de S1 y por lo tanto TENÍA que subir.
+    Los elegibles son lo que TENÍA que subir: ``docs_processed`` menos los
+    excluidos (decisión de negocio/origen) y los bloqueados (falta config).
+    157: una corrida cuyo único "problema" fueron exclusiones o bloqueos NO
+    se anuncia como si hubieran muerto documentos que tenían que subir — los
+    excluidos no eran elegibles y los bloqueados se resuelven con config, no
+    reintentando.
     """
     message = f"Corrida {outcome}: {done} subidos · {failed} fallidos"
     eligible = 0
     if snap is not None:
-        eligible = max(0, snap.docs_processed - snap.s1_filtered)
+        eligible = max(0, snap.docs_processed - snap.excluded_total - snap.blocked_total)
     if done == 0 and eligible > 0:
         stage = _dominant_stage(snap)
         cause = f"el grueso murió en {stage}" if stage else "sin fallas registradas"

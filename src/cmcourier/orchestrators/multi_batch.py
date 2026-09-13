@@ -92,6 +92,14 @@ class ChunkState:
     s4_failed: int = 0
     # 051 — docs filtrados en S1 (filas RVABREP con código de baja)
     prep_filtered: int = 0
+    # 157 — desenlaces terminales de PREP que NO son fallas, por balde:
+    # ``*_BLOCKED`` (falta config) y ``S2_EXCLUDED`` (cliente inactivo). Las
+    # exclusiones de S1 siguen viviendo en ``prep_filtered``/``prep_skipped``
+    # (051/062); acá van sólo las que 157 sacó del ``*_FAILED``.
+    s1_blocked: int = 0
+    s2_blocked: int = 0
+    s3_blocked: int = 0
+    s2_excluded: int = 0
     upload_skipped: int = 0
     prep_started_monotonic: float | None = None
     prep_elapsed_s: float = 0.0
@@ -103,6 +111,17 @@ class ChunkState:
         """155 — total de fallas de PREP (S1..S4). Derivado, nunca seteado."""
         return self.s1_failed + self.s2_failed + self.s3_failed + self.s4_failed
 
+    @property
+    def prep_blocked(self) -> int:
+        """157 — total de bloqueos de PREP (S1..S3). Derivado."""
+        return self.s1_blocked + self.s2_blocked + self.s3_blocked
+
+    @property
+    def prep_excluded(self) -> int:
+        """157 — total de exclusiones: ``S1_FILTERED`` + ``S1_SKIPPED`` +
+        ``S2_EXCLUDED``. Derivado."""
+        return self.prep_filtered + self.prep_skipped + self.s2_excluded
+
 
 @dataclass(frozen=True, slots=True)
 class _PrepFailures:
@@ -112,6 +131,19 @@ class _PrepFailures:
     s2: int = 0
     s3: int = 0
     s4: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _PrepOutcomes:
+    """157 — bloqueos/exclusiones terminales de PREP de un `chunk`, por balde.
+
+    Entran juntos al ``ChunkState`` para que el monitor separe fallidos de
+    bloqueados y excluidos sin re-derivar el mapa razón→balde."""
+
+    s1_blocked: int = 0
+    s2_blocked: int = 0
+    s3_blocked: int = 0
+    s2_excluded: int = 0
 
 
 #: Estado "no visto todavía" para resolver los ``None`` de
@@ -298,6 +330,7 @@ class MultiBatchOrchestrator:
         prep_done: int | None = None,
         prep_skipped: int | None = None,
         prep_failures: _PrepFailures | None = None,
+        prep_outcomes: _PrepOutcomes | None = None,
         prep_filtered: int | None = None,
         upload_skipped: int | None = None,
         prep_started_monotonic: float | None = None,
@@ -317,6 +350,9 @@ class MultiBatchOrchestrator:
             failures = prep_failures or _PrepFailures(
                 prev.s1_failed, prev.s2_failed, prev.s3_failed, prev.s4_failed
             )
+            outcomes = prep_outcomes or _PrepOutcomes(
+                prev.s1_blocked, prev.s2_blocked, prev.s3_blocked, prev.s2_excluded
+            )
             self._chunks_state[chunk_idx] = ChunkState(
                 chunk_idx=chunk_idx,
                 batch_id=batch_id,
@@ -332,6 +368,10 @@ class MultiBatchOrchestrator:
                 s3_failed=failures.s3,
                 s4_failed=failures.s4,
                 prep_filtered=_keep(prep_filtered, prev.prep_filtered),
+                s1_blocked=outcomes.s1_blocked,
+                s2_blocked=outcomes.s2_blocked,
+                s3_blocked=outcomes.s3_blocked,
+                s2_excluded=outcomes.s2_excluded,
                 upload_skipped=_keep(upload_skipped, prev.upload_skipped),
                 prep_started_monotonic=_keep(prep_started_monotonic, prev.prep_started_monotonic),
                 prep_elapsed_s=_keep(prep_elapsed_s, prev.prep_elapsed_s),
@@ -541,6 +581,10 @@ class MultiBatchOrchestrator:
             )
             prep_elapsed = time.monotonic() - started
             total_bytes = _items_total_bytes(items)
+            # 157: los bloqueos/exclusiones de PREP los acumuló el recorder
+            # per-chunk (no son fallas, así que no vienen en los ``sNf``).
+            blocked = recorder.prep_blocked_by_stage()
+            excluded = recorder.prep_excluded_by_stage()
             # Congela el desglose del lado PREP apenas el prep termina.
             self._update_chunk_state(
                 chunk_idx=idx,
@@ -551,6 +595,12 @@ class MultiBatchOrchestrator:
                 prep_done=len(items),
                 prep_skipped=skipped,
                 prep_failures=_PrepFailures(s1f, s2f, s3f, s4f),
+                prep_outcomes=_PrepOutcomes(
+                    s1_blocked=blocked.get("S1", 0),
+                    s2_blocked=blocked.get("S2", 0),
+                    s3_blocked=blocked.get("S3", 0),
+                    s2_excluded=excluded.get("S2", 0),
+                ),
                 prep_filtered=s1_filtered,
                 prep_elapsed_s=prep_elapsed,
             )

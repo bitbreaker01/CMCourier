@@ -99,6 +99,14 @@ class TUISnapshot:
     # ``0 fallidos`` en verde con diez documentos muertos.
     failed_total: int = 0
     failures_by_stage: dict[str, int] = field(default_factory=dict)
+    # ---------- 157: bloqueados y excluidos, separados de los fallidos.
+    # ``blocked_total`` = docs ``*_BLOCKED`` (falta config, lo arregla el
+    # operador). ``excluded_total`` = ``*_EXCLUDED`` + ``S1_FILTERED`` +
+    # ``S1_SKIPPED`` (decisión de negocio/origen, no hay nada que arreglar).
+    # Una corrida que sólo excluyó/bloqueó ya no se anuncia en rojo por
+    # "fallas" que no existen.
+    blocked_total: int = 0
+    excluded_total: int = 0
     # ---------- 104: desglose de la tasa de error de S5 por tipo + status.
     # ``upload_failed_total`` es el total DE ESE desglose (CMIS-specific);
     # el bloque del tab UPLOAD se rotula ``ERRORS BY TYPE (UPLOAD)``.
@@ -333,6 +341,7 @@ class TUIDataProvider:
         # 155: el total de la corrida es la suma de las etapas, no el de
         # 104. El desglose por tipo/status sigue siendo de S5 y sólo de S5.
         failures_by_stage = self._failures_by_stage(chunks_snapshot, upload_failed_total)
+        blocked_total, excluded_total = self._blocked_and_excluded(chunks_snapshot)
         return TUISnapshot(
             pipeline=self._pipeline_name,
             batch_id=self._batch_id,
@@ -374,6 +383,8 @@ class TUIDataProvider:
             slow_ops_all=tuple(self._upload_metrics.aggregator_snapshot()),
             failed_total=sum(failures_by_stage.values()),
             failures_by_stage=failures_by_stage,
+            blocked_total=blocked_total,
+            excluded_total=excluded_total,
             upload_failed_total=upload_failed_total,
             failures_by_type=failures_by_type,
             failures_by_status=failures_by_status,
@@ -427,6 +438,31 @@ class TUIDataProvider:
                     stages[stage] += int(value)
         return stages
 
+    # ------------------------------------------ 157: bloqueados + excluidos
+
+    @staticmethod
+    def _blocked_and_excluded(
+        chunks_snapshot: tuple[dict[str, object], ...],
+    ) -> tuple[int, int]:
+        """157 — ``(bloqueados, excluidos)`` sumados entre `chunk`s.
+
+        ``bloqueados`` = ``*_BLOCKED`` (S1..S3). ``excluidos`` =
+        ``S2_EXCLUDED`` + ``S1_FILTERED`` (``prep_filtered``) + ``S1_SKIPPED``
+        (``prep_skipped``). Sin filas de `chunk` (path monolítico) no hay de
+        dónde sacarlos: quedan en 0, igual que hoy."""
+        blocked = 0
+        excluded = 0
+        for row in chunks_snapshot:
+            for key in ("s1_blocked", "s2_blocked", "s3_blocked"):
+                value = row.get(key, 0)
+                if isinstance(value, (int, float)):
+                    blocked += int(value)
+            for key in ("s2_excluded", "prep_filtered", "prep_skipped"):
+                value = row.get(key, 0)
+                if isinstance(value, (int, float)):
+                    excluded += int(value)
+        return blocked, excluded
+
     # ------------------------------------------ 134: ventana deslizante + ETA
 
     @staticmethod
@@ -444,6 +480,13 @@ class TUIDataProvider:
             "prep_failed",
             "prep_filtered",
             "prep_skipped",
+            # 157: un bloqueo y una exclusión también son resultados
+            # terminales — sin esto se caían del throughput y del cálculo de
+            # elegibles del aviso de cierre.
+            "s1_blocked",
+            "s2_blocked",
+            "s3_blocked",
+            "s2_excluded",
         )
         total = 0
         for row in chunks_snapshot:
@@ -544,6 +587,11 @@ class TUIDataProvider:
                     "s3_failed": getattr(chunk, "s3_failed", 0),
                     "s4_failed": getattr(chunk, "s4_failed", 0),
                     "prep_filtered": getattr(chunk, "prep_filtered", 0),
+                    # 157 — bloqueos/exclusiones de PREP (fuera del *_FAILED).
+                    "s1_blocked": getattr(chunk, "s1_blocked", 0),
+                    "s2_blocked": getattr(chunk, "s2_blocked", 0),
+                    "s3_blocked": getattr(chunk, "s3_blocked", 0),
+                    "s2_excluded": getattr(chunk, "s2_excluded", 0),
                     "upload_skipped": upload_skipped,
                     "prep_started_monotonic": prep_started,
                     "prep_elapsed_s": prep_elapsed,

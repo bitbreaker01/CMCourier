@@ -114,6 +114,12 @@ es grande, no es un problema: es la prueba de que tus filtros funcionan.
 Ninguno de estos es un error de ejecución: reintentar **no sirve de nada**
 hasta que cambies algo. Cada razón tiene un arreglo concreto y distinto.
 
+> **157 — un bloqueo tiene su propio estado (`*_BLOCKED`), no `*_FAILED`.** Por
+> eso `retry-failed` **no lo toca**: `R` es para fallas de ejecución, no para
+> config que falta. El ciclo del balde `BLOQUEADO` es *editar la config y
+> re-correr la migración* — cuando el documento vuelve a pasar por la pipeline,
+> ya con la config arreglada, mapea y sube.
+
 | Razón | Qué falta | El arreglo, paso a paso |
 |---|---|---|
 | `CODE_NOT_MAPPED` | El `ID RVI` no tiene fila en `MapeoRVI_CM.csv` | El `ID_RVI` de la columna del censo es el que falta. Agregá la fila `IDSistema,IDRVI,IDCM` al CSV (modo manifest) y verificá con `cmcourier inspect mapping <ID_RVI> --system <n>` |
@@ -122,20 +128,23 @@ hasta que cambies algo. Cada razón tiene un arreglo concreto y distinto.
 | `METADATA_UNRESOLVED` | Un campo requerido no lo dio ninguna fuente y no hay default | Agregá una fuente más a `metadata.field_sources.<CAMPO>.sources`, o un `default_value`. Ver [`../metadata-format.md`](../metadata-format.md) |
 | `SOURCE_ROW_INCOMPLETE` | La fila RVABREP viene sin shortname o sin sistema | No lo arreglás vos: es dato sucio en el origen. Sacá la lista con el export y pasásela a quien administra RVABREP |
 
-Después de cambiar la configuración:
+Después de cambiar la configuración, **re-corré la migración** sobre el mismo
+origen (los documentos ya subidos se saltean solos por idempotencia
+cross-batch, así que sólo se re-procesa lo que faltaba):
 
 ```console
-$ cmcourier batch retry-failed -c config.yaml --batch <batch_id>
-$ cmcourier apply -c config.yaml --resume <batch_id>
+$ cmcourier apply -c config.yaml
 ```
 
-`retry-failed` limpia el `reason_code` junto con el error: un documento que
-reintentó bien deja de figurar en el censo y pasa a contar como migrado.
-No queda contado dos veces.
+El documento que estaba `*_BLOCKED` vuelve a pasar por la pipeline y —ahora con
+la config arreglada— mapea y sube. **No uses `retry-failed` para esto**: desde
+157 los bloqueos son `*_BLOCKED`, no `*_FAILED`, y `retry-failed` los deja
+afuera a propósito (es para el balde `FALLO`).
 
-Y no toca el balde `EXCLUIDO` (150): esas filas se quedan como están, con su
-razón intacta. Reintentar una decisión de negocio no la cambia de opinión —
-por eso el `Reset N` puede ser menor que la cantidad de `*_FAILED` del batch.
+`retry-failed`, cuando corresponde (balde `FALLO`), limpia el `reason_code`
+junto con el error: un documento que reintentó bien deja de figurar en el censo
+y pasa a contar como migrado. No queda contado dos veces. Y nunca toca los
+baldes `EXCLUIDO` ni `BLOQUEADO` — el `LIKE '%_FAILED'` los deja fuera solos.
 
 ## 4. `FALLO` — reintento o investigación
 

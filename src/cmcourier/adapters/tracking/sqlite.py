@@ -51,6 +51,7 @@ from cmcourier.domain.models import (
     ReasonCode,
     ReasonCount,
     StageStatus,
+    terminal_status_for,
 )
 from cmcourier.domain.ports import ITrackingStore
 
@@ -241,6 +242,21 @@ _NON_RETRYABLE_REASONS: tuple[str, ...] = tuple(
     code.value for code in ReasonCode if code.bucket is ReasonBucket.EXCLUIDO
 )
 
+# 157 REQ-006: los códigos por balde, para la migración idempotente que
+# reescribe las filas ``*_FAILED`` mal-archivadas de bases pre-157. Se
+# DERIVAN del mapeo del dominio: una razón nueva de balde EXCLUIDO/BLOQUEADO
+# queda cubierta sola.
+_MISFILED_REASONS_BY_BUCKET: tuple[tuple[ReasonBucket, tuple[str, ...]], ...] = (
+    (
+        ReasonBucket.BLOQUEADO,
+        tuple(c.value for c in ReasonCode if c.bucket is ReasonBucket.BLOQUEADO),
+    ),
+    (
+        ReasonBucket.EXCLUIDO,
+        tuple(c.value for c in ReasonCode if c.bucket is ReasonBucket.EXCLUIDO),
+    ),
+)
+
 # ``NOT IN`` sobre un NULL da NULL (falsy) y descartaría las filas SIN razón,
 # que son reintentables legítimas (una fila legacy, o una ya reintentada que
 # quedó con ``reason_code`` en NULL). De ahí el guard explícito.
@@ -262,9 +278,16 @@ _STATUSES_AT_OR_PAST: dict[StageStatus, frozenset[str]] = {
             "S2_PENDING",
             "S2_DONE",
             "S2_FAILED",
+            # 157: un doc que paró en S2 por bloqueo/exclusión igual PASÓ S1
+            # (llegó a S2), igual que ``S2_FAILED``. Sin esto, un resume del
+            # mismo batch lo re-admitiría en S1 y volvería a sumar el
+            # denominador — rompiendo el cuadre del censo.
+            "S2_BLOCKED",
+            "S2_EXCLUDED",
             "S3_PENDING",
             "S3_DONE",
             "S3_FAILED",
+            "S3_BLOCKED",
             "S4_PENDING",
             "S4_DONE",
             "S4_FAILED",
@@ -279,6 +302,8 @@ _STATUSES_AT_OR_PAST: dict[StageStatus, frozenset[str]] = {
             "S3_PENDING",
             "S3_DONE",
             "S3_FAILED",
+            # 157: un ``S3_BLOCKED`` pasó S2 (llegó a S3), igual que ``S3_FAILED``.
+            "S3_BLOCKED",
             "S4_PENDING",
             "S4_DONE",
             "S4_FAILED",
@@ -408,6 +433,10 @@ class SQLiteTrackingStore(ITrackingStore):
         # EXISTS`` no toca una tabla que ya existe, así que las bases
         # abiertas antes de 148 se actualizan sólo por acá.
         _add_missing_columns(conn, "migration_log", _CENSUS_COLUMNS)
+        # 157 REQ-006: las bases pre-157 traen filas ``*_FAILED`` con razones
+        # de balde EXCLUIDO/BLOQUEADO. Al abrir, se reescribe su status al
+        # sufijo que les corresponde para que los batches viejos se lean bien.
+        _migrate_misfiled_statuses(conn)
         conn.commit()
 
     def _open_read_connection(self) -> sqlite3.Connection:
@@ -977,10 +1006,21 @@ class SQLiteTrackingStore(ITrackingStore):
                 "SELECT status, COUNT(*) FROM migration_log WHERE batch_id = ? GROUP BY status",
                 (batch_id,),
             ).fetchall()
+            # 157 REQ-003: la lista de "fallidos" es SÓLO ``*_FAILED`` — el
+            # sufijo lleva el balde, así que un bloqueo o una exclusión ya no
+            # se cuelan por ``LIKE '%_FAILED'``.
             failed_rows = conn.execute(
                 "SELECT rvabrep_txn_num, status, COALESCE(error_message, ''), "
                 "COALESCE(reason_code, '') "
                 "FROM migration_log WHERE batch_id = ? AND status LIKE '%_FAILED'",
+                (batch_id,),
+            ).fetchall()
+            # 157 REQ-003: bloque separado con los ``*_BLOCKED`` — config que
+            # el operador arregla, no fallas que se reintentan.
+            blocked_rows = conn.execute(
+                "SELECT rvabrep_txn_num, status, COALESCE(error_message, ''), "
+                "COALESCE(reason_code, '') "
+                "FROM migration_log WHERE batch_id = ? AND status LIKE '%_BLOCKED'",
                 (batch_id,),
             ).fetchall()
             # 148 REQ-006: el censo — por qué no se subió cada doc que no
@@ -1002,6 +1042,10 @@ class SQLiteTrackingStore(ITrackingStore):
                 for r in failed_rows
             ),
             reason_counts=tuple(_row_to_reason_count(r) for r in reason_rows),
+            blocked_records=tuple(
+                FailedRecord(txn_num=r[0], status=r[1], error_message=r[2], reason_code=r[3])
+                for r in blocked_rows
+            ),
         )
 
     def list_docs_for_batch(self, batch_id: str) -> list[DocDetail]:
@@ -1098,9 +1142,16 @@ def _require_state(stage: StageStatus, expected_suffix: str) -> None:
         raise ValueError(f"expected a {expected_suffix} stage, got {stage.value!r}")
 
 
+#: Sufijos terminales (no-progresivos) que ``mark_stage_terminal`` acepta.
+#: 062: FAILED / FILTERED / SKIPPED. 157: además BLOCKED y EXCLUDED — un
+#: bloqueo y una exclusión también cierran el recorrido del documento, sólo
+#: que en un balde distinto al de una falla.
+_TERMINAL_SUFFIXES: tuple[str, ...] = ("FAILED", "FILTERED", "SKIPPED", "BLOCKED", "EXCLUDED")
+
+
 def _require_terminal_state(stage: StageStatus) -> None:
-    """062: acepta cualquier sufijo terminal (no-progresivo) — FAILED, FILTERED, SKIPPED."""
-    if not any(stage.value.endswith(f"_{s}") for s in ("FAILED", "FILTERED", "SKIPPED")):
+    """062/157: acepta cualquier sufijo terminal (:data:`_TERMINAL_SUFFIXES`)."""
+    if not any(stage.value.endswith(f"_{s}") for s in _TERMINAL_SUFFIXES):
         raise ValueError(f"expected a terminal stage, got {stage.value!r}")
 
 
@@ -1144,6 +1195,38 @@ def _add_missing_columns(conn: sqlite3.Connection, table: str, columns: tuple[st
     for col in columns:
         if col not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+
+
+def _migrate_misfiled_statuses(conn: sqlite3.Connection) -> None:
+    """157 REQ-006: reescribe las filas ``*_FAILED`` mal-archivadas.
+
+    Una base pre-157 persiste una exclusión o un bloqueo como ``Sn_FAILED``
+    (el eje ortogonal de 148: el balde vivía sólo en ``reason_code``). Acá
+    el status pasa a llevar el sufijo de su balde vía
+    :func:`terminal_status_for`, para que todo conteo por sufijo lea bien
+    los batches viejos.
+
+    Idempotente: después de reescribir, la fila ya no es ``Sn_FAILED`` y no
+    vuelve a matchear. Sólo toca filas con una razón de balde
+    EXCLUIDO/BLOQUEADO — las ``_FAILED`` sin razón, o de balde FALLO, quedan
+    intactas. Sólo reescribe combos con un miembro real de ``StageStatus``
+    (no existe ``S4_BLOCKED`` ni ``S5_EXCLUDED``): un combo sin miembro se
+    saltea y la fila se deja como estaba.
+    """
+    for bucket, reasons in _MISFILED_REASONS_BY_BUCKET:
+        if not reasons:
+            continue
+        placeholders = ", ".join("?" * len(reasons))
+        for stage in range(1, 6):
+            try:
+                new_status = terminal_status_for(stage, bucket).value
+            except (KeyError, ValueError):
+                continue  # sin miembro para este combo — no se toca
+            conn.execute(
+                f"UPDATE migration_log SET status = ? "
+                f"WHERE status = ? AND reason_code IN ({placeholders})",
+                (new_status, f"S{stage}_FAILED", *reasons),
+            )
 
 
 def _reason_code_assignment(reason_code: ReasonCode | None) -> tuple[str, tuple[Any, ...]]:
