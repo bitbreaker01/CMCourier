@@ -29,10 +29,15 @@ def render_prep(snap: TUISnapshot, *, width: int = 76) -> str:
             f"{count:>6}  p50 {p50:>7.1f} ms  p95 {p95:>7.1f} ms"
         )
     lines.append("")
-    # 051: docs que la pipeline filtró en S1 — filas RVABREP con código
-    # de baja. No done, no skipped, no failed: correctamente excluidos
-    # en la fuente.
-    lines.append(f"  FILTERED (S1, deleted at source)  {snap.s1_filtered:>6}")
+    # 051 lo creó para UNA causa (fila RVABREP con código de baja) y la
+    # etiqueta decía "deleted at source". 148 metió en el mismo balde a
+    # EXCLUDED_BY_FILTER, SOURCE_ROW_INCOMPLETE y OUT_OF_SCOPE_RESUME sin
+    # tocar el cartel, y el operador leyó que sus 22618 documentos estaban
+    # borrados en el origen cuando en realidad su propia lista de códigos
+    # los dejaba afuera. El contador vive en memoria y NO tiene desglose
+    # por razón: la etiqueta no puede afirmar una causa que no conoce, así
+    # que nombra el balde y manda al censo, que sí la tiene.
+    lines.append(f"  EXCLUIDOS (S1 · la razón, en `batch show`)  {snap.s1_filtered:>6}")
     lines.append("")
     lines.append(" SLOW OPS (PREP, top 5)")
     prep_slow = [

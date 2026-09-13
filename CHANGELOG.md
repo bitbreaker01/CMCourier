@@ -10,6 +10,22 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Fixed
+
+- **El monitor decía "deleted at source" sobre documentos que nadie había
+  borrado.** La etiqueta `FILTERED (S1, deleted at source)` es de la spec
+  051, cuando ese estado tenía UNA sola causa. La 148 metió en el mismo
+  balde a `EXCLUDED_BY_FILTER`, `SOURCE_ROW_INCOMPLETE` y
+  `OUT_OF_SCOPE_RESUME` sin tocar el cartel. Un operador vio 22618
+  documentos ahí y entendió que su origen entero estaba dado de baja,
+  cuando en realidad su propia `triggers.filters.document_types` los
+  dejaba afuera — el origen tenía UN solo `ABACST = 'D'` en 51058 filas.
+  El contador vive en memoria y no tiene desglose por razón, así que la
+  etiqueta ahora nombra el balde (`EXCLUIDOS (S1)`) y manda a
+  `batch show`, que sí lo tiene. El estado dice DÓNDE paró; el
+  `reason_code` dice POR QUÉ. Mismo arreglo en
+  `interpret-the-tui-tabs.md` e `idempotency-and-retries.md`.
+
 ### Added
 
 - **Sincronización de verdad entre el tracking local y RVIMGLOG (151).**

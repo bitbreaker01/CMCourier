@@ -93,12 +93,12 @@ class TestRenderPrep:
         # eliminadas) afloran como una línea de primera clase — no se
         # pierden, no son un `skip`, no son un `fail`.
         out = render_prep(_baseline_snap(s1_filtered=12))
-        assert "FILTERED (S1, deleted at source)" in out
+        assert "EXCLUIDOS (S1 · la razón, en `batch show`)" in out
         assert "12" in out
 
     def test_filtered_count_zero_still_renders_line(self) -> None:
         out = render_prep(_baseline_snap())  # default `s1_filtered=0`
-        assert "FILTERED (S1, deleted at source)" in out
+        assert "EXCLUIDOS (S1 · la razón, en `batch show`)" in out
 
 
 class TestRenderUpload:

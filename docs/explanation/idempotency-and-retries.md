@@ -53,7 +53,7 @@ stateDiagram-v2
     S0_DONE --> S1_PENDING
     S1_PENDING --> S1_DONE: RVABREP found, not deleted
     S1_PENDING --> S1_SKIPPED: is_uploaded(txn_num) == True
-    S1_PENDING --> S1_FILTERED: all RVABREP rows deleted (ABACST)
+    S1_PENDING --> S1_FILTERED: excluido en S1 (ver reason_code)
     S1_PENDING --> S1_FAILED: RVABREP query fails
 
     S1_DONE --> S2_PENDING
@@ -81,7 +81,7 @@ Estados terminales (en el sentido "el doc no avanza"):
 
 - **`S5_DONE`**: éxito completo. El doc está en CM con un `cm_object_id` registrado.
 - **`S1_SKIPPED`**: ya está en `S5_DONE` por una corrida previa (cross-batch idempotency, spec 062).
-- **`S1_FILTERED`**: todas las filas RVABREP tenían `ABACST` no vacío (código de baja, spec 051). No es un error — es un doc deliberadamente excluido.
+- **`S1_FILTERED`**: el documento se excluyó en S1. No es un error — es deliberado. 051 lo creó para una sola causa (todas las filas RVABREP con `ABACST` no vacío ⇒ `DELETED_AT_SOURCE`); 148 sumó al mismo estado `EXCLUDED_BY_FILTER`, `SOURCE_ROW_INCOMPLETE` y `OUT_OF_SCOPE_RESUME`. **El estado dice dónde paró; el `reason_code` dice por qué** — no los confundas, que es justo lo que hacía la etiqueta vieja del monitor.
 - **`Sn_FAILED`**: cualquier `n`. Se puede recuperar con `cmcourier batch retry-failed`.
 
 ## La idempotencia cross-batch

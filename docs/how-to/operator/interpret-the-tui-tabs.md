@@ -41,7 +41,7 @@ S0–S4: triggers adquiridos, indexados, mapeados, metadata resuelta, PDFs ensam
   S3 METADATA  ██████████████████████░░░░░░     901   p50    24.6 ms  p95   102.3 ms
   S4 ASSEMBLY  █████████████████████░░░░░░░     880   p50   312.7 ms  p95  1822.1 ms
 
-  FILTERED (S1, deleted at source)      37
+  EXCLUIDOS (S1 · la razón, en `batch show`)      37
 
  SLOW OPS (PREP, top 5)
   1  S4           20251015-001    1822 ms
@@ -54,14 +54,14 @@ S0–S4: triggers adquiridos, indexados, mapeados, metadata resuelta, PDFs ensam
 - **Barra** — relativa al `count` máximo entre S0..S5 (no es % del total absoluto). Sirve para ver progresión relativa entre stages.
 - **count** — docs procesados por ese stage.
 - **p50 / p95** — latencias por op. p95 alto en S4 = PDFs grandes o disk slow. p95 alto en S1 = RVABREP o AS400 lento.
-- **FILTERED (S1)** — filas RVABREP con código de baja, correctamente excluidas. No son fallas.
+- **EXCLUIDOS (S1)** — documentos que S1 dejó afuera. **No son fallas**, y el contador NO dice por qué: hasta 148 este balde tenía una sola causa (`DELETED_AT_SOURCE`) y la etiqueta la nombraba; hoy junta también `EXCLUDED_BY_FILTER`, `SOURCE_ROW_INCOMPLETE` y `OUT_OF_SCOPE_RESUME`. El desglose por razón está en `cmcourier batch show`.
 - **SLOW OPS** — top 5 ops que pasaron `slow_op_threshold_ms` (default 5000 ms). Solo S1–S4.
 
 ### Qué mirar primero
 
 - Si S0 está muy por delante de S1 → la adquisición de triggers es OK pero indexing va lento (RVABREP o AS400 bottleneck).
 - Si S4 atrás de S3 con p95 alto → PDF assembly es CPU-bound. Subí `prep_workers` o activá `s4_use_processes`.
-- Mucho FILTERED → revisá si tus triggers están filtrando por codigos de baja a propósito.
+- Mucho EXCLUIDOS → corré `batch show` y mirá la razón. Si dice `EXCLUDED_BY_FILTER`, es tu propia `triggers.filters.document_types` dejándolos afuera, no el origen dándolos de baja.
 
 ## UPLOAD — tab `U`
 
