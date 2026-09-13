@@ -1210,6 +1210,13 @@ class As400SyncConfig(BaseModel):
     table: str = "NIARVILOG"
     columns: NiarvilogColumnsModel = Field(default_factory=NiarvilogColumnsModel)
     stale_in_progress_minutes: int = Field(default=30, ge=1, le=1440)
+    # ``sync status`` corre un UPDATE de housekeeping (resetea los ``'I'``
+    # vencidos). En un entorno donde el perfil no está autorizado a
+    # escribir ese objeto —un exit program tipo SafeNet/i que whitelistea
+    # por objeto y operación— ese UPDATE se rechaza. Poner esto en False NO
+    # evade el control: directamente NO intenta la operación bloqueada. El
+    # resto del `sync` (la consulta read-only de divergencias) sigue igual.
+    stale_cleanup_enabled: bool = True
     retry_attempts: int = Field(default=3, ge=1, le=10)
     retry_base_delay_s: float = Field(default=5.0, gt=0)
     mode: Literal["claim", "periodic"] = "claim"

@@ -592,6 +592,14 @@ tracking:
       finished_at_column: FINREI           # (default: "FINREI")
       error_message_column: EERRMSG        # (default: "EERRMSG")
     stale_in_progress_minutes: 30          # (default: 30)  range 1..1440
+    # stale_cleanup_enabled — `sync status` corre un UPDATE de housekeeping
+    # que resetea los STSCOD='I' vencidos. En un entorno donde el perfil no
+    # está autorizado a ESCRIBIR ese objeto (ej. un exit program SafeNet/i
+    # que whitelistea por objeto y operación) ese UPDATE se rechaza. En
+    # False el UPDATE NO se intenta — NO evade el control, directamente no
+    # corre la operación bloqueada; la consulta read-only de divergencias
+    # sigue igual. La solución de fondo es que seguridad autorice el perfil.
+    stale_cleanup_enabled: true            # (default: true)
     retry_attempts: 3                      # (default: 3)   range 1..10
     retry_base_delay_s: 5.0                # (default: 5.0) > 0
     # mode (096) — how S5 syncs with AS400:

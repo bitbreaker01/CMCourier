@@ -150,6 +150,31 @@ class TestStatus:
         sqlite.record_external_upload.assert_not_called()
         sqlite.record_external_failure.assert_not_called()
 
+    def test_status_skips_stale_cleanup_when_disabled(self) -> None:
+        """El flag NO evade SafeNet: directamente no intenta el UPDATE que
+        SafeNet bloquea. La consulta read-only del pull sigue corriendo."""
+        cfg = _config()
+        cfg.tracking.as400_sync.stale_cleanup_enabled = False
+        sqlite, as400 = MagicMock(), MagicMock()
+        as400.stream_rows_by_status.return_value = iter([])
+        with patch.object(ops, "build_sync_stores", return_value=(sqlite, as400)):
+            result = sync_status(cfg, _secrets())
+        as400.cleanup_stale_in_progress.assert_not_called()
+        assert result.stale_cleanup_skipped is True
+        assert result.stale_cleaned == 0
+
+    def test_status_runs_stale_cleanup_when_enabled_default(self) -> None:
+        cfg = _config()
+        cfg.tracking.as400_sync.stale_cleanup_enabled = True
+        sqlite, as400 = MagicMock(), MagicMock()
+        as400.cleanup_stale_in_progress.return_value = 2
+        as400.stream_rows_by_status.return_value = iter([])
+        with patch.object(ops, "build_sync_stores", return_value=(sqlite, as400)):
+            result = sync_status(cfg, _secrets())
+        as400.cleanup_stale_in_progress.assert_called_once()
+        assert result.stale_cleanup_skipped is False
+        assert result.stale_cleaned == 2
+
     def test_status_unavailable_raises(self) -> None:
         with pytest.raises(SyncOpError, match="as400_sync"):
             sync_status(_config(enabled=False), _secrets())

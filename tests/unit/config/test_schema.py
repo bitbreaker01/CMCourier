@@ -958,6 +958,15 @@ class TestAs400SyncConfig:
         assert cfg.retry_base_delay_s == 5.0
         # When disabled, connection is allowed to be None.
         assert cfg.connection is None
+        # El cleanup de stale corre por default; se apaga en entornos donde
+        # el perfil no está autorizado a tocar el objeto (ej. SafeNet).
+        assert cfg.stale_cleanup_enabled is True
+
+    def test_stale_cleanup_can_be_disabled(self) -> None:
+        from cmcourier.config.schema import As400SyncConfig
+
+        cfg = As400SyncConfig(stale_cleanup_enabled=False)
+        assert cfg.stale_cleanup_enabled is False
 
     def test_enabled_requires_connection(self) -> None:
         from cmcourier.config.schema import As400SyncConfig

@@ -47,9 +47,39 @@ tracking:
       status_column: ESTADO
       txn_num_column: NUMTRX
     stale_in_progress_minutes: 30            # cleanup de filas STSCOD='I'
+    stale_cleanup_enabled: true              # ver "SafeNet" abajo
     retry_attempts: 3                        # OperationalError transient
     retry_base_delay_s: 5.0                  # exponential backoff
 ```
+
+### SafeNet/i rechaza el cleanup (`PWS9801`)
+
+Si `sync status` falla con:
+
+```
+PWS9801 - Function rejected by user exit program SAFENET in PCSECLIB
+```
+
+el iSeries corre un exit program de seguridad (SafeNet/i) que
+whitelistea objetos **por perfil y por operación**, y tu perfil no está
+autorizado a **escribir** la tabla de log. `sync status` corre un UPDATE
+de housekeeping (resetea los `STSCOD='I'` vencidos) y ese UPDATE es el
+que se rechaza.
+
+**La solución de fondo es pedirle a seguridad que autorice el perfil**
+sobre ese objeto — es el permiso que vas a necesitar en producción de
+todas formas. Mientras tanto, `stale_cleanup_enabled: false` hace que
+`sync status` **no intente** ese UPDATE (reporta `stale_cleanup=off`); la
+consulta read-only de divergencias sigue corriendo.
+
+> ⚠️ Esto **no evade SafeNet**: no genera SQL deforme ni disfraza el
+> objeto para pasar por al lado del control — simplemente no ejecuta la
+> operación que el control bloquea. El resto del `sync` que escribe en la
+> tabla (`recover --apply`, `pull --apply`) **va a seguir rechazado**
+> hasta que el perfil esté autorizado; no hay forma honesta de saltear
+> eso, y cualquier truco para hacerlo (un espacio en el nombre del
+> objeto, por ejemplo) rompería en producción, donde el nombre va pegado.
+> Si necesitás escribir la tabla, el camino es el permiso, no el rodeo.
 
 Las credenciales viven en env vars (igual que el trigger AS400):
 ``AS400_USERNAME``, ``AS400_PASSWORD``.

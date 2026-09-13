@@ -263,8 +263,13 @@ class SyncPane(VerticalScroll):
     def _log_status(self, result: StatusResult) -> None:
         """151 REQ-005: el estado REPORTA las divergencias. Antes decía que
         lo hacía y sólo limpiaba los ``'I'`` vencidos."""
+        stale = (
+            "cleanup off"
+            if result.stale_cleanup_skipped
+            else f"stale_cleaned={result.stale_cleaned}"
+        )
         lines = [
-            f"✔ estado: stale_cleaned={result.stale_cleaned} "
+            f"✔ estado: {stale} "
             f"escaneadas={result.scanned} importables={result.importable} "
             f"divergentes={len(result.divergences)} · AS400 responde"
         ]

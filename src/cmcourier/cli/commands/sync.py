@@ -133,8 +133,13 @@ def status_command(config_path: Path) -> None:
     """
     config, secrets = _load(config_path)
     result = _run(lambda: sync_status(config, secrets, on_progress=_echo_progress))
+    stale = (
+        "stale_cleanup=off"
+        if result.stale_cleanup_skipped
+        else f"stale_cleaned={result.stale_cleaned}"
+    )
     click.echo(
-        f"sync status: stale_cleaned={result.stale_cleaned} "
+        f"sync status: {stale} "
         f"escaneadas={result.scanned} importables={result.importable} "
         f"divergentes={len(result.divergences)}"
     )

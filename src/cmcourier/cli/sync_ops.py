@@ -60,6 +60,10 @@ class StatusResult:
     scanned: int = 0
     importable: int = 0
     divergences: list[PullItem] = field(default_factory=list)
+    #: True cuando ``tracking.as400_sync.stale_cleanup_enabled`` está en
+    #: False: el UPDATE de housekeeping NO se intentó (no se contó como 0
+    #: limpiadas — no se corrió).
+    stale_cleanup_skipped: bool = False
 
 
 def sync_unavailable_reason(config: PipelineConfig, secrets: Secrets) -> str | None:
@@ -116,9 +120,10 @@ def sync_status(
     escribe una sola fila del tracking local. Lo único que muta es el
     cleanup de los ``'I'`` vencidos, que es idempotente y ya estaba."""
     _require_available(config, secrets)
+    cleanup_enabled = config.tracking.as400_sync.stale_cleanup_enabled
     sqlite, as400 = build_sync_stores(config, secrets)
     try:
-        stale = as400.cleanup_stale_in_progress()
+        stale = as400.cleanup_stale_in_progress() if cleanup_enabled else 0
         report = As400Pull(sqlite_store=sqlite, as400_store=as400).pull(
             apply=False, on_progress=on_progress
         )
@@ -127,6 +132,7 @@ def sync_status(
             scanned=report.scanned,
             importable=report.imported_uploaded + report.imported_failed,
             divergences=report.divergent,
+            stale_cleanup_skipped=not cleanup_enabled,
         )
     finally:
         sqlite.close()

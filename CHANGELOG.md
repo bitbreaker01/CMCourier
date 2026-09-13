@@ -10,6 +10,20 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ## [Unreleased]
 
+### Added
+
+- **`tracking.as400_sync.stale_cleanup_enabled` (default `true`).** En
+  `false`, `sync status` no corre el UPDATE de housekeeping que resetea
+  los `STSCOD='I'` vencidos. Es para entornos donde el perfil no está
+  autorizado a escribir el objeto de log —un exit program tipo SafeNet/i
+  que whitelistea por objeto y operación devuelve `PWS9801 - Function
+  rejected by user exit program`—, para poder correr la consulta
+  read-only de divergencias sin chocar con el UPDATE bloqueado. **No
+  evade el control**: no intenta la operación que el control bloquea, y
+  el resto del sync que escribe la tabla (`recover`/`pull --apply`) sigue
+  requiriendo que seguridad autorice el perfil. Ver
+  [`docs/how-to/as400-sync.md`](docs/how-to/as400-sync.md).
+
 ### Fixed
 
 - **`0 fallidos` en verde con diez documentos muertos en S2 (155).** Una

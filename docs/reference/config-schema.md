@@ -646,6 +646,7 @@ Validators:
 | `table` | str | `"NIARVILOG"` | DB2 identifier | — |
 | `columns` | `NiarvilogColumnsModel` | factory | — | Mapeo lógico → físico. |
 | `stale_in_progress_minutes` | int | `30` | `1..1440` | Threshold para reclamar filas stale. |
+| `stale_cleanup_enabled` | bool | `true` | — | En `false`, `sync status` NO corre el UPDATE de housekeeping. Para perfiles sin permiso de escritura sobre el objeto (ej. SafeNet/i). No evade el control: no intenta la operación bloqueada. |
 | `retry_attempts` | int | `3` | `1..10` | — |
 | `retry_base_delay_s` | float | `5.0` | `> 0` | — |
 | `mode` | `Literal["claim", "periodic"]` | `"claim"` | — | `claim` = sync atómico por-doc (034); `periodic` = reconciliador de fondo (096). |
