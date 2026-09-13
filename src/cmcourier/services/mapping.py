@@ -23,7 +23,7 @@ adapters.
 
 from __future__ import annotations
 
-__all__ = ["MappingColumnsConfig", "MappingService"]
+__all__ = ["MappingColumnsConfig", "MappingService", "mapping_from_entry"]
 
 import logging
 from collections.abc import Iterator
@@ -137,7 +137,7 @@ def _norm_system(value: object) -> str:
     return str(value).strip().lower()
 
 
-def _mapping_from_entry(entry: CmTypeEntry, id_rvi: str) -> CMMapping:
+def mapping_from_entry(entry: CmTypeEntry, id_rvi: str = "") -> CMMapping:
     """145 REQ-001: proyecta una entrada del manifest a un :class:`CMMapping`.
 
     Todo lo que antes salía de ``MetadatosCM.csv`` sale ahora del
@@ -277,7 +277,7 @@ class MappingService:
                 continue
 
             system = _norm_system(row.get(self._columns.col_rvi_cm_id_sistema))
-            mapping = _mapping_from_entry(entry, id_rvi)
+            mapping = mapping_from_entry(entry, id_rvi)
             if (system, id_rvi) in self._cache:
                 _logger.warning(
                     "duplicate mapping key (system=%r, ID RVI=%r) dropped (first occurrence wins)",

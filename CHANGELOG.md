@@ -12,6 +12,38 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- **Probar TODOS los tipos configurados en `[0] PRUEBA` (158).** Sección
+  nueva en la pestaña `[0]`: en vez de UN código a la vez (141), sube un
+  documento por cada tipo y llena una tabla en vivo `IDCM · tipo ·
+  OK/FALLA · razón`, con la razón CRUDA de CM en las fallas — exactamente
+  el dato que permite arreglar un metadato que el server rechaza en un
+  tipo puntual, el error que se escapa si no los probás todos antes de una
+  migración de miles. Cierra con `N OK · M FALLA`; una sola falla NO se
+  anuncia en verde. **Los metadatos se piden UNA vez por campo distinto**
+  (`distinct_fields`): se toma la unión de los nombres canónicos de las
+  propiedades `usar` de todos los tipos y se pide un valor por campo, que
+  se reusa en cada tipo que lo usa (diez campos ⇒ diez preguntas, aunque
+  se suban miles); al lado de cada campo se muestra en cuántos tipos se
+  usa. **Un solo PDF, generado al vuelo** (`build_marked_pdf` /
+  `build_text_pdf`): se genera una vez con la marca de la prueba LEGIBLE
+  adentro (fecha, operador, estación, entorno) y sus bytes se reusan como
+  cuerpo de todos los uploads — lo que cambia por tipo es el nombre
+  (`PRUEBA-<IDCM>-<ts>.pdf`), la carpeta, el object type y los metadatos.
+  **Alcance**: por defecto los `IDCM` que una migración real tocaría (los
+  del `MapeoRVI_CM` que resuelven en el manifest); un toggle "incluir
+  tipos no mapeados" agrega el resto del manifest con al menos una
+  propiedad `usar`. **Limpieza**: cada upload exitoso deja su
+  `cm_object_id` y el botón "borrar los de prueba"
+  (`delete_practice_objects`) los borra todos en lote reusando el borrado
+  de 141; un fallo individual no aborta el resto y los que quedaron se
+  listan para limpiar a mano. No toca `migration_log` ni idempotencia —
+  invisible al pipeline. Reusa `run_practice_upload` (con un parámetro
+  `content` nuevo para compartir el PDF), `build_properties`,
+  `document_name` y `mapping_from_entry`. La lógica pura vive en
+  `services/practice_all.py`; la pantalla sólo pinta y corre el worker
+  (secuencial, con `stop` cooperativo). Ver
+  [`docs/how-to/operator/probar-todos-los-tipos.md`](docs/how-to/operator/probar-todos-los-tipos.md).
+
 - **`tracking.as400_sync.stale_cleanup_enabled` (default `true`).** En
   `false`, `sync status` no corre el UPDATE de housekeeping que resetea
   los `STSCOD='I'` vencidos. Es para entornos donde el perfil no está

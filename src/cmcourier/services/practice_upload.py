@@ -38,6 +38,7 @@ from cmcourier.domain.models import CMMapping, RawResponse, StagedFile
 from cmcourier.domain.ports import PracticeUploadPort
 from cmcourier.services.mock.synthetic_file import (
     EXTENSIONS,
+    SyntheticFile,
     SyntheticFormat,
     build_synthetic_file,
 )
@@ -159,8 +160,14 @@ def run_practice_upload(
     *,
     workdir: Path,
     now: datetime,
+    content: SyntheticFile | None = None,
 ) -> PracticeResult:
     """141 REQ-004: genera el archivo, lo sube y lo borra del disco.
+
+    158 REQ-003: si *content* viene dado se reusa tal cual como cuerpo (los
+    MISMOS bytes) en vez de generarlo — el modo "probar todos los tipos"
+    genera UN solo PDF y lo comparte entre N uploads; sólo el nombre, la
+    carpeta, el object type y los metadatos cambian por tipo.
 
     141 antagonista I4 + M4: cada llamada obtiene su PROPIO directorio
     temporal (``tempfile.mkdtemp``) en lugar de escribir directo en
@@ -175,7 +182,11 @@ def run_practice_upload(
     workdir.mkdir(parents=True, exist_ok=True)
     tmp_dir = Path(tempfile.mkdtemp(prefix="practice-", dir=workdir))
     try:
-        synthetic = build_synthetic_file(draft.fmt, draft.size_bytes, name)
+        synthetic = (
+            content
+            if content is not None
+            else build_synthetic_file(draft.fmt, draft.size_bytes, name)
+        )
         path = tmp_dir / name
         path.write_bytes(synthetic.content)
         response = uploader.upload_raw(

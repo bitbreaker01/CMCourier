@@ -21,19 +21,24 @@ __all__ = ["PracticePane"]
 
 import contextlib
 import difflib
+import getpass
 import json
+import platform
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.widgets import Button, Input, Label, Select, Static, TextArea
+from textual.widgets import Button, DataTable, Input, Label, Select, Static, TextArea
 
+from cmcourier.adapters.manifest.json_store import JsonTypeManifestStore
 from cmcourier.cli.doctor import build_uploader
 from cmcourier.config.wiring import build_mapping_service
+from cmcourier.domain.cm_types import CmTypeManifest
 from cmcourier.domain.models import CMMapping
 from cmcourier.services.mapping import MappingService
 from cmcourier.services.mock.sizing import parse_size
@@ -41,6 +46,16 @@ from cmcourier.services.mock.synthetic_file import (
     MAX_SIZE_BYTES,
     MIN_SIZE_BYTES,
     SyntheticFormat,
+)
+from cmcourier.services.practice_all import (
+    FieldPrompt,
+    PracticeType,
+    TypeOutcome,
+    build_marked_pdf,
+    build_practice_types,
+    delete_practice_objects,
+    distinct_fields,
+    run_practice_all,
 )
 from cmcourier.services.practice_upload import (
     PracticeDraft,
@@ -62,6 +77,16 @@ _FORMATS: list[tuple[str, str]] = [
 ]
 _MAX_HISTORY = 20
 _MAX_SUGGESTIONS = 5
+_SCOPES: list[tuple[str, str]] = [
+    ("sólo los tipos mapeados (recomendado)", "mapped"),
+    ("incluir tipos no mapeados del manifest", "all"),
+]
+_ALL_HINT = (
+    "Sube UN documento por cada tipo configurado y muestra cuáles suben y "
+    "cuáles no, con la razón CRUDA de CM. Los metadatos se piden UNA vez por "
+    "campo distinto y se reusan en cada tipo. Mismo cuerpo (un PDF) para "
+    "todos; el prefijo PRUEBA- los distingue. No pasa por tracking."
+)
 _HINT = (
     "Un tiro de prueba: UN documento sintético a un código CM, sin reintentos, "
     "con la respuesta cruda del servidor. NO pasa por tracking ni por "
@@ -105,6 +130,13 @@ class PracticePane(VerticalScroll):
     PracticePane #result { height: 16; }
     PracticePane #history { height: auto; }
     PracticePane .hrow { height: auto; }
+    PracticePane .allsep { margin-top: 1; border-top: solid $surface-lighten-2; }
+    PracticePane #all-meta { height: auto; }
+    PracticePane #all-meta Label { width: 34; color: $text-muted; padding-top: 1; }
+    PracticePane #all-meta Input { width: 40; }
+    PracticePane #all-results { height: auto; max-height: 20; }
+    PracticePane #all-summary { text-style: bold; }
+    PracticePane #all-survivors { height: auto; }
     """
 
     def __init__(self, console: ConsoleApp) -> None:
@@ -115,6 +147,14 @@ class PracticePane(VerticalScroll):
         self._row_index = 0
         self._busy = False
         self.history: list[Attempt] = []
+        # 158: estado de "probar todos los tipos".
+        self._all_types: tuple[PracticeType, ...] = ()
+        self._all_prompts: tuple[FieldPrompt, ...] = ()
+        self._all_busy = False
+        self._all_stop = False
+        self.all_outcomes: list[TypeOutcome] = []
+        self._all_object_ids: list[str] = []
+        self._all_survivors: list[str] = []
 
     # ------------------------------------------------------------ layout
 
@@ -145,10 +185,34 @@ class PracticePane(VerticalScroll):
             yield TextArea("", id="result", read_only=True)
             yield Static("intentos de esta sesión (máx. 20)", classes="section")
             yield Vertical(id="history")
+            yield from self._compose_all_types()
+
+    def _compose_all_types(self) -> ComposeResult:
+        """158: la sección "probar todos los tipos" — un tiro por cada tipo
+        configurado, metadatos pedidos una vez por campo distinto."""
+        yield Static("probar todos los tipos", classes="section allsep")
+        yield Static(_ALL_HINT, classes="hint", id="all-hint")
+        with Horizontal(classes="frow"):
+            yield Label("alcance")
+            yield Select(_SCOPES, value="mapped", id="all-scope", allow_blank=False)
+            yield Button("cargar tipos", id="all-load")
+        yield Static("", id="all-info", markup=False)
+        yield Static("metadatos (uno por campo distinto)", classes="section", id="all-meta-title")
+        yield Vertical(id="all-meta")
+        with Horizontal(classes="frow"):
+            yield Button("probar todos (subir)", variant="primary", id="all-run")
+            yield Button("detener", id="all-stop")
+            yield Button("borrar los de prueba", id="all-delete")
+        yield Static("", id="all-summary", markup=False)
+        yield DataTable(id="all-results", cursor_type="row", zebra_stripes=True)
+        yield Static("", classes="warn", id="all-survivors", markup=False)
 
     def on_mount(self) -> None:
         self._load_mapping()
         self.query_one("#target").display = False
+        self.query_one("#all-results", DataTable).add_columns("IDCM", "TIPO", "ESTADO", "RAZÓN")
+        self.query_one("#all-meta-title").display = False
+        self._sync_all_buttons()
 
     # ------------------------------------------------------------ mapping
 
@@ -627,6 +691,18 @@ class PracticePane(VerticalScroll):
         elif bid == "upload":
             event.stop()
             self.request_upload()
+        elif bid == "all-load":
+            event.stop()
+            self.load_all_types()
+        elif bid == "all-run":
+            event.stop()
+            self.request_all_upload()
+        elif bid == "all-stop":
+            event.stop()
+            self.request_all_stop()
+        elif bid == "all-delete":
+            event.stop()
+            self.request_all_delete()
         elif bid.startswith("del-"):
             event.stop()
             self.request_delete(int(bid.removeprefix("del-")))
@@ -652,6 +728,271 @@ class PracticePane(VerticalScroll):
             return
         self._row_index = new_index
         self.call_later(self.render_target)
+
+    # -------------------------------------------------- 158: probar todos
+
+    def all_type_count(self) -> int:
+        """La cantidad de tipos cargados (para el operador y los tests)."""
+        return len(self._all_types)
+
+    def distinct_field_names(self) -> tuple[str, ...]:
+        """Los campos distintos que se le piden al operador (REQ-002)."""
+        return tuple(prompt.name for prompt in self._all_prompts)
+
+    def _guard_all_busy(self) -> bool:
+        if self._all_busy:
+            self.console.notify(
+                "esperá — la prueba de todos los tipos está en curso", severity="warning"
+            )
+        return self._all_busy
+
+    def _all_manifest(self) -> CmTypeManifest | None:
+        """El manifest de tipos del YAML, para el alcance "incluir no mapeados".
+
+        Sólo el modo manifest lo tiene; en consolidado / split es ``None`` y
+        el toggle no agrega tipos (no hay contra qué expandir)."""
+        model = getattr(self.console.effective_config(), "mapping", None)
+        path = getattr(model, "type_manifest_path", None)
+        if not path:
+            return None
+        try:
+            store = JsonTypeManifestStore(Path(str(path)))
+            return store.load() if store.exists() else None
+        except Exception:  # noqa: BLE001 — un manifest ilegible no rompe el alcance mapeado
+            return None
+
+    def load_all_types(self) -> None:
+        """158 REQ-001/002: arma la lista de tipos y el formulario de campos."""
+        if self._service is None or self._guard_all_busy():
+            return
+        include = str(self.query_one("#all-scope", Select).value) == "all"
+        manifest = self._all_manifest() if include else None
+        self._all_types = build_practice_types(self._service, manifest, include_unmapped=include)
+        self._all_prompts = distinct_fields(self._all_types)
+        self._render_all_info(include=include, manifest=manifest)
+        self.call_later(self._render_all_meta)
+        self._sync_all_buttons()
+
+    def _render_all_info(self, *, include: bool, manifest: CmTypeManifest | None) -> None:
+        mapped = sum(1 for t in self._all_types if t.mapped)
+        extra = len(self._all_types) - mapped
+        tail = f" (+{extra} no mapeados)" if extra else ""
+        text = (
+            f"{len(self._all_types)} tipos{tail} · "
+            f"{len(self._all_prompts)} campos distintos a completar"
+        )
+        if include and manifest is None:
+            text += " · (esta config no usa manifest de tipos)"
+        self.query_one("#all-info", Static).update(text)
+
+    async def _render_all_meta(self) -> None:
+        """Un ``Input`` por campo distinto, con en cuántos tipos se usa."""
+        self.query_one("#all-meta-title").display = bool(self._all_prompts)
+        meta = self.query_one("#all-meta", Vertical)
+        await meta.remove_children()
+        rows: list[Any] = []
+        for index, prompt in enumerate(self._all_prompts):
+            plural = "s" if prompt.type_count != 1 else ""
+            label = f"{prompt.name} (usado en {prompt.type_count} tipo{plural})"
+            rows.append(Horizontal(Label(label), Input(id=f"a-{index}"), classes="frow"))
+        if not rows and self._all_types:
+            rows.append(Static("estos tipos no declaran metadatos requeridos"))
+        if rows:
+            await meta.mount_all(rows)
+
+    def _all_values(self) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for index, prompt in enumerate(self._all_prompts):
+            with contextlib.suppress(NoMatches):
+                values[prompt.name] = self.query_one(f"#a-{index}", Input).value
+        return values
+
+    def request_all_upload(self) -> None:
+        """158 REQ-004: las guardas y la confirmación antes de subir todos."""
+        if self._service is None or self._guard_all_busy():
+            return
+        if not self._all_types:
+            self.console.notify("Cargá primero los tipos con «cargar tipos»", severity="warning")
+            return
+        if self.console.run_active:
+            self.console.notify("hay una corrida activa — probá cuando termine", severity="warning")
+            return
+        if not self.console.state.creds_ready(required=("cmis",)):
+            self.console.notify(
+                "Sin credenciales frescas de sesión — cargalas en [2]", severity="error"
+            )
+            self.console.action_switch_tab("credenciales")
+            return
+        prd = self.console.config.environment == "prd"
+        self.console.confirm(
+            title="Probar todos los tipos",
+            body=f"Se sube 1 documento PRUEBA- por cada uno de {len(self._all_types)} tipos al CM.",
+            yes="subir todos",
+            no="cancelar",
+            danger=prd,
+            confirm_text="PRD" if prd else None,
+            cb=lambda ok: self._start_all_upload() if ok else None,
+        )
+
+    def _start_all_upload(self) -> None:
+        self._set_all_busy(True)
+        self._all_stop = False
+        self.all_outcomes = []
+        self._all_object_ids = []
+        self.query_one("#all-results", DataTable).clear()
+        self.query_one("#all-summary", Static).update("probando…")
+        self.query_one("#all-survivors", Static).update("")
+        config = self.console.effective_config()
+        secrets = self.console.state.creds.to_secrets()
+        workdir = config.assembly.temp_dir
+        types, values, now = self._all_types, self._all_values(), datetime.now()
+        content = build_marked_pdf(
+            operator=getpass.getuser(),
+            station=platform.node(),
+            environment=config.environment,
+            now=now,
+        )
+
+        def work() -> None:
+            error: str | None = None
+            try:
+                uploader = build_uploader(config, secrets)
+                for outcome in run_practice_all(
+                    types,
+                    values,
+                    uploader,
+                    workdir=workdir,
+                    now=now,
+                    content=content,
+                    should_stop=lambda: self._all_stop,
+                ):
+                    self.console._apply_on_ui(self._apply_all_outcome, outcome)
+            except Exception as exc:  # noqa: BLE001 — el worker nunca revienta la UI
+                error = f"{type(exc).__name__}: {exc}"
+            self.console._apply_on_ui(self._finish_all_upload, error)
+
+        self.console.run_worker(work, thread=True, exclusive=False, exit_on_error=False)
+
+    def _apply_all_outcome(self, outcome: TypeOutcome) -> None:
+        self.all_outcomes.append(outcome)
+        if outcome.ok and outcome.object_id:
+            self._all_object_ids.append(outcome.object_id)
+        estado = "✔ OK" if outcome.ok else "✖ FALLA"
+        with contextlib.suppress(NoMatches):
+            self.query_one("#all-results", DataTable).add_row(
+                outcome.id_corto, outcome.display_name, estado, outcome.reason
+            )
+
+    def _finish_all_upload(self, error: str | None) -> None:
+        self._set_all_busy(False)
+        with contextlib.suppress(NoMatches):
+            if error is not None:
+                self.query_one("#all-summary", Static).update(f"✘ {error}")
+                self.console.notify(error, severity="error", timeout=10)
+                return
+            ok = sum(1 for outcome in self.all_outcomes if outcome.ok)
+            failed = len(self.all_outcomes) - ok
+            stopped = " · detenido" if self._all_stop else ""
+            self.query_one("#all-summary", Static).update(f"{ok} OK · {failed} FALLA{stopped}")
+            # REQ-004: si hubo fallas NO se anuncia en verde.
+            self.console.notify(
+                f"probar todos: {ok} OK · {failed} FALLA",
+                severity="warning" if failed else "information",
+            )
+
+    def request_all_stop(self) -> None:
+        """Stop cooperativo: corta antes del próximo tipo (REQ-004)."""
+        if self._all_busy:
+            self._all_stop = True
+            self.console.notify("deteniendo tras el tipo en curso…", severity="warning")
+
+    def request_all_delete(self) -> None:
+        """158 REQ-005: borra en lote los documentos que subió la prueba."""
+        if self._guard_all_busy():
+            return
+        if not self._all_object_ids:
+            self.console.notify("No hay documentos de prueba para borrar", severity="warning")
+            return
+        if self.console.run_active:
+            self.console.notify("hay una corrida activa — probá cuando termine", severity="warning")
+            return
+        if not self.console.state.creds_ready(required=("cmis",)):
+            self.console.notify(
+                "Sin credenciales frescas de sesión — cargalas en [2]", severity="error"
+            )
+            self.console.action_switch_tab("credenciales")
+            return
+        prd = self.console.config.environment == "prd"
+        self.console.confirm(
+            title="Borrar los documentos de prueba",
+            body=(
+                f"Se borran del CM los {len(self._all_object_ids)} documentos que subió la prueba."
+            ),
+            yes="borrar todos",
+            no="cancelar",
+            danger=True,
+            confirm_text="PRD" if prd else None,
+            cb=lambda ok: self._start_all_delete() if ok else None,
+        )
+
+    def _start_all_delete(self) -> None:
+        self._set_all_busy(True)
+        object_ids = list(self._all_object_ids)
+        config = self.console.effective_config()
+        secrets = self.console.state.creds.to_secrets()
+        self.query_one("#all-summary", Static).update("borrando…")
+
+        def work() -> None:
+            error: str | None = None
+            deleted: list[str] = []
+            survivors: list[str] = []
+            try:
+                uploader = build_uploader(config, secrets)
+                for outcome in delete_practice_objects(object_ids, uploader):
+                    (deleted if outcome.ok else survivors).append(outcome.object_id)
+            except Exception as exc:  # noqa: BLE001 — el worker nunca revienta la UI
+                error = f"{type(exc).__name__}: {exc}"
+            self.console._apply_on_ui(self._finish_all_delete, deleted, survivors, error)
+
+        self.console.run_worker(work, thread=True, exclusive=False, exit_on_error=False)
+
+    def _finish_all_delete(
+        self, deleted: list[str], survivors: list[str], error: str | None
+    ) -> None:
+        self._set_all_busy(False)
+        with contextlib.suppress(NoMatches):
+            if error is not None:
+                self.query_one("#all-summary", Static).update(f"✘ {error}")
+                self.console.notify(error, severity="error", timeout=10)
+                return
+            # Los que no se pudieron borrar quedan pendientes para reintentar.
+            self._all_object_ids = list(survivors)
+            self._all_survivors = list(survivors)
+            self.query_one("#all-summary", Static).update(
+                f"borrados {len(deleted)} · quedaron {len(survivors)}"
+            )
+            self.query_one("#all-survivors", Static).update(
+                ("no se pudieron borrar (limpialos a mano): " + ", ".join(survivors))
+                if survivors
+                else ""
+            )
+            self.console.notify(
+                f"borrado: {len(deleted)} ok · {len(survivors)} fallaron",
+                severity="warning" if survivors else "information",
+            )
+        self._sync_all_buttons()
+
+    def _set_all_busy(self, busy: bool) -> None:
+        self._all_busy = busy
+        self._sync_all_buttons()
+
+    def _sync_all_buttons(self) -> None:
+        busy = self._all_busy
+        with contextlib.suppress(NoMatches):
+            self.query_one("#all-load", Button).disabled = busy
+            self.query_one("#all-run", Button).disabled = busy or not self._all_types
+            self.query_one("#all-stop", Button).disabled = not busy
+            self.query_one("#all-delete", Button).disabled = busy or not self._all_object_ids
 
 
 def _probe(call: Any) -> str:

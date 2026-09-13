@@ -266,6 +266,35 @@ class TestRunPracticeUpload:
         assert result_a.name == result_b.name  # mismo nombre lógico
         assert list(tmp_path.rglob("*")) == []  # nada quedó atrás
 
+    # -------------------------------------------------------------- 158 REQ-003
+    # ``content`` pre-generado: los MISMOS bytes se reusan como cuerpo, sin
+    # llamar al generador sintético (que en all-types se corre UNA vez).
+
+    def test_reuses_provided_content_without_regenerating(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import cmcourier.services.practice_upload as mod
+        from cmcourier.services.mock.synthetic_file import SyntheticFile
+
+        def _boom(*a: object, **k: object) -> SyntheticFile:
+            raise AssertionError("no debe regenerar el archivo cuando hay content")
+
+        monkeypatch.setattr(mod, "build_synthetic_file", _boom)
+        shared = SyntheticFile(
+            content=b"%PDF-1.4 shared bytes", mime_type="application/pdf", extension=".pdf"
+        )
+        uploader = _FakeUploader()
+
+        result = run_practice_upload(
+            self._draft(), uploader, workdir=tmp_path, now=_NOW, content=shared
+        )
+
+        staged, _folder, _ot, _name, mime, _props = uploader.calls[0]
+        assert staged.size_bytes == len(shared.content)
+        assert mime == "application/pdf"
+        assert result.size_bytes == len(shared.content)
+        assert list(tmp_path.iterdir()) == []
+
     def test_write_bytes_failure_leaves_nothing_in_workdir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -28,9 +28,11 @@ __all__ = [
     "SizeMix",
     "SyntheticPdfProvider",
     "build_synthetic_pdf",
+    "build_text_pdf",
 ]
 
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from cmcourier.domain.exceptions import ConfigurationError
@@ -119,7 +121,16 @@ def build_synthetic_pdf(content_bytes: int, marker: str) -> bytes:
         + b"\nendstream",
         b"<< /Producer (CMCourier 102 synthetic stress content) >>",
     ]
+    return _assemble_pdf(objects, root=1, info=5)
 
+
+def _assemble_pdf(objects: list[bytes], *, root: int, info: int | None = None) -> bytes:
+    """Ensambla los cuerpos de objeto en un PDF con su ``xref`` y ``trailer``.
+
+    Compartido por :func:`build_synthetic_pdf` (con un objeto ``/Info``) y
+    :func:`build_text_pdf` (sin ``/Info``). ``root`` / ``info`` son los
+    números de objeto (1-based) del catálogo y del diccionario de info.
+    """
     out = bytearray(_HEADER)
     offsets: list[int] = []
     for index, body in enumerate(objects, start=1):
@@ -132,15 +143,50 @@ def build_synthetic_pdf(content_bytes: int, marker: str) -> bytes:
     out += b"0000000000 65535 f \n"
     for offset in offsets:
         out += f"{offset:010d} 00000 n \n".encode("ascii")
-    out += (
+    trailer = (
         b"trailer\n<< /Size "
         + str(size).encode("ascii")
-        + b" /Root 1 0 R /Info 5 0 R >>\n"
-        + b"startxref\n"
-        + str(xref_pos).encode("ascii")
-        + b"\n%%EOF"
+        + b" /Root "
+        + str(root).encode("ascii")
+        + b" 0 R"
     )
+    if info is not None:
+        trailer += b" /Info " + str(info).encode("ascii") + b" 0 R"
+    out += trailer + b" >>\nstartxref\n" + str(xref_pos).encode("ascii") + b"\n%%EOF"
     return bytes(out)
+
+
+def _pdf_escape(line: str) -> bytes:
+    """Escapa un literal de string PDF y lo codifica en WinAnsi (cp1252)."""
+    escaped = line.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+    return escaped.encode("cp1252", "replace")
+
+
+def build_text_pdf(lines: Sequence[str]) -> bytes:
+    """158 REQ-003: PDF de una página con *lines* como texto LEGIBLE.
+
+    Usa Helvetica (font base 14, sin embeber) con ``WinAnsiEncoding``, así
+    que acentos y guión largo se ven en cualquier visor. Cada línea es un
+    literal de string PDF escapado: abrir el documento en Content Manager
+    muestra la marca de la prueba sin depender del nombre del archivo.
+    """
+    body = [b"BT", b"/F1 12 Tf", b"14 TL", b"72 760 Td"]
+    body.extend(b"(" + _pdf_escape(line) + b") Tj T*" for line in lines)
+    body.append(b"ET")
+    stream_data = b"\n".join(body)
+    objects: list[bytes] = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length "
+        + str(len(stream_data)).encode("ascii")
+        + b" >>\nstream\n"
+        + stream_data
+        + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    ]
+    return _assemble_pdf(objects, root=1)
 
 
 class SyntheticPdfProvider:

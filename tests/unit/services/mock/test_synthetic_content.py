@@ -15,9 +15,42 @@ from cmcourier.services.mock.synthetic_content import (
     SizeMix,
     SyntheticPdfProvider,
     build_synthetic_pdf,
+    build_text_pdf,
 )
 
 pytestmark = pytest.mark.unit
+
+
+class TestBuildTextPdf:
+    """158 REQ-003: un PDF de una página con texto LEGIBLE embebido."""
+
+    _LINES = (
+        "PRUEBA DE CARGA - CMCourier",
+        "No es un documento de migracion real.",
+        "Generado: 2026-08-31T10:00:00",
+        "Operador:  jdoe",
+    )
+
+    def test_is_a_valid_single_page_pdf(self) -> None:
+        reader = PdfReader(BytesIO(build_text_pdf(self._LINES)))
+        assert len(reader.pages) == 1
+
+    def test_text_is_extractable(self) -> None:
+        reader = PdfReader(BytesIO(build_text_pdf(self._LINES)))
+        text = reader.pages[0].extract_text().replace(" ", "")
+        assert "PRUEBADECARGA" in text
+        assert "CMCourier" in text
+        assert "jdoe" in text
+
+    def test_escapes_pdf_string_metacharacters(self) -> None:
+        # Paréntesis y backslash sin escapar rompen el content stream.
+        pdf = build_text_pdf(("Operador: (raro) C:\\temp",))
+        assert len(PdfReader(BytesIO(pdf)).pages) == 1
+
+    def test_starts_with_pdf_header_and_ends_with_eof(self) -> None:
+        pdf = build_text_pdf(self._LINES)
+        assert pdf.startswith(b"%PDF-")
+        assert pdf.rstrip().endswith(b"%%EOF")
 
 
 class TestBuildSyntheticPdf:
